@@ -19,7 +19,6 @@ INCLUDE_PATTERNS = [
     '*.css',
     '*.scss',
     '*.md',
-    '*.json',
     '*.yaml',
     '*.yml',
     'Dockerfile',

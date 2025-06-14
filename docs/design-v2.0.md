@@ -179,4 +179,86 @@ CodeWiki 是一个旨在将软件设计文档的生成和维护自动化的 IDE 
 
 
 我们继续实现需求
-当前阶段的目标是实现模块级的
+当前阶段的目标是实现模块级的详细设计文档
+
+总体目标是实现一个代码仓的软件设计文档，包括模块架构、模块详细设计、接口、交互模型、并发模型等。
+实现的步骤是：
+整体分析、分析关键文件、规划有哪些模块
+为每个模块生成一个设计文档
+然后基于每个模块的设计文档，生成模块功能、模块架构，乃至其它设计要素，包括接口、数据模型、交互模型、并发模型等
+其中需要依赖CleanArch工具，这个外部工具会利用程序分析手段进行依赖分析，生成函数调用链、模块架构图、依赖关系、类图继承关系等作为生成要素时候的上下文
+上下文还包括模块代码结构、代码文件等，这些和cleanarch一起都属于提示词拼接时，需要准备好给大模型的
+
+设计要素分析关键依赖如下图：
+
+```plantuml
+@startuml
+title 设计要素依赖关系图
+
+!theme vibrant
+hide circle
+skinparam rectangle {
+    StereotypeFontColor #white
+    StereotypeFontSize 12
+}
+skinparam arrow {
+    Color #666666
+    Thickness 1.5
+}
+
+' ---------- 输入源 ----------
+package "输入源 (Source Artifacts)" #Technology {
+    entity "<b>代码仓库</b>\n(Source Code)" as SRC
+    entity "<b>接口定义</b>\n(API Spec YAML)" as YAML
+    entity "<b>数据库结构</b>\n(SQL Files)" as SQL
+}
+
+' ---------- 程序分析产物 ----------
+package "程序分析产物 (Analysis Outputs)" #Application {
+    entity "模块架构图" as ArchDiagram
+    entity "函数调用链" as CallChain
+    entity "类图/继承关系" as ClassDiagram
+    entity "代码依赖关系" as CodeDeps
+}
+
+' ---------- 最终文档章节 ----------
+package "设计文档关键要素 (Design Document Elements)" #Business {
+    entity "功能清单" as FuncList
+    entity "实现模型" as ImplModel
+    entity "接口" as InterfaceDoc
+    entity "数据模型" as DataModel
+    entity "算法实现" as Algo
+    entity "交互模型" as InteractionModel
+    entity "并发模型" as ConcurrencyModel
+}
+
+' ---------- 依赖关系 ----------
+SRC --> CodeDeps
+SRC --> ClassDiagram
+SRC --> ArchDiagram
+SRC --> CallChain
+
+CodeDeps --> ImplModel
+ArchDiagram --> ImplModel
+ClassDiagram --right-> ImplModel
+
+YAML -l-> FuncList
+ImplModel -up-> FuncList
+
+YAML --> InterfaceDoc
+SRC --> InterfaceDoc
+
+SQL --> DataModel
+SRC --> DataModel
+
+SRC --> Algo
+CallChain -up-> Algo
+
+CallChain --> InteractionModel
+
+SRC --> ConcurrencyModel
+CallChain -right[#red,dashed]-> ConcurrencyModel : 周边接口交互
+
+@enduml
+```
+

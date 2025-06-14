@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { Conversation, ModelConfig, Prompt } from '../common/types';
-import * as defaultConfigs from '../common/default-models.json';
 
 const CONVERSATIONS_KEY = 'codewiki_conversations';
 const PROMPTS_KEY = 'codewiki_prompts';
@@ -61,24 +60,9 @@ export class StateManager {
 
     //== Model Config Management ==//
 
-    public async getModelConfigs(): Promise<ModelConfig[]> {
-        let savedConfigs = this.globalState.get<ModelConfig[]>(MODEL_CONFIGS_KEY);
-
-        // If configs are undefined (first run), load and save defaults.
-        if (savedConfigs === undefined) {
-            const configs: ModelConfig[] = JSON.parse(JSON.stringify(defaultConfigs));
-            // Ensure the default gpt-4o is marked as default
-            const gpt4oDefault = configs.find(c => c.modelId === 'gpt-4o');
-            if (gpt4oDefault) {
-                gpt4oDefault.isDefault = true;
-            } else if (configs.length > 0) {
-                configs[0].isDefault = true;
-            }
-            await this.saveModelConfigs(configs);
-            return configs;
-        }
-        
-        return savedConfigs;
+   public async getModelConfigs(): Promise<ModelConfig[]> {
+        // 直接从 globalState 获取配置，如果不存在，则返回一个空数组。
+        return this.globalState.get<ModelConfig[]>(MODEL_CONFIGS_KEY, []);
     }
 
     public async saveModelConfigs(configs: ModelConfig[]): Promise<void> {

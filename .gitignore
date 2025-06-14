@@ -1,0 +1,15 @@
+# Dependencies
+/node_modules
+
+# Build output
+/dist
+
+# VSCode
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Local settings
+/src/common/default-models.json
