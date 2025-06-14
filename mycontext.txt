@@ -1,0 +1,2942 @@
+================================================================================
+项目结构 (基于过滤规则):
+src
+├── common
+│   └── types.ts
+├── extension
+│   ├── CodeWikiViewProvider.ts
+│   ├── LLMService.ts
+│   ├── StateManager.ts
+│   └── extension.ts
+└── webview
+    ├── components
+    │   └── MessageBlock.ts
+    ├── css
+    │   └── main.css
+    ├── views
+    │   ├── App.ts
+    │   ├── ChatHistoryView.ts
+    │   ├── ChatView.ts
+    │   ├── FocusEditorView.ts
+    │   ├── PromptEditorView.ts
+    │   ├── PromptManagerView.ts
+    │   ├── SettingsView.ts
+    │   └── WelcomeView.ts
+    ├── main.ts
+    └── vscode.ts
+================================================================================
+
+--- file_path: common/types.ts ---
+/**
+ * Defines the structure for messages posted between the Webview and the Extension Host.
+ */
+export interface PostMessage {
+    command: string;
+    payload?: any;
+}
+
+/**
+ * Represents the configuration for a single language model.
+ */
+export interface ModelConfig {
+    id: string;
+    name: string;
+    baseUrl: string;
+    apiKey: string;
+    modelId: string;
+    isDefault?: boolean;
+}
+
+/**
+ * Represents a single message in a conversation, from either the user or the model (assistant).
+ */
+export interface ChatMessage {
+    role: 'user' | 'assistant';
+    content: string;
+    // Additional metadata can be added here, e.g., timestamps, message ID, etc.
+}
+
+/**
+ * Represents a full conversation, including its ID, title, and all messages.
+ */
+export interface Conversation {
+    id: string;
+    title: string;
+    messages: ChatMessage[];
+    createdAt: string; // ISO 8601 date string
+}
+
+/**
+ * Represents a reusable prompt template.
+ */
+export interface Prompt {
+    id: string;
+    title: string;
+    content: string;
+    createdAt: string; // ISO 8601 date string
+    updatedAt: string; // ISO 8601 date string
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/CodeWikiViewProvider.ts ---
+import * as vscode from 'vscode';
+import { PostMessage, Conversation, ChatMessage, Prompt } from '../common/types';
+import { StateManager } from './StateManager';
+import { LLMService } from './LLMService';
+import { v4 as uuidv4 } from 'uuid';
+
+export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
+
+    public static readonly viewType = 'codewiki.mainView';
+
+    private _view?: vscode.WebviewView;
+    private _focusEditorView?: vscode.WebviewPanel;
+    private _stateManager: StateManager;
+    private _llmService: LLMService;
+    private _activeConversation: Conversation | null = null;
+
+    constructor(
+        private readonly _extensionUri: vscode.Uri,
+        private readonly _context: vscode.ExtensionContext
+    ) {
+        this._stateManager = new StateManager(this._context.globalState);
+        this._llmService = new LLMService();
+    }
+
+    public resolveWebviewView(
+        webviewView: vscode.WebviewView,
+        context: vscode.WebviewViewResolveContext,
+        _token: vscode.CancellationToken,
+    ) {
+        this._view = webviewView;
+
+        webviewView.webview.options = {
+            // Allow scripts in the webview
+            enableScripts: true,
+
+            localResourceRoots: [
+                this._extensionUri
+            ]
+        };
+
+        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+
+        webviewView.webview.onDidReceiveMessage((data: PostMessage) => {
+            this.handleMessage(data, 'sidebar');
+        });
+    }
+
+    private async handleMessage(data: PostMessage, source: 'sidebar' | 'focus-editor' = 'sidebar') {
+        switch (data.command) {
+            case 'ready':
+                {
+                    const sourceWebview = (source === 'focus-editor') ? this._focusEditorView?.webview : this._view?.webview;
+                    if (!sourceWebview) break;
+
+                    const conversations = await this._stateManager.getConversations();
+                    const modelConfigs = await this._stateManager.getModelConfigs();
+                    const prompts = await this._stateManager.getPrompts();
+
+                    // If there are conversations, set the most recent one as active.
+                    if (source === 'sidebar' && conversations.length > 0) {
+                        if (!this._activeConversation) { // 避免覆盖已激活的对话
+                            this._activeConversation = conversations[conversations.length - 1];
+                        }
+                    }
+
+                    sourceWebview.postMessage({
+                        command: 'initialize',
+                        payload: {
+                            conversations,
+                            modelConfigs,
+                            prompts
+                        }
+                    });
+                    break;
+                }
+            case 'openFocusEditor':
+                {
+                    const { content, modelId, promptId } = data.payload;
+                    if (this._focusEditorView) {
+                        this._focusEditorView.reveal(vscode.ViewColumn.One);
+                    } else {
+                        this._focusEditorView = vscode.window.createWebviewPanel(
+                            'codewiki.focusEditor',
+                            'Focus Editor',
+                            vscode.ViewColumn.One,
+                            {
+                                enableScripts: true,
+                                localResourceRoots: [this._extensionUri]
+                            }
+                        );
+
+                        this._focusEditorView.webview.html = this._getHtmlForWebview(this._focusEditorView.webview);
+
+                        this._focusEditorView.onDidDispose(() => {
+                            this._focusEditorView = undefined;
+                            this._view?.webview.postMessage({ command: 'focusEditorClosed' });
+                        }, null, this._context.subscriptions);
+
+                        this._focusEditorView.webview.onDidReceiveMessage((msg) => this.handleMessage(msg, 'focus-editor'));
+                    }
+
+                    const modelConfigs = await this._stateManager.getModelConfigs();
+                    const prompts = await this._stateManager.getPrompts();
+
+                    // 将所有需要的数据一次性发送过去
+                    this._focusEditorView.webview.postMessage({
+                        command: 'showFocusEditor',
+                        payload: {
+                            content,
+                            modelId,
+                            promptId,
+                            modelConfigs, // 捆绑模型数据
+                            prompts       // 捆绑提示词数据
+                        }
+                    });
+                    break;
+                }
+            case 'closeFocusEditor':
+                {
+                    this._focusEditorView?.dispose();
+                    break;
+                }
+            case 'updateWebviewContent':
+                {
+                    const { content } = data.payload;
+                    if (source === 'sidebar') {
+                        this._focusEditorView?.webview.postMessage({ command: 'updateContent', payload: { content } });
+                    } else { // source === 'focus-editor'
+                        this._view?.webview.postMessage({ command: 'updateContent', payload: { content } });
+                    }
+                    break;
+                }
+            case 'syncStateChange':
+                {
+                    if (source === 'sidebar') {
+                        this._focusEditorView?.webview.postMessage({ command: 'updateState', payload: data.payload });
+                    } else { // source === 'focus-editor'
+                        this._view?.webview.postMessage({ command: 'updateState', payload: data.payload });
+                    }
+                    break;
+                }
+            case 'newChat':
+                {
+                    this._activeConversation = null;
+                    // Potentially clear the webview chat here if needed
+                    break;
+                }
+            case 'info':
+                {
+                    vscode.window.showInformationMessage(data.payload);
+                    break;
+                }
+            case 'error':
+                {
+                    vscode.window.showErrorMessage(data.payload);
+                    break;
+                }
+            case 'sendMessage':
+                {
+                    // When a message is sent from either view, clear the input in the other.
+                    if (source === 'sidebar') {
+                        this._focusEditorView?.webview.postMessage({ command: 'clearInput' });
+                    } else {
+                        this._view?.webview.postMessage({ command: 'clearInput' });
+                    }
+
+                    const { prompt, config } = data.payload;
+                    const userMessage: ChatMessage = { role: 'user', content: prompt };
+                    let modelMessage: ChatMessage = { role: 'assistant', content: '' };
+
+                    // Ensure there is an active conversation
+                    if (!this._activeConversation) {
+                        this._activeConversation = {
+                            id: uuidv4(),
+                            title: prompt.substring(0, 50), // Add title
+                            messages: [],
+                            createdAt: new Date().toISOString(),
+                        };
+                    }
+
+                    this._activeConversation.messages.push(userMessage);
+
+                    // Tell the webviews to enter streaming state
+                    this._view?.webview.postMessage({ command: 'startStreaming' });
+                    this._focusEditorView?.webview.postMessage({ command: 'startStreaming' });
+
+
+                    let fullReply = '';
+                    this._llmService.getCompletion(
+                        this._activeConversation.messages,
+                        config,
+                        (chunk) => {
+                            fullReply += chunk;
+                            this._view?.webview.postMessage({ command: 'streamData', payload: chunk });
+                            this._focusEditorView?.webview.postMessage({ command: 'streamData', payload: chunk });
+                        },
+                        async () => {
+                            modelMessage.content = fullReply;
+                            if (this._activeConversation) {
+                                this._activeConversation.messages.push(modelMessage);
+                                await this._stateManager.saveConversation(this._activeConversation);
+                                // After saving, just update the history, don't reload the whole conversation
+                                const conversations = await this._stateManager.getConversations();
+                                this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
+                                this._focusEditorView?.webview.postMessage({ command: 'updateHistory', payload: conversations });
+                            }
+                            this._view?.webview.postMessage({ command: 'streamEnd' });
+                            this._focusEditorView?.webview.postMessage({ command: 'streamEnd' });
+                        },
+                        (error) => {
+                            const errorPayload = { error: error.message };
+                            this._view?.webview.postMessage({ command: 'requestFailed', payload: errorPayload });
+                            this._focusEditorView?.webview.postMessage({ command: 'requestFailed', payload: errorPayload });
+                        }
+                    );
+                    break;
+                }
+            case 'stopMessage':
+                {
+                    this._llmService.abortRequest();
+                    break;
+                }
+            case 'regenerate':
+            case 'editMessage':
+                {
+                    if (!this._activeConversation) break;
+
+                    const { messageIndex, content } = data.payload;
+
+                    // Truncate the history to the point of regeneration/edit
+                    this._activeConversation.messages.splice(messageIndex);
+
+                    if (data.command === 'editMessage') {
+                        const userMessage: ChatMessage = { role: 'user', content: content };
+                        this._activeConversation.messages.push(userMessage);
+                    }
+
+                    // Find the last valid model config from the conversation
+                    const lastUserMessage = this._activeConversation.messages[this._activeConversation.messages.length - 1];
+                    const modelConfigs = await this._stateManager.getModelConfigs();
+                    const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
+
+                    if (!defaultConfig) {
+                        vscode.window.showErrorMessage('No model configured.');
+                        break;
+                    }
+
+                    let modelMessage: ChatMessage = { role: 'assistant', content: '' };
+                    let fullReply = '';
+
+                    // Post a message to clear the old response and show a loading state
+                    this._view?.webview.postMessage({ command: 'setActiveConversation', payload: this._activeConversation });
+                    // Tell the webview to enter streaming state
+                    this._view?.webview.postMessage({ command: 'startStreaming' });
+
+                    this._llmService.getCompletion(
+                        this._activeConversation.messages,
+                        defaultConfig,
+                        (chunk) => {
+                            fullReply += chunk;
+                            this._view?.webview.postMessage({ command: 'streamData', payload: chunk });
+                        },
+                        async () => {
+                            modelMessage.content = fullReply;
+                            if (this._activeConversation) {
+                                this._activeConversation.messages.push(modelMessage);
+                                await this._stateManager.saveConversation(this._activeConversation);
+                                const conversations = await this._stateManager.getConversations();
+                                this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
+                            }
+                            this._view?.webview.postMessage({ command: 'streamEnd' });
+                        },
+                        (error) => {
+                            this._view?.webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });
+                        }
+                    );
+                    break;
+                }
+            case 'loadConversation':
+                {
+                    const { id } = data.payload;
+                    const conversations = await this._stateManager.getConversations();
+                    const conversation = conversations.find(c => c.id === id);
+                    if (conversation) {
+                        this._activeConversation = conversation;
+                        this._view?.webview.postMessage({ command: 'setActiveConversation', payload: conversation });
+                    }
+                    break;
+                }
+            case 'deleteConversation':
+                {
+                    const { id } = data.payload;
+                    await this._stateManager.deleteConversation(id);
+                    const conversations = await this._stateManager.getConversations();
+                    this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
+                    break;
+                }
+            case 'saveModelConfigs':
+                {
+                    await this._stateManager.saveModelConfigs(data.payload);
+                    vscode.window.showInformationMessage('Model configurations saved.');
+                    this._view?.webview.postMessage({
+                        command: 'updateModelConfigs',
+                        payload: data.payload
+                    });
+                    break;
+                }
+            //== Prompt Management ==//
+            case 'newPrompt':
+                {
+                    this._view?.webview.postMessage({ command: 'showPromptEditor' });
+                    break;
+                }
+            case 'editPrompt':
+                {
+                    const { id } = data.payload;
+                    const prompts = await this._stateManager.getPrompts();
+                    const prompt = prompts.find(p => p.id === id);
+                    if (prompt) {
+                        this._view?.webview.postMessage({ command: 'showPromptEditor', payload: { prompt } });
+                    }
+                    break;
+                }
+            case 'savePrompt':
+                {
+                    const prompt: Prompt = data.payload;
+                    await this._stateManager.savePrompt(prompt);
+                    vscode.window.showInformationMessage(`Prompt "${prompt.title}" saved.`);
+                    // First, update the prompts list in the webview
+                    await this._updatePrompts();
+                    // Then, tell the webview to navigate back to the manager
+                    this._view?.webview.postMessage({ command: 'showPromptManager' });
+                    break;
+                }
+            case 'cancelPromptEdit':
+                {
+                    this._view?.webview.postMessage({ command: 'showPromptManager' });
+                    break;
+                }
+            case 'deletePrompt':
+                {
+                    const { id } = data.payload;
+                    // Optional: Add a confirmation dialog
+                    const confirmation = await vscode.window.showWarningMessage(
+                        'Are you sure you want to delete this prompt?',
+                        { modal: true },
+                        'Delete'
+                    );
+                    if (confirmation === 'Delete') {
+                        await this._stateManager.deletePrompt(id);
+                        await this._updatePrompts();
+                        vscode.window.showInformationMessage('Prompt deleted.');
+                    }
+                    break;
+                }
+        }
+    }
+
+    private async _updatePrompts() {
+        const prompts = await this._stateManager.getPrompts();
+        this._view?.webview.postMessage({ command: 'updatePrompts', payload: prompts });
+    }
+
+    private _getHtmlForWebview(webview: vscode.Webview): string {
+        const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'dist', 'webview.js'));
+        const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'src', 'webview', 'css', 'main.css'));
+        const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css'));
+
+        // Use a nonce to only allow specific scripts to be run
+        const nonce = getNonce();
+
+        return `<!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta http-equiv="Content-Security-Policy" content="default-src 'none'; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                
+                <link href="${codiconsUri}" rel="stylesheet" />
+                <link href="${styleUri}" rel="stylesheet" />
+                
+                <title>CodeWiki</title>
+            </head>
+            <body>
+                <div id="root"></div>
+                <script nonce="${nonce}" type="module" src="${scriptUri}"></script>
+            </body>
+            </html>`;
+    }
+}
+
+function getNonce() {
+    let text = '';
+    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    for (let i = 0; i < 32; i++) {
+        text += possible.charAt(Math.floor(Math.random() * possible.length));
+    }
+    return text;
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/LLMService.ts ---
+import { ChatMessage, ModelConfig } from '../common/types';
+
+/**
+ * Service to interact with a Large Language Model.
+ * It handles API requests, including streaming responses and aborting requests.
+ */
+export class LLMService {
+    private _abortController: AbortController | null = null;
+
+    constructor() {}
+
+    /**
+     * Fetches a completion from the model in a streaming fashion.
+     * @param prompt The prompt to send to the model.
+     * @param config The configuration for the model endpoint.
+     * @param onData A callback function to handle incoming data chunks.
+     * @param onEnd A callback function to signal the end of the stream.
+     * @param onError A callback function to handle any errors.
+     */
+    public async getCompletion(
+        messages: ChatMessage[],
+        config: ModelConfig,
+        onData: (chunk: string) => void,
+        onEnd: () => void,
+        onError: (error: any) => void
+    ): Promise<void> {
+        this._abortController = new AbortController();
+        const signal = this._abortController.signal;
+
+        try {
+            const url = new URL(config.baseUrl);
+            url.pathname = '/v1/chat/completions';
+            
+            const response = await fetch(url.toString(), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${config.apiKey}`
+                },
+                body: JSON.stringify({
+                    model: config.modelId,
+                    messages: messages,
+                    stream: true
+                }),
+                signal: signal
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const reader = response.body?.getReader();
+            if (!reader) {
+                throw new Error('Failed to get stream reader');
+            }
+
+            const decoder = new TextDecoder();
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+                const chunk = decoder.decode(value, { stream: true });
+                
+                // OpenAI streaming API returns data in "data: { ... }" format.
+                // We need to parse this to extract the actual content.
+                const lines = chunk.split('\n').filter(line => line.trim().startsWith('data:'));
+                for (const line of lines) {
+                    const jsonStr = line.replace('data:', '').trim();
+                    if (jsonStr === '[DONE]') {
+                        break;
+                    }
+                    try {
+                        const parsed = JSON.parse(jsonStr);
+                        const content = parsed.choices[0]?.delta?.content;
+                        if (content) {
+                            onData(content);
+                        }
+                    } catch (e) {
+                        console.error('Failed to parse stream chunk:', jsonStr);
+                    }
+                }
+            }
+
+        } catch (error) {
+            if (signal.aborted) {
+                console.log('Request aborted by user.');
+            } else {
+                onError(error);
+            }
+        } finally {
+            onEnd();
+            this._abortController = null;
+        }
+    }
+
+    /**
+     * Aborts the current in-flight request.
+     */
+    public abortRequest() {
+        if (this._abortController) {
+            this._abortController.abort();
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/StateManager.ts ---
+import * as vscode from 'vscode';
+import { Conversation, ModelConfig, Prompt } from '../common/types';
+import * as defaultConfigs from '../common/default-models.json';
+
+const CONVERSATIONS_KEY = 'codewiki_conversations';
+const PROMPTS_KEY = 'codewiki_prompts';
+const MODEL_CONFIGS_KEY = 'codewiki_model_configs';
+
+/**
+ * Manages the state of the extension, persisting data in VS Code's global state.
+ * This class acts as the single source of truth for all persistent data.
+ */
+export class StateManager {
+    constructor(private readonly globalState: vscode.Memento) {}
+
+    //== Conversation Management ==//
+
+    public async getConversations(): Promise<Conversation[]> {
+        return this.globalState.get<Conversation[]>(CONVERSATIONS_KEY, []);
+    }
+
+    public async saveConversation(conversation: Conversation): Promise<void> {
+        const conversations = await this.getConversations();
+        const index = conversations.findIndex(c => c.id === conversation.id);
+        if (index !== -1) {
+            conversations[index] = conversation;
+        } else {
+            conversations.push(conversation);
+        }
+        await this.globalState.update(CONVERSATIONS_KEY, conversations);
+    }
+
+    public async deleteConversation(id: string): Promise<void> {
+        const conversations = await this.getConversations();
+        const filteredConversations = conversations.filter(c => c.id !== id);
+        await this.globalState.update(CONVERSATIONS_KEY, filteredConversations);
+    }
+
+    //== Prompt Management ==//
+
+    public async getPrompts(): Promise<Prompt[]> {
+        return this.globalState.get<Prompt[]>(PROMPTS_KEY, []);
+    }
+
+    public async savePrompt(prompt: Prompt): Promise<void> {
+        const prompts = await this.getPrompts();
+        const index = prompts.findIndex(p => p.id === prompt.id);
+        if (index !== -1) {
+            prompts[index] = prompt;
+        } else {
+            prompts.push(prompt);
+        }
+        await this.globalState.update(PROMPTS_KEY, prompts);
+    }
+
+    public async deletePrompt(id: string): Promise<void> {
+        const prompts = await this.getPrompts();
+        const filteredPrompts = prompts.filter(p => p.id !== id);
+        await this.globalState.update(PROMPTS_KEY, filteredPrompts);
+    }
+
+    //== Model Config Management ==//
+
+    public async getModelConfigs(): Promise<ModelConfig[]> {
+        let savedConfigs = this.globalState.get<ModelConfig[]>(MODEL_CONFIGS_KEY);
+
+        // If configs are undefined (first run), load and save defaults.
+        if (savedConfigs === undefined) {
+            const configs: ModelConfig[] = JSON.parse(JSON.stringify(defaultConfigs));
+            // Ensure the default gpt-4o is marked as default
+            const gpt4oDefault = configs.find(c => c.modelId === 'gpt-4o');
+            if (gpt4oDefault) {
+                gpt4oDefault.isDefault = true;
+            } else if (configs.length > 0) {
+                configs[0].isDefault = true;
+            }
+            await this.saveModelConfigs(configs);
+            return configs;
+        }
+        
+        return savedConfigs;
+    }
+
+    public async saveModelConfigs(configs: ModelConfig[]): Promise<void> {
+        // Ensure only one model is default
+        let defaultFound = false;
+        configs.forEach(config => {
+            if (config.isDefault) {
+                if (defaultFound) {
+                    config.isDefault = false; // Unset other defaults
+                } else {
+                    defaultFound = true;
+                }
+            }
+        });
+
+        // If no default is set, make the first one default
+        if (!defaultFound && configs.length > 0) {
+            configs[0].isDefault = true;
+        }
+
+        await this.globalState.update(MODEL_CONFIGS_KEY, configs);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/extension.ts ---
+import * as vscode from 'vscode';
+import { CodeWikiViewProvider } from './CodeWikiViewProvider';
+
+export function activate(context: vscode.ExtensionContext) {
+    const provider = new CodeWikiViewProvider(context.extensionUri, context);
+
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(CodeWikiViewProvider.viewType, provider)
+    );
+}
+
+export function deactivate() {}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/components/MessageBlock.ts ---
+import { ChatMessage } from "../../common/types";
+
+export class MessageBlock {
+    constructor(private readonly message: ChatMessage, private readonly messageIndex: number) {}
+
+    public render(): HTMLElement {
+        const element = document.createElement('div');
+        element.className = `message-block ${this.message.role}`;
+        element.dataset.index = this.messageIndex.toString();
+
+        const content = document.createElement('div');
+        content.className = 'message-content';
+        content.textContent = this.message.content;
+        
+        element.appendChild(content);
+        element.appendChild(this.createToolbar());
+
+        return element;
+    }
+
+    private createToolbar(): HTMLElement {
+        const toolbar = document.createElement('div');
+        toolbar.className = 'message-toolbar';
+
+        toolbar.appendChild(this.createButton('toggle-fold', 'Fold', 'codicon-chevron-up'));
+
+        if (this.message.role === 'assistant') {
+            toolbar.appendChild(this.createButton('copy-content', 'Copy', 'codicon-copy'));
+            toolbar.appendChild(this.createButton('regenerate-response', 'Regenerate', 'codicon-sync'));
+        } else {
+            toolbar.appendChild(this.createButton('copy-content', 'Copy', 'codicon-copy'));
+            toolbar.appendChild(this.createButton('edit-message', 'Edit', 'codicon-pencil'));
+        }
+
+        return toolbar;
+    }
+
+    private createButton(action: string, title: string, icon: string): HTMLButtonElement {
+        const button = document.createElement('button');
+        button.className = `icon-button`;
+        button.title = title;
+        button.dataset.action = action;
+        button.innerHTML = `<i class="codicon ${icon}"></i>`;
+        return button;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/css/main.css ---
+body,
+html {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    background-color: var(--vscode-sideBar-background);
+    color: var(--vscode-editor-foreground);
+    font-family: var(--vscode-font-family);
+    display: flex;
+    /* Make body/html a flex container */
+    flex-direction: column;
+    /* Stack children vertically */
+    position: absolute;
+    /* Position absolutely to fill the entire webview */
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+}
+
+#root {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    /* Use 100% relative to absolute positioned parent */
+    flex: 1;
+    /* Allow #root to grow and take available space */
+}
+
+.top-toolbar {
+    display: flex;
+    justify-content: flex-start;
+    padding: 5px;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    flex-shrink: 0;
+}
+
+.nav-icon {
+    cursor: pointer;
+    padding: 5px;
+    margin: 0 5px;
+    border-radius: 5px;
+}
+
+.nav-icon:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.nav-icon.active {
+    background-color: var(--vscode-list-activeSelectionBackground);
+}
+
+.main-content {
+    flex-grow: 1;
+    /* Removed overflow-y: hidden to allow internal scrolling */
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+}
+
+.view {
+    display: none;
+    height: 100%;
+    width: 100%;
+    flex-direction: column;
+}
+
+.view.active {
+    display: flex;
+}
+
+
+/* Chat View & Focus Editor Common Styles */
+.chat-container,
+.focus-editor-container {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    /* Ensure it takes full available space within its flex parent */
+}
+
+.messages-list {
+    flex-grow: 1;
+    /* Allow it to grow and take available space */
+    overflow-y: auto;
+    /* Make this the scrolling container */
+    min-height: 0;
+    /* Allow the flex item to shrink below its content size */
+    width: 100%;
+    /* Ensure it takes full width of its flex container */
+    box-sizing: border-box;
+    /* Include padding and border in the element's total width and height */
+}
+
+.chat-sticky-bottom {
+    /* No position: sticky needed, flexbox handles it */
+    flex-shrink: 0;
+    /* Prevent shrinking */
+    width: 100%;
+    /* Ensure it takes full width of its flex container */
+    box-sizing: border-box;
+    /* Include padding and border in the element's total width and height */
+
+    padding: 10px;
+    border-top: 1px solid var(--vscode-editorGroup-border);
+    background-color: var(--vscode-sideBar-background);
+    /* Give it a solid background */
+
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.chat-quick-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.chat-quick-actions label {
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+}
+
+#model-selector,
+#prompt-selector {
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 5px;
+    border-radius: 5px;
+    flex-grow: 1;
+}
+
+.chat-quick-actions button {
+    margin-left: auto;
+    margin-top: 0;
+}
+
+.chat-input-box-container {
+    display: flex;
+}
+
+.chat-input-box-container textarea {
+    flex-grow: 1;
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 8px;
+    resize: none;
+    border-radius: 5px;
+}
+
+/* Chat View Specific */
+.chat-container .chat-input-box-container textarea {
+    max-height: 250px;
+    /* Increased height */
+}
+
+/* Focus Editor View Specific */
+.focus-editor-container {
+    padding: 10px;
+}
+
+.focus-editor-container .chat-input-box-container {
+    flex-grow: 1;
+}
+
+.focus-editor-container .chat-input-box-container textarea {
+    height: 100%;
+    width: 100%;
+    max-height: none;
+    box-sizing: border-box;
+}
+
+
+/* Message Block Styles */
+.message-block {
+    padding: 15px;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    position: relative;
+}
+
+.message-content {
+    transition: max-height 0.3s ease-in-out;
+    overflow: hidden;
+    /* Hide content that exceeds max-height */
+    position: relative;
+}
+
+.message-block.folded .message-content {
+    max-height: 70px;
+    /* Adjust as needed, approx 3-4 lines */
+}
+
+/* Add a "read more" fade effect when folded */
+.message-block.folded .message-content::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 30px;
+    background: linear-gradient(to bottom, transparent, var(--vscode-editor-background));
+    pointer-events: none;
+    /* Allows clicks to pass through */
+}
+
+.message-block:last-child {
+    border-bottom: none;
+}
+
+.message-toolbar {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    background-color: var(--vscode-editorWidget-background);
+    border-radius: 5px;
+    padding: 2px;
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.1s ease-in-out;
+    pointer-events: none;
+}
+
+.message-block:hover .message-toolbar {
+    opacity: 1;
+    pointer-events: all;
+}
+
+.message-block.user {
+    background-color: var(--vscode-list-hoverBackground);
+    border-left: 3px solid var(--vscode-focusBorder);
+    padding-left: 12px;
+}
+
+.message-block.folded.user .message-content::after {
+    background: linear-gradient(to bottom, transparent, var(--vscode-list-hoverBackground));
+}
+
+.message-block.assistant {
+    background-color: var(--vscode-editor-background);
+}
+
+.message-block.editing {
+    border: 1px solid var(--vscode-focusBorder);
+    box-shadow: 0 0 3px var(--vscode-focusBorder);
+    border-radius: 5px;
+}
+
+.message-block.error {
+    color: var(--vscode-errorForeground);
+}
+
+button.streaming {
+    background-color: var(--vscode-button-secondaryBackground);
+}
+
+button.streaming:hover {
+    background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+/* Settings View */
+.config-form {
+    border: 1px solid var(--vscode-editorGroup-border);
+    padding: 15px;
+    margin-bottom: 15px;
+    border-radius: 5px;
+    background-color: var(--vscode-sideBar-sectionHeader-background);
+}
+
+.form-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.form-title {
+    font-size: 1.1em;
+}
+
+.default-badge {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-size: 0.8em;
+}
+
+.form-group {
+    margin-bottom: 10px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+}
+
+.config-form input {
+    width: calc(100% - 20px);
+    margin-bottom: 5px;
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 5px;
+}
+
+.form-actions {
+    margin-top: 15px;
+    display: flex;
+    gap: 10px;
+}
+
+.form-actions button {
+    margin-top: 0;
+}
+
+button {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none;
+    padding: 8px 12px;
+    cursor: pointer;
+    border-radius: 5px;
+}
+
+button:hover {
+    background-color: var(--vscode-button-hoverBackground);
+}
+
+/* Generic View Header */
+.view-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.view-header h2 {
+    margin: 0;
+}
+
+.add-btn {
+    font-size: 20px;
+    font-weight: bold;
+    padding: 0px 8px;
+}
+
+/* Chat History View */
+.history-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.history-item {
+    display: flex;
+    align-items: center;
+    padding: 15px;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    cursor: pointer;
+    position: relative;
+}
+
+.history-item:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.history-item-content {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.history-item-timestamp {
+    font-size: 0.8em;
+    color: var(--vscode-descriptionForeground);
+    margin-bottom: 5px;
+}
+
+.history-item-title {
+    font-size: 1em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.history-item-actions {
+    display: flex;
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    background-color: var(--vscode-list-hoverBackground);
+    opacity: 0;
+    transition: opacity 0.1s ease-in-out;
+    pointer-events: none;
+}
+
+.history-item:hover .history-item-actions {
+    opacity: 1;
+    pointer-events: all;
+}
+
+.icon-button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--vscode-foreground);
+    padding: 5px;
+    border-radius: 5px;
+}
+
+.icon-button:hover {
+    background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.history-empty {
+    text-align: center;
+    padding: 20px;
+    color: var(--vscode-descriptionForeground);
+}
+
+/*=================================*/
+/*========= Prompt Manager ========*/
+/*=================================*/
+
+.prompt-manager-view,
+.prompt-editor-view {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+.prompt-editor-view {
+    display: none;
+    /* Hidden by default */
+}
+
+/* Search Bar in Header */
+.search-bar {
+    display: flex;
+    align-items: center;
+    flex-grow: 1;
+    margin-right: 15px;
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border);
+    border-radius: 5px;
+    padding: 0 8px;
+}
+
+.search-bar i {
+    margin-right: 8px;
+    color: var(--vscode-descriptionForeground);
+}
+
+.search-bar input {
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--vscode-input-foreground);
+    padding: 6px 0;
+    outline: none;
+}
+
+.codicon-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none;
+    padding: 6px 12px;
+    cursor: pointer;
+    border-radius: 5px;
+}
+
+.codicon-btn:hover {
+    background-color: var(--vscode-button-hoverBackground);
+}
+
+.codicon-btn.secondary {
+    background-color: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+}
+
+.codicon-btn.secondary:hover {
+    background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+.icon-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--vscode-foreground);
+    padding: 5px;
+    border-radius: 5px;
+}
+
+.icon-btn:hover {
+    background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+
+/* Prompt List */
+.prompt-list-container {
+    flex-grow: 1;
+    overflow-y: auto;
+}
+
+.prompt-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.prompt-list-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 15px;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    cursor: pointer;
+    transition: background-color 0.1s ease-in-out;
+}
+
+.prompt-list-item:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.prompt-item-main {
+    flex-grow: 1;
+    margin-right: 15px;
+    overflow: hidden;
+}
+
+.prompt-item-title {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 4px;
+}
+
+.prompt-item-summary {
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.prompt-item-meta {
+    flex-shrink: 0;
+    text-align: right;
+}
+
+.prompt-item-time {
+    font-size: 0.8em;
+    color: var(--vscode-descriptionForeground);
+    margin-bottom: 8px;
+}
+
+.prompt-item-actions {
+    display: flex;
+    gap: 5px;
+    opacity: 0;
+    transition: opacity 0.1s ease-in-out;
+}
+
+.prompt-list-item:hover .prompt-item-actions {
+    opacity: 1;
+}
+
+/* Empty State */
+.empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--vscode-descriptionForeground);
+}
+
+.empty-state p {
+    margin-bottom: 15px;
+}
+
+.highlighted-btn {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: 1px solid var(--vscode-button-border, transparent);
+    padding: 8px 15px;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.highlighted-btn:hover {
+    background-color: var(--vscode-button-hoverBackground);
+}
+
+/*=================================*/
+/*========= Prompt Editor =========*/
+/*=================================*/
+
+.prompt-editor-form {
+    flex-grow: 1;
+    overflow-y: auto;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+}
+
+.prompt-editor-form .form-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.prompt-editor-form .form-group:last-child {
+    flex-grow: 1;
+}
+
+.prompt-editor-form input,
+.prompt-editor-form textarea {
+    width: calc(100% - 22px);
+    /* 100% - padding - border */
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 10px;
+    border-radius: 5px;
+}
+
+.prompt-editor-form textarea {
+    flex-grow: 1;
+    resize: none;
+    font-family: var(--vscode-editor-font-family);
+}
+
+/*=================================*/
+/*====== Rich Input & Pills =======*/
+/*=================================*/
+
+/* 将原来的输入框容器升级为富文本样式 */
+.chat-input-box {
+    flex-grow: 1;
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 8px;
+    resize: none;
+    /* 虽然不是 textarea，但保留这个概念 */
+    border-radius: 5px;
+    min-height: 22px;
+    /* 约等于单行 textarea 的高度 */
+    max-height: 250px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    /* 保证空格和换行被保留 */
+    word-wrap: break-word;
+}
+
+.chat-input-box:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+}
+
+/* 胶囊 (Pill) 的样式 */
+.content-pill {
+    display: inline-block;
+    background-color: var(--vscode-toolbar-hoverBackground);
+    border-radius: 12px;
+    padding: 2px 10px;
+    margin: 0 2px;
+    cursor: pointer;
+    font-size: 0.9em;
+    transition: background-color 0.2s ease;
+}
+
+.content-pill:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.content-pill .pill-tag {
+    font-weight: bold;
+    color: var(--vscode-button-background);
+    /* 使用主题色突出标签名 */
+}
+
+/* 展开后的编辑器容器 */
+.pill-editor {
+    display: block;
+    border: 1px solid var(--vscode-focusBorder);
+    border-radius: 5px;
+    margin: 8px 0;
+    padding: 8px;
+    background-color: var(--vscode-input-background);
+}
+
+.pill-editor textarea {
+    width: 100%;
+    height: 150px;
+    /* 初始高度 */
+    background: transparent;
+    border: none;
+    color: var(--vscode-input-foreground);
+    resize: vertical;
+    /* 允许用户调整高度 */
+    font-family: var(--vscode-editor-font-family);
+}
+
+.pill-editor textarea:focus {
+    outline: none;
+}
+
+.pill-editor-actions {
+    text-align: right;
+    margin-top: 5px;
+}
+
+/* 确保 contenteditable div 中的 p 标签没有多余的 margin */
+.chat-input-box p {
+    margin: 0;
+}
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/main.ts ---
+import { App } from './views/App';
+
+// Wait for the DOM to be fully loaded before initializing the app
+window.addEventListener('load', () => {
+    const app = new App(document.body);
+    app.initialize();
+});
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/views/App.ts ---
+import { vscode } from '../vscode';
+import { ChatView } from './ChatView';
+import { SettingsView } from './SettingsView';
+import { WelcomeView } from './WelcomeView';
+import { ChatHistoryView } from './ChatHistoryView';
+import { PromptManagerView } from './PromptManagerView';
+import { PromptEditorView } from './PromptEditorView';
+import { FocusEditorView } from './FocusEditorView';
+
+export class App {
+    private chatView: ChatView;
+    private focusEditorView?: FocusEditorView;
+    private settingsView: SettingsView;
+    private welcomeView: WelcomeView;
+    private chatHistoryView: ChatHistoryView;
+    private promptManagerView: PromptManagerView;
+    private promptEditorView: PromptEditorView;
+
+    constructor(private readonly parent: HTMLElement) {
+        this.parent.innerHTML = this.render();
+
+        this.welcomeView = new WelcomeView(this.parent.querySelector('#view-welcome') as HTMLElement);
+        this.chatView = new ChatView(this.parent.querySelector('#view-chat') as HTMLElement);
+        this.chatHistoryView = new ChatHistoryView(
+            this.parent.querySelector('#view-history') as HTMLElement,
+            this.navigateTo.bind(this)
+        );
+        this.promptManagerView = new PromptManagerView(this.parent.querySelector('#view-prompts') as HTMLElement);
+        this.promptEditorView = new PromptEditorView(this.parent.querySelector('#view-prompt-editor') as HTMLElement);
+        this.settingsView = new SettingsView(this.parent.querySelector('#view-settings') as HTMLElement);
+    }
+
+    public initialize() {
+        this.setupEventListeners();
+        // On initial load, determine if this is a focus editor or main view
+        if (document.body.classList.contains('focus-editor-body')) {
+            vscode.postMessage({ command: 'ready' });
+        } else {
+            this.navigateTo('chat');
+            vscode.postMessage({ command: 'ready' });
+        }
+    }
+
+    private setupEventListeners() {
+        // Top toolbar navigation
+        this.parent.querySelector('#nav-new-chat')?.addEventListener('click', () => this.chatView.clearChat());
+        this.parent.querySelector('#nav-chat')?.addEventListener('click', () => this.navigateTo('chat'));
+        this.parent.querySelector('#nav-history')?.addEventListener('click', () => this.navigateTo('history'));
+        this.parent.querySelector('#nav-prompts')?.addEventListener('click', () => this.navigateTo('prompts'));
+        this.parent.querySelector('#nav-settings')?.addEventListener('click', () => this.navigateTo('settings'));
+
+        // Listen for messages from the extension host
+        window.addEventListener('message', event => {
+            const message = event.data;
+            switch (message.command) {
+                case 'initialize':
+                    this.chatView.setConversations(message.payload.conversations);
+                    this.chatHistoryView.setConversations(message.payload.conversations);
+                    this.promptManagerView.update(message.payload.prompts);
+                    this.chatView.setPrompts(message.payload.prompts);
+                    this.chatView.setModelConfigs(message.payload.modelConfigs);
+                    this.settingsView.setModelConfigs(message.payload.modelConfigs);
+                    break;
+                case 'showPromptEditor':
+                    this.navigateTo('prompt-editor', message.payload);
+                    break;
+                case 'showPromptManager':
+                    this.navigateTo('prompts');
+                    break;
+                case 'updatePrompts':
+                    this.promptManagerView.update(message.payload);
+                    this.chatView.setPrompts(message.payload);
+                    if (this.focusEditorView) {
+                        this.focusEditorView.setPrompts(message.payload);
+                    }
+                    break;
+                case 'setActiveConversation':
+                    this.chatView.loadConversation(message.payload);
+                    break;
+                case 'updateModelConfigs':
+                    this.chatView.setModelConfigs(message.payload);
+                    this.settingsView.setModelConfigs(message.payload);
+                    if (this.focusEditorView) {
+                        this.focusEditorView.setModelConfigs(message.payload);
+                    }
+                    break;
+                case 'updateHistory':
+                    this.chatHistoryView.setConversations(message.payload);
+                    break;
+                case 'showFocusEditor':
+                    this.navigateTo('focus-editor', message.payload);
+                    break;
+                case 'updateContent':
+                    if (this.focusEditorView) {
+                        this.focusEditorView.updateContent(message.payload.content);
+                    }
+                    const mainTextarea = this.chatView['bottomPanel'].querySelector('textarea');
+                    if (mainTextarea && mainTextarea.value !== message.payload.content) {
+                        mainTextarea.value = message.payload.content;
+                        this.chatView['autoResizeInput'](mainTextarea);
+                    }
+                    break;
+                case 'updateState':
+                    if (this.focusEditorView) {
+                        this.focusEditorView.updateState(message.payload);
+                    }
+                    if (message.payload.modelId) {
+                        this.chatView['modelSelector'].value = message.payload.modelId;
+                    }
+                    if (message.payload.promptId) {
+                        this.chatView['promptSelector'].value = message.payload.promptId;
+                    }
+                    break;
+                case 'clearInput':
+                    const textarea = this.chatView['bottomPanel'].querySelector('textarea');
+                    if (textarea) {
+                        textarea.value = '';
+                        this.chatView['autoResizeInput'](textarea);
+                    }
+                    if (this.focusEditorView) {
+                        this.focusEditorView.clearInput();
+                    }
+                    break;
+                case 'focusEditorClosed':
+                    this.navigateTo('chat');
+                    const topToolbar = this.parent.querySelector('.top-toolbar') as HTMLElement;
+                    if (topToolbar) topToolbar.style.display = 'flex';
+                    this.chatView['toggleMaximizeButton'](false);
+                    break;
+            }
+        });
+    }
+
+    public navigateTo(view: string, data?: any) {
+        this.parent.querySelectorAll('.view').forEach(v => {
+            (v as HTMLElement).style.display = 'none';
+        });
+
+        let activeNav = view;
+
+        if (view === 'chat' && typeof data === 'string') {
+            vscode.postMessage({ command: 'loadConversation', payload: { id: data } });
+        } else if (view === 'prompt-editor') {
+            activeNav = 'prompts';
+            const editorContainer = this.parent.querySelector('#view-prompt-editor') as HTMLElement;
+            if (editorContainer) {
+                editorContainer.style.display = 'block';
+            }
+            this.promptEditorView.show(data?.prompt);
+        } else if (view === 'focus-editor') {
+            const container = this.parent.querySelector('#view-focus-editor') as HTMLElement;
+            if (!this.focusEditorView) {
+                this.focusEditorView = new FocusEditorView(container, data);
+            }
+
+            // 直接从 data payload 中获取数据并设置
+            if (data.modelConfigs) {
+                this.focusEditorView.setModelConfigs(data.modelConfigs);
+            }
+            if (data.prompts) {
+                this.focusEditorView.setPrompts(data.prompts);
+            }
+
+            // 每次导航时都更新内容和状态
+            this.focusEditorView.updateContent(data.content);
+            this.focusEditorView.updateState(data);
+            container.style.display = 'flex';
+            const topToolbar = this.parent.querySelector('.top-toolbar') as HTMLElement;
+            if (topToolbar) topToolbar.style.display = 'none';
+            return; // Skip nav update for focus editor
+        }
+
+        if (view !== 'prompt-editor') {
+            const targetView = this.parent.querySelector(`#view-${view}`);
+            if (targetView) {
+                (targetView as HTMLElement).style.display = 'flex';
+            }
+        }
+
+        this.parent.querySelectorAll('.nav-icon').forEach(icon => icon.classList.remove('active'));
+        this.parent.querySelector(`#nav-${activeNav}`)?.classList.add('active');
+    }
+
+    private render(): string {
+        return `
+            <div class="top-toolbar">
+                <div id="nav-new-chat" class="nav-icon" title="New Chat"><i class="codicon codicon-add"></i></div>
+                <div class="nav-separator"></div>
+                <div id="nav-chat" class="nav-icon" title="Chat"><i class="codicon codicon-comment-discussion"></i></div>
+                <div id="nav-history" class="nav-icon" title="History"><i class="codicon codicon-history"></i></div>
+                <div id="nav-prompts" class="nav-icon" title="Prompts"><i class="codicon codicon-symbol-keyword"></i></div>
+                <div id="nav-settings" class="nav-icon" title="Settings"><i class="codicon codicon-settings-gear"></i></div>
+            </div>
+            <div class="main-content">
+                <div id="view-welcome" class="view"></div>
+                <div id="view-chat" class="view"></div>
+                <div id="view-history" class="view"></div>
+                <div id="view-prompts" class="view"></div>
+                <div id="view-prompt-editor" class="view"></div>
+                <div id="view-settings" class="view"></div>
+                <div id="view-focus-editor" class="view"></div>
+            </div>
+        `;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/views/ChatHistoryView.ts ---
+import { Conversation } from "../../common/types";
+import { vscode } from "../vscode";
+
+export class ChatHistoryView {
+    private conversations: Conversation[] = [];
+    private historyContainer: HTMLElement;
+
+    constructor(
+        private readonly parent: HTMLElement,
+        private readonly navigate: (view: string, conversationId?: string) => void
+    ) {
+        this.parent.innerHTML = `<div class="history-container"><h2>Chat History</h2><ul class="history-list"></ul></div>`;
+        this.historyContainer = this.parent.querySelector('.history-list') as HTMLElement;
+    }
+
+    public setConversations(conversations: Conversation[]) {
+        // Sort conversations by date, newest first
+        this.conversations = conversations.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        this.render();
+    }
+
+    private render() {
+        this.historyContainer.innerHTML = '';
+        if (this.conversations.length === 0) {
+            this.historyContainer.innerHTML = `<li class="history-empty">No chat history found.</li>`;
+            return;
+        }
+
+        this.conversations.forEach(conv => {
+            const li = document.createElement('li');
+            li.className = 'history-item';
+            li.dataset.id = conv.id;
+            li.addEventListener('click', () => {
+                this.navigate('chat', conv.id);
+            });
+
+            const content = document.createElement('div');
+            content.className = 'history-item-content';
+
+            const timestamp = document.createElement('div');
+            timestamp.className = 'history-item-timestamp';
+            timestamp.textContent = this.formatDate(conv.createdAt);
+
+            const title = document.createElement('div');
+            title.className = 'history-item-title';
+            title.textContent = conv.title;
+
+            content.appendChild(timestamp);
+            content.appendChild(title);
+
+            const actions = document.createElement('div');
+            actions.className = 'history-item-actions';
+            
+            const deleteButton = document.createElement('button');
+            deleteButton.className = 'icon-button';
+            deleteButton.title = 'Delete';
+            deleteButton.innerHTML = `<i class="codicon codicon-trash"></i>`;
+            deleteButton.addEventListener('click', (e) => {
+                e.stopPropagation();
+                vscode.postMessage({ command: 'deleteConversation', payload: { id: conv.id } });
+            });
+
+            const exportButton = document.createElement('button');
+            exportButton.className = 'icon-button';
+            exportButton.title = 'Export';
+            exportButton.innerHTML = `<i class="codicon codicon-export"></i>`;
+            exportButton.addEventListener('click', (e) => {
+                e.stopPropagation();
+                // Placeholder for export functionality
+                vscode.postMessage({ command: 'info', payload: 'Export functionality is not yet implemented.' });
+            });
+
+            actions.appendChild(deleteButton);
+            actions.appendChild(exportButton);
+
+            li.appendChild(content);
+            li.appendChild(actions);
+
+            this.historyContainer.appendChild(li);
+        });
+    }
+
+    private formatDate(dateString: string): string {
+        const date = new Date(dateString);
+        const options: Intl.DateTimeFormatOptions = {
+            month: 'long',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: 'numeric',
+            hour12: true
+        };
+        return date.toLocaleString('en-US', options).replace(',', '');
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/views/ChatView.ts ---
+import { Conversation, ChatMessage, ModelConfig, Prompt } from "../../common/types";
+import { vscode } from "../vscode";
+import { MessageBlock } from "../components/MessageBlock";
+
+export class ChatView {
+    private messages: ChatMessage[] = [];
+    private modelConfigs: ModelConfig[] = [];
+    private prompts: Prompt[] = [];
+    private messageContainer: HTMLElement;
+    private bottomPanel: HTMLElement;
+    private modelSelector: HTMLSelectElement;
+    private promptSelector: HTMLSelectElement;
+    private isStreaming: boolean = false;
+    private editingMessageIndex: number | null = null;
+    private originalMessageContent: string | null = null;
+
+    constructor(private readonly parent: HTMLElement) {
+        this.parent.innerHTML = this.renderInitialLayout();
+        this.messageContainer = this.parent.querySelector('.messages-list') as HTMLElement;
+        this.bottomPanel = this.parent.querySelector('.chat-sticky-bottom') as HTMLElement;
+        this.modelSelector = this.parent.querySelector('#model-selector') as HTMLSelectElement;
+        this.promptSelector = this.parent.querySelector('#prompt-selector') as HTMLSelectElement;
+        this.renderBottomInput();
+        this.setupEventListeners();
+    }
+
+    public setConversations(conversations: Conversation[]) {
+        if (conversations.length > 0) {
+            this.messages = conversations[conversations.length - 1].messages;
+        } else {
+            this.messages = [];
+        }
+        this.renderMessages();
+    }
+
+    public clearChat() {
+        this.messages = [];
+        this.renderMessages();
+        vscode.postMessage({ command: 'newChat' });
+    }
+
+    public loadConversation(conversation: Conversation) {
+        this.messages = conversation.messages;
+        this.handleCancelEdit(); // Ensure we exit any edit mode when loading a new conversation
+        this.renderMessages();
+    }
+
+    public setModelConfigs(configs: ModelConfig[]) {
+        this.modelConfigs = configs;
+        this.renderModelSelector();
+    }
+
+    public setPrompts(prompts: Prompt[]) {
+        this.prompts = prompts;
+        this.renderPromptSelector();
+    }
+
+    private setupEventListeners() {
+        // Listener for all clicks in the view
+        this.parent.addEventListener('click', (event) => {
+            const target = event.target as HTMLElement;
+            const button = target.closest('button');
+
+            if (this.editingMessageIndex !== null) {
+                const editingBlock = this.parent.querySelector('.message-block.editing');
+                if (editingBlock && !editingBlock.contains(target) && !this.bottomPanel.contains(target)) {
+                    this.handleCancelEdit();
+                    return;
+                }
+            }
+
+            if (!button) return;
+            const action = button.dataset.action;
+            if (!action) return;
+
+            const messageBlock = target.closest('.message-block');
+            const messageIndex = messageBlock ? parseInt((messageBlock as HTMLElement).dataset.index || '-1', 10) : -1;
+
+            switch (action) {
+                case 'send-or-save': this.handleSendOrSave(); break;
+                case 'copy-content': if (messageIndex !== -1) this.handleCopy(messageIndex); break;
+                case 'regenerate-response': if (messageIndex !== -1) this.handleRegenerate(messageIndex); break;
+                case 'edit-message': if (messageIndex !== -1) this.handleEnterEditMode(messageIndex); break;
+                case 'maximize-editor': this.handleMaximizeEditor(); break;
+                case 'toggle-fold':
+                    if (messageBlock) {
+                        const icon = button.querySelector('i');
+                        messageBlock.classList.toggle('folded');
+                        if (messageBlock.classList.contains('folded')) {
+                            button.title = 'Expand';
+                            icon?.classList.remove('codicon-chevron-up');
+                            icon?.classList.add('codicon-chevron-down');
+                        } else {
+                            button.title = 'Fold';
+                            icon?.classList.remove('codicon-chevron-down');
+                            icon?.classList.add('codicon-chevron-up');
+                        }
+                    }
+                    break;
+
+            }
+        });
+
+        window.addEventListener('resize', () => {
+
+        });
+
+        this.modelSelector.addEventListener('change', () => {
+            vscode.postMessage({
+                command: 'syncStateChange',
+                payload: { modelId: this.modelSelector.value }
+            });
+        });
+
+        this.promptSelector.addEventListener('change', () => {
+            const selectedPromptId = this.promptSelector.value;
+            vscode.postMessage({
+                command: 'syncStateChange',
+                payload: { promptId: selectedPromptId }
+            });
+
+            if (selectedPromptId) {
+                const selectedPrompt = this.prompts.find(p => p.id === selectedPromptId);
+                if (selectedPrompt) {
+                    const inputBox = this.bottomPanel.querySelector('textarea');
+                    if (inputBox) {
+                        inputBox.value = selectedPrompt.content;
+                        this.autoResizeInput(inputBox);
+                        inputBox.focus();
+                        vscode.postMessage({
+                            command: 'updateWebviewContent',
+                            payload: { content: inputBox.value }
+                        });
+                    }
+                }
+            }
+        });
+
+        window.addEventListener('message', event => {
+            const message = event.data;
+            switch (message.command) {
+                case 'startStreaming': this.beginStream(); break;
+                case 'streamData': this.appendStreamData(message.payload); break;
+                case 'streamEnd': this.finalizeStream(); break;
+                case 'requestFailed': this.handleRequestFailed(message.payload.error); break;
+                case 'setActiveConversation': this.loadConversation(message.payload); break;
+                case 'updatePrompts': this.setPrompts(message.payload); break;
+                case 'updateContent': {
+                    const inputBox = this.bottomPanel.querySelector('textarea');
+                    if (inputBox && inputBox.value !== message.payload.content) {
+                        inputBox.value = message.payload.content;
+                        this.autoResizeInput(inputBox);
+                    }
+                    break;
+                }
+                case 'clearInput': {
+                    const inputBox = this.bottomPanel.querySelector('textarea');
+                    if (inputBox) {
+                        inputBox.value = '';
+                        this.autoResizeInput(inputBox);
+                    }
+                    break;
+                }
+                case 'focusEditorClosed': this.toggleMaximizeButton(false); break;
+                case 'updateState':
+                    if (message.payload.modelId) {
+                        this.modelSelector.value = message.payload.modelId;
+                    }
+                    if (message.payload.promptId) {
+                        this.promptSelector.value = message.payload.promptId;
+                    }
+                    break;
+            }
+        });
+    }
+
+    private handleSendOrSave() {
+        if (this.editingMessageIndex !== null) {
+            this.handleSaveEdit(this.editingMessageIndex);
+        } else {
+            this.handleSendMessage();
+        }
+    }
+
+    private handleSendMessage() {
+        if (this.isStreaming) {
+            vscode.postMessage({ command: 'stopMessage' });
+            return;
+        }
+
+        const inputBox = this.bottomPanel.querySelector('textarea');
+        if (!inputBox) return;
+
+        const prompt = inputBox.value.trim();
+        if (prompt) {
+            const selectedModelId = this.modelSelector.value;
+            const selectedConfig = this.modelConfigs.find(c => c.id === selectedModelId);
+
+            if (!selectedConfig) {
+                vscode.postMessage({ command: 'error', payload: 'Please select a valid model from settings.' });
+                return;
+            }
+
+            const message: ChatMessage = { role: 'user', content: prompt };
+            this.messages.push(message);
+            this.renderMessages();
+
+            inputBox.value = '';
+            this.autoResizeInput(inputBox);
+            vscode.postMessage({ command: 'sendMessage', payload: { prompt, config: selectedConfig } });
+        }
+    }
+
+    private handleCopy(index: number) {
+        navigator.clipboard.writeText(this.messages[index].content);
+        vscode.postMessage({ command: 'info', payload: 'Copied to clipboard!' });
+    }
+
+    private handleRegenerate(index: number) {
+        vscode.postMessage({ command: 'regenerate', payload: { messageIndex: index } });
+    }
+
+    private handleEnterEditMode(index: number) {
+        if (this.editingMessageIndex === index) return;
+
+        if (this.editingMessageIndex !== null) {
+            this.handleCancelEdit();
+        }
+
+        this.editingMessageIndex = index;
+        this.originalMessageContent = this.messages[index].content;
+
+        const mainTextarea = this.bottomPanel.querySelector('textarea');
+        if (mainTextarea) {
+            mainTextarea.value = this.originalMessageContent;
+            this.autoResizeInput(mainTextarea);
+            mainTextarea.focus();
+        }
+
+        this.renderMessages();
+        this.updateSendButtonState();
+    }
+
+    private handleCancelEdit() {
+        if (this.editingMessageIndex === null) return;
+
+        if (this.originalMessageContent !== null) {
+            this.messages[this.editingMessageIndex].content = this.originalMessageContent;
+        }
+
+        this.editingMessageIndex = null;
+        this.originalMessageContent = null;
+
+        const mainTextarea = this.bottomPanel.querySelector('textarea');
+        if (mainTextarea) {
+            mainTextarea.value = '';
+            this.autoResizeInput(mainTextarea);
+        }
+
+        this.renderMessages();
+        this.updateSendButtonState();
+    }
+
+    private handleSaveEdit(index: number) {
+        const mainTextarea = this.bottomPanel.querySelector('textarea');
+        if (!mainTextarea) return;
+
+        const newContent = mainTextarea.value.trim();
+        if (newContent) {
+            this.messages[index].content = newContent;
+            vscode.postMessage({ command: 'editMessage', payload: { messageIndex: index, content: newContent } });
+        }
+
+        this.editingMessageIndex = null;
+        this.originalMessageContent = null;
+
+        mainTextarea.value = '';
+        this.autoResizeInput(mainTextarea);
+
+        this.renderMessages();
+        this.updateSendButtonState();
+    }
+
+    private beginStream() {
+        this.isStreaming = true;
+        const assistantMessage: ChatMessage = { role: 'assistant', content: '' };
+        this.messages.push(assistantMessage);
+        this.renderMessages();
+        this.updateSendButtonState();
+    }
+
+    private appendStreamData(chunk: string) {
+        const lastMessage = this.messages[this.messages.length - 1];
+        if (lastMessage?.role === 'assistant') {
+            lastMessage.content += chunk;
+            this.renderMessages();
+        }
+    }
+
+    private finalizeStream(stopped = false) {
+        this.isStreaming = false;
+        const lastMessage = this.messages[this.messages.length - 1];
+        if (stopped && lastMessage?.role === 'assistant') {
+            lastMessage.content += ' (Stopped)';
+        }
+        this.renderMessages();
+        this.updateSendButtonState();
+    }
+
+    private handleRequestFailed(error: string) {
+        this.finalizeStream();
+        this.messages.pop();
+        const lastUserMessage = this.messages.pop();
+
+        this.renderMessages();
+
+        if (lastUserMessage) {
+            const inputBox = this.bottomPanel.querySelector('textarea');
+            if (inputBox) inputBox.value = lastUserMessage.content;
+        }
+
+        const errorElement = document.createElement('div');
+        errorElement.className = 'message-block assistant error';
+        errorElement.textContent = `Error: ${error}`;
+        this.messageContainer.appendChild(errorElement);
+        this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
+    }
+
+    private handleMaximizeEditor() {
+        const inputBox = this.bottomPanel.querySelector('textarea');
+        if (inputBox) {
+            vscode.postMessage({
+                command: 'openFocusEditor',
+                payload: {
+                    content: inputBox.value,
+                    modelId: this.modelSelector.value,
+                    promptId: this.promptSelector.value
+                }
+            });
+            this.toggleMaximizeButton(true);
+        }
+    }
+
+    private toggleMaximizeButton(isMaximized: boolean) {
+        const button = this.bottomPanel.querySelector('button[data-action="maximize-editor"]') as HTMLButtonElement;
+        if (button) {
+            if (isMaximized) {
+                button.innerHTML = `<i class="codicon codicon-screen-normal"></i>`;
+                button.title = '恢复至侧边栏';
+            } else {
+                button.innerHTML = `<i class="codicon codicon-screen-full"></i>`;
+                button.title = '最大化编辑';
+            }
+        }
+    }
+
+    private renderMessages() {
+        this.messageContainer.innerHTML = '';
+        this.messages.forEach((msg, index) => {
+            const element = new MessageBlock(msg, index).render();
+            if (this.editingMessageIndex === index) {
+                element.classList.add('editing');
+            }
+            this.messageContainer.appendChild(element);
+        });
+        this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
+    }
+
+    private renderBottomInput() {
+        const container = this.bottomPanel.querySelector('.chat-input-box-container');
+        if (!container) return;
+
+        container.innerHTML = `<textarea placeholder="输入消息，或从下拉菜单选择提示词..."></textarea>`;
+        const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+
+        textarea.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this.handleSendOrSave();
+            }
+        });
+
+        textarea.addEventListener('input', () => {
+            this.autoResizeInput(textarea);
+            vscode.postMessage({
+                command: 'updateWebviewContent',
+                payload: { content: textarea.value }
+            });
+        });
+
+        this.updateSendButtonState();
+    }
+
+    private updateSendButtonState() {
+        const sendButton = this.bottomPanel.querySelector('button[data-action="send-or-save"]');
+        if (sendButton) {
+            if (this.isStreaming) {
+                sendButton.textContent = 'Stop';
+                sendButton.classList.add('streaming');
+            } else if (this.editingMessageIndex !== null) {
+                sendButton.textContent = 'Save';
+                sendButton.classList.remove('streaming');
+            } else {
+                sendButton.textContent = 'Send';
+                sendButton.classList.remove('streaming');
+            }
+        }
+    }
+
+    private renderInitialLayout(): string {
+        return `
+            <div class="chat-container">
+                <div class="messages-list"></div>
+                <div class="chat-sticky-bottom">
+                    <div class="chat-quick-actions">
+                        <label for="model-selector">Model:</label>
+                        <select id="model-selector"></select>
+                        <label for="prompt-selector">Prompt:</label>
+                        <select id="prompt-selector"></select>
+                        <button data-action="maximize-editor" title="最大化编辑">
+                            <i class="codicon codicon-screen-full"></i>
+                        </button>
+                        <button data-action="send-or-save">Send</button>
+                    </div>
+                    <div class="chat-input-box-container"></div>
+                </div>
+            </div>
+        `;
+    }
+
+    private renderModelSelector() {
+        this.modelSelector.innerHTML = '';
+        const defaultModel = this.modelConfigs.find(c => c.isDefault);
+        this.modelConfigs.forEach(config => {
+            const option = document.createElement('option');
+            option.value = config.id;
+            option.textContent = config.name;
+            if (defaultModel && config.id === defaultModel.id) {
+                option.selected = true;
+            }
+            this.modelSelector.appendChild(option);
+        });
+    }
+
+    private renderPromptSelector() {
+        this.promptSelector.innerHTML = '<option value="">Select a prompt...</option>';
+        this.prompts.forEach(prompt => {
+            const option = document.createElement('option');
+            option.value = prompt.id;
+            option.textContent = prompt.title;
+            this.promptSelector.appendChild(option);
+        });
+    }
+
+    private autoResizeInput(textarea: HTMLTextAreaElement) {
+        textarea.style.height = 'auto';
+        const scrollHeight = textarea.scrollHeight;
+        const maxHeight = 250; // Synced with main.css
+
+        if (scrollHeight > maxHeight) {
+            textarea.style.height = `${maxHeight}px`;
+            textarea.style.overflowY = 'auto';
+        } else {
+            textarea.style.height = `${scrollHeight}px`;
+            textarea.style.overflowY = 'hidden';
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/views/FocusEditorView.ts ---
+import { vscode } from "../vscode";
+import { ModelConfig, Prompt } from "../../common/types";
+
+export class FocusEditorView {
+    private parent: HTMLElement;
+    private modelConfigs: ModelConfig[] = [];
+    private prompts: Prompt[] = [];
+    private modelSelector: HTMLSelectElement;
+    private promptSelector: HTMLSelectElement;
+    private textarea: HTMLTextAreaElement;
+
+    constructor(container: HTMLElement, initialData: { content: string, modelId?: string, promptId?: string }) {
+        this.parent = container;
+        this.parent.innerHTML = this.render();
+        
+        this.modelSelector = this.parent.querySelector('#model-selector') as HTMLSelectElement;
+        this.promptSelector = this.parent.querySelector('#prompt-selector') as HTMLSelectElement;
+        this.textarea = this.parent.querySelector('textarea') as HTMLTextAreaElement;
+
+        this.textarea.value = initialData.content;
+        if (initialData.modelId) {
+            this.modelSelector.value = initialData.modelId;
+        }
+        if (initialData.promptId) {
+            this.promptSelector.value = initialData.promptId;
+        }
+
+        this.setupEventListeners();
+    }
+
+    public render(): string {
+        return `
+            <div class="focus-editor-container">
+                <div class="chat-quick-actions">
+                    <label for="model-selector">Model:</label>
+                    <select id="model-selector"></select>
+                    <label for="prompt-selector">Prompt:</label>
+                    <select id="prompt-selector"></select>
+                    <button data-action="minimize-editor" title="恢复至侧边栏">
+                        <i class="codicon codicon-screen-normal"></i>
+                    </button>
+                    <button data-action="send-message">Send</button>
+                </div>
+                <div class="chat-input-box-container">
+                     <textarea placeholder="输入消息，或从下拉菜单选择提示词..."></textarea>
+                </div>
+            </div>
+        `;
+    }
+
+    private setupEventListeners() {
+        this.parent.addEventListener('click', (event) => {
+            const target = event.target as HTMLElement;
+            const button = target.closest('button');
+            if (!button) return;
+
+            const action = button.dataset.action;
+            switch (action) {
+                case 'send-message':
+                    this.handleSendMessage();
+                    break;
+                case 'minimize-editor':
+                    vscode.postMessage({ command: 'closeFocusEditor' });
+                    break;
+            }
+        });
+
+        this.modelSelector.addEventListener('change', () => {
+            vscode.postMessage({
+                command: 'syncStateChange',
+                payload: { modelId: this.modelSelector.value }
+            });
+        });
+
+        this.promptSelector.addEventListener('change', () => {
+            const selectedPromptId = this.promptSelector.value;
+            vscode.postMessage({
+                command: 'syncStateChange',
+                payload: { promptId: selectedPromptId }
+            });
+        });
+
+        this.textarea.addEventListener('input', () => {
+            vscode.postMessage({
+                command: 'updateWebviewContent',
+                payload: { content: this.textarea.value }
+            });
+        });
+
+        this.textarea.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this.handleSendMessage();
+            }
+        });
+
+        window.addEventListener('message', event => {
+            const message = event.data;
+            switch (message.command) {
+                case 'updateState':
+                    this.updateState(message.payload);
+                    break;
+                case 'updatePrompts':
+                    this.setPrompts(message.payload);
+                    break;
+                case 'updateContent':
+                    this.updateContent(message.payload.content);
+                    break;
+            }
+        });
+    }
+
+    public setModelConfigs(configs: ModelConfig[]) {
+        this.modelConfigs = configs;
+        const currentVal = this.modelSelector.value;
+        this.renderModelSelector();
+        this.modelSelector.value = currentVal;
+    }
+
+    public setPrompts(prompts: Prompt[]) {
+        this.prompts = prompts;
+        const currentVal = this.promptSelector.value;
+        this.renderPromptSelector();
+        this.promptSelector.value = currentVal;
+    }
+
+    public updateContent(content: string) {
+        if (this.textarea.value !== content) {
+            this.textarea.value = content;
+        }
+    }
+
+    public updateState(state: { modelId?: string, promptId?: string }) {
+        if (state.modelId) {
+            this.modelSelector.value = state.modelId;
+        }
+        if (state.promptId) {
+            this.promptSelector.value = state.promptId;
+        }
+    }
+
+    public clearInput() {
+        this.textarea.value = '';
+    }
+
+    private handleSendMessage() {
+        const prompt = this.textarea.value.trim();
+        if (prompt) {
+            const selectedModelId = this.modelSelector.value;
+            const selectedConfig = this.modelConfigs.find(c => c.id === selectedModelId);
+
+            if (!selectedConfig) {
+                vscode.postMessage({ command: 'error', payload: 'Please select a valid model from settings.' });
+                return;
+            }
+            
+            vscode.postMessage({ command: 'sendMessage', payload: { prompt, config: selectedConfig } });
+            this.clearInput();
+        }
+    }
+
+    private renderModelSelector() {
+        this.modelSelector.innerHTML = '';
+        const defaultModel = this.modelConfigs.find(c => c.isDefault);
+        this.modelConfigs.forEach(config => {
+            const option = document.createElement('option');
+            option.value = config.id;
+            option.textContent = config.name;
+            if (defaultModel && config.id === defaultModel.id) {
+                option.selected = true;
+            }
+            this.modelSelector.appendChild(option);
+        });
+    }
+
+    private renderPromptSelector() {
+        this.promptSelector.innerHTML = '<option value="">Select a prompt...</option>';
+        this.prompts.forEach(prompt => {
+            const option = document.createElement('option');
+            option.value = prompt.id;
+            option.textContent = prompt.title;
+            this.promptSelector.appendChild(option);
+        });
+    }
+
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/views/PromptEditorView.ts ---
+import { Prompt } from '../../common/types';
+import { vscode } from '../vscode';
+
+export class PromptEditorView {
+    private element: HTMLElement;
+    private prompt: Prompt | null = null;
+    private isDirty = false;
+
+    constructor(private readonly parent: HTMLElement) {
+        this.element = document.createElement('div');
+        this.element.className = 'prompt-editor-view';
+        this.parent.appendChild(this.element);
+    }
+
+    public show(prompt?: Prompt) {
+        this.prompt = prompt ? { ...prompt } : null;
+        this.isDirty = false;
+        this.render();
+        this.addEventListeners();
+        this.element.style.display = 'flex';
+    }
+
+    public hide() {
+        if (this.isDirty) {
+            const confirmation = window.confirm('您有未保存的更改，确定要放弃吗？');
+            if (!confirmation) {
+                return;
+            }
+        }
+        this.element.style.display = 'none';
+        this.element.innerHTML = '';
+        // Let the extension handle the navigation
+        vscode.postMessage({ command: 'cancelPromptEdit' });
+    }
+
+    private render() {
+        const title = this.prompt?.title ?? '';
+        const content = this.prompt?.content ?? '';
+        const headerTitle = this.prompt ? `编辑: ${title}` : '新建提示词';
+
+        this.element.innerHTML = `
+            <div class="view-header">
+                <h3>${headerTitle}</h3>
+                <div class="actions">
+                    <button id="save-prompt-btn" class="codicon-btn">
+                        <i class="codicon codicon-save"></i>
+                        <span>保存</span>
+                    </button>
+                    <button id="cancel-prompt-edit-btn" class="codicon-btn secondary">
+                        <i class="codicon codicon-close"></i>
+                        <span>取消</span>
+                    </button>
+                </div>
+            </div>
+            <div class="prompt-editor-form">
+                <div class="form-group">
+                    <label for="prompt-title">标题</label>
+                    <input type="text" id="prompt-title" value="${title}" required>
+                </div>
+                <div class="form-group">
+                    <label for="prompt-content">内容</label>
+                    <textarea id="prompt-content" rows="15">${content}</textarea>
+                </div>
+            </div>
+        `;
+    }
+
+    private addEventListeners() {
+        const saveBtn = this.element.querySelector('#save-prompt-btn');
+        const cancelBtn = this.element.querySelector('#cancel-prompt-edit-btn');
+        const titleInput = this.element.querySelector('#prompt-title') as HTMLInputElement;
+        const contentTextArea = this.element.querySelector('#prompt-content') as HTMLTextAreaElement;
+
+        const markDirty = () => { this.isDirty = true; };
+        titleInput.addEventListener('input', markDirty);
+        contentTextArea.addEventListener('input', markDirty);
+
+        if (saveBtn) {
+            saveBtn.addEventListener('click', () => {
+                if (!titleInput.value.trim()) {
+                    vscode.postMessage({ command: 'showError', payload: '标题不能为空。' });
+                    return;
+                }
+
+                const now = new Date().toISOString();
+                const promptToSave: Prompt = {
+                    id: this.prompt?.id || `prompt_${Date.now()}`,
+                    title: titleInput.value.trim(),
+                    content: contentTextArea.value,
+                    createdAt: this.prompt?.createdAt || now,
+                    updatedAt: now,
+                };
+
+                vscode.postMessage({ command: 'savePrompt', payload: promptToSave });
+                this.isDirty = false;
+            });
+        }
+
+        if (cancelBtn) {
+            cancelBtn.addEventListener('click', () => {
+                this.hide();
+            });
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/views/PromptManagerView.ts ---
+import { Prompt } from '../../common/types';
+import { vscode } from '../vscode';
+
+export class PromptManagerView {
+    private prompts: Prompt[] = [];
+    private filteredPrompts: Prompt[] = [];
+    private element: HTMLElement;
+
+    constructor(private readonly parent: HTMLElement) {
+        this.element = document.createElement('div');
+        this.element.className = 'prompt-manager-view';
+        this.parent.appendChild(this.element);
+        this.render();
+        this.addEventListeners();
+    }
+
+    public update(prompts: Prompt[]) {
+        this.prompts = prompts.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+        this.filteredPrompts = [...this.prompts];
+        this.render();
+        this.addEventListeners();
+    }
+
+    public getPrompts(): Prompt[] {
+        return this.prompts;
+    }
+
+    private render() {
+        this.element.innerHTML = `
+            <div class="view-header">
+                <div class="search-bar">
+                    <i class="codicon codicon-search"></i>
+                    <input type="text" id="prompt-search-input" placeholder="搜索提示词...">
+                </div>
+                <button id="new-prompt-btn" class="codicon-btn">
+                    <i class="codicon codicon-add"></i>
+                    <span>新建提示词</span>
+                </button>
+            </div>
+            <div class="prompt-list-container">
+                ${this.filteredPrompts.length > 0 ? this.renderList() : this.renderEmptyState()}
+            </div>
+        `;
+    }
+
+    private renderList(): string {
+        return `
+            <ul class="prompt-list">
+                ${this.filteredPrompts.map(prompt => this.renderListItem(prompt)).join('')}
+            </ul>
+        `;
+    }
+
+    private renderListItem(prompt: Prompt): string {
+        const summary = prompt.content.substring(0, 100) + (prompt.content.length > 100 ? '...' : '');
+        const lastUpdated = new Date(prompt.updatedAt).toLocaleString();
+
+        return `
+            <li class="prompt-list-item" data-id="${prompt.id}">
+                <div class="prompt-item-main">
+                    <div class="prompt-item-title">${prompt.title}</div>
+                    <div class="prompt-item-summary">${summary}</div>
+                </div>
+                <div class="prompt-item-meta">
+                    <div class="prompt-item-time">${lastUpdated}</div>
+                    <div class="prompt-item-actions">
+                        <button class="icon-btn edit-prompt-btn" data-id="${prompt.id}" title="编辑">
+                            <i class="codicon codicon-edit"></i>
+                        </button>
+                        <button class="icon-btn delete-prompt-btn" data-id="${prompt.id}" title="删除">
+                            <i class="codicon codicon-trash"></i>
+                        </button>
+                    </div>
+                </div>
+            </li>
+        `;
+    }
+
+    private renderEmptyState(): string {
+        return `
+            <div class="empty-state">
+                <p>您还没有任何提示词模板，点击“新建提示词”来创建第一个吧！</p>
+                <button id="new-prompt-btn-empty" class="highlighted-btn">新建提示词</button>
+            </div>
+        `;
+    }
+
+    private addEventListeners() {
+        // New prompt button
+        const newPromptBtn = this.element.querySelector('#new-prompt-btn');
+        if (newPromptBtn) {
+            newPromptBtn.addEventListener('click', () => {
+                vscode.postMessage({ command: 'newPrompt' });
+            });
+        }
+        const newPromptBtnEmpty = this.element.querySelector('#new-prompt-btn-empty');
+        if (newPromptBtnEmpty) {
+            newPromptBtnEmpty.addEventListener('click', () => {
+                vscode.postMessage({ command: 'newPrompt' });
+            });
+        }
+
+        // Search input
+        const searchInput = this.element.querySelector('#prompt-search-input') as HTMLInputElement;
+        if (searchInput) {
+            searchInput.addEventListener('input', (e) => {
+                const searchTerm = (e.target as HTMLInputElement).value.toLowerCase();
+                this.filteredPrompts = this.prompts.filter(p => 
+                    p.title.toLowerCase().includes(searchTerm) || 
+                    p.content.toLowerCase().includes(searchTerm)
+                );
+                this.render();
+                this.addEventListeners();
+            });
+        }
+
+        // List item clicks
+        this.element.querySelectorAll('.prompt-list-item').forEach(item => {
+            item.addEventListener('click', (e) => {
+                const target = e.target as HTMLElement;
+                // Don't trigger edit if clicking on a button
+                if (!target.closest('button')) {
+                    const promptId = item.getAttribute('data-id');
+                    if (promptId) {
+                        vscode.postMessage({ command: 'editPrompt', payload: { id: promptId } });
+                    }
+                }
+            });
+        });
+
+        // Edit buttons
+        this.element.querySelectorAll('.edit-prompt-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const promptId = (btn as HTMLElement).dataset.id;
+                if (promptId) {
+                    vscode.postMessage({ command: 'editPrompt', payload: { id: promptId } });
+                }
+            });
+        });
+
+        // Delete buttons
+        this.element.querySelectorAll('.delete-prompt-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const promptId = (btn as HTMLElement).dataset.id;
+                if (promptId) {
+                    vscode.postMessage({ command: 'deletePrompt', payload: { id: promptId } });
+                }
+            });
+        });
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/views/SettingsView.ts ---
+import { ModelConfig } from "../../common/types";
+import { vscode } from "../vscode";
+
+export class SettingsView {
+    private configs: ModelConfig[] = [];
+
+    constructor(private readonly parent: HTMLElement) {
+        this.render();
+        this.setupEventListeners();
+    }
+
+    public setModelConfigs(configs: ModelConfig[]) {
+        this.configs = configs;
+        this.render();
+    }
+
+    public getModelConfigs(): ModelConfig[] {
+        return this.configs;
+    }
+
+    private setupEventListeners() {
+        this.parent.addEventListener('click', (event) => {
+            const target = event.target as HTMLElement;
+            const button = target.closest('button');
+            if (!button) return;
+
+            const id = button.dataset.id;
+            if (button.matches('.btn-add-model')) {
+                this.addEmptyConfigForm();
+            } else if (button.matches('.btn-save-model')) {
+                this.saveConfig(id);
+            } else if (button.matches('.btn-delete-model')) {
+                this.deleteConfig(id);
+            } else if (button.matches('.btn-set-default')) {
+                this.setDefault(id);
+            }
+        });
+    }
+
+    private addEmptyConfigForm() {
+        const newConfig: ModelConfig = { 
+            id: `new-${Date.now()}`, 
+            name: '', 
+            baseUrl: '', 
+            apiKey: '', 
+            modelId: '',
+            isDefault: this.configs.length === 0 
+        };
+        this.configs.push(newConfig);
+        this.render();
+    }
+
+    private saveAllConfigs() {
+        vscode.postMessage({ command: 'saveModelConfigs', payload: this.configs });
+    }
+
+    private setDefault(id?: string) {
+        if (!id) return;
+        this.configs.forEach(c => c.isDefault = c.id === id);
+        this.saveAllConfigs();
+        this.render();
+    }
+
+    private saveConfig(id?: string) {
+        if (!id) return;
+        const form = this.parent.querySelector(`#config-form-${id}`) as HTMLFormElement;
+        if (!form) return;
+
+        const name = (form.querySelector('input[name="name"]') as HTMLInputElement).value;
+        const baseUrl = (form.querySelector('input[name="baseUrl"]') as HTMLInputElement).value;
+        const apiKey = (form.querySelector('input[name="apiKey"]') as HTMLInputElement).value;
+        const modelId = (form.querySelector('input[name="modelId"]') as HTMLInputElement).value;
+
+        const index = this.configs.findIndex(c => c.id === id);
+        if (index === -1) return;
+
+        const isNew = id.startsWith('new-');
+        const newId = isNew ? `model-${Date.now()}` : id;
+        
+        this.configs[index] = { ...this.configs[index], id: newId, name, baseUrl, apiKey, modelId };
+        
+        this.saveAllConfigs();
+    }
+
+    private deleteConfig(id?: string) {
+        if (!id) return;
+        this.configs = this.configs.filter(c => c.id !== id);
+        // If the deleted model was the default, make the first one default
+        if (this.configs.length > 0 && !this.configs.some(c => c.isDefault)) {
+            this.configs[0].isDefault = true;
+        }
+        this.saveAllConfigs();
+    }
+
+    private render() {
+        this.parent.innerHTML = `
+            <div class="settings-container">
+                <div class="view-header">
+                    <h2>Model Settings</h2>
+                    <button class="btn-add-model add-btn" title="Add new model configuration">
+                        <i class="codicon codicon-add"></i>
+                    </button>
+                </div>
+                <div id="model-configs-list">
+                    ${this.configs.map(config => this.renderConfigForm(config)).join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    private renderConfigForm(config: ModelConfig): string {
+        return `
+            <form class="config-form" id="config-form-${config.id}" data-id="${config.id}">
+                <div class="form-header">
+                    <strong class="form-title">${config.name || 'New Model'}</strong>
+                    ${config.isDefault ? '<span class="default-badge">Default</span>' : ''}
+                </div>
+                <div class="form-group">
+                    <label for="name-${config.id}">Model Name</label>
+                    <input type="text" id="name-${config.id}" name="name" placeholder="e.g., GPT-4o" value="${config.name}">
+                </div>
+                <div class="form-group">
+                    <label for="baseUrl-${config.id}">Base URL</label>
+                    <input type="text" id="baseUrl-${config.id}" name="baseUrl" placeholder="https://api.openai.com/v1" value="${config.baseUrl}">
+                </div>
+                <div class="form-group">
+                    <label for="apiKey-${config.id}">API Key</label>
+                    <input type="password" id="apiKey-${config.id}" name="apiKey" placeholder="sk-..." value="${config.apiKey}">
+                </div>
+                <div class="form-group">
+                    <label for="modelId-${config.id}">Model ID</label>
+                    <input type="text" id="modelId-${config.id}" name="modelId" placeholder="gpt-4o" value="${config.modelId}">
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn-save-model" data-id="${config.id}">Save</button>
+                    <button type="button" class="btn-delete-model" data-id="${config.id}">Delete</button>
+                    ${!config.isDefault ? `<button type="button" class="btn-set-default" data-id="${config.id}">Set as Default</button>` : ''}
+                </div>
+            </form>
+        `;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/views/WelcomeView.ts ---
+export class WelcomeView {
+    constructor(private readonly parent: HTMLElement) {
+        this.parent.innerHTML = this.render();
+    }
+
+    private render(): string {
+        return `
+            <div class="welcome-container">
+                <h2>Welcome to CodeWiki</h2>
+                <p>Your intelligent assistant for software design.</p>
+                <button id="btn-new-chat">New Chat</button>
+            </div>
+        `;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/vscode.ts ---
+import type { PostMessage } from '../common/types';
+
+/**
+ * A typed wrapper around the VS Code API that is exposed to the webview.
+ */
+interface VsCodeApi {
+    postMessage(message: PostMessage): void;
+    getState(): any;
+    setState(newState: any): void;
+}
+
+declare const acquireVsCodeApi: () => VsCodeApi;
+
+export const vscode = acquireVsCodeApi();
+
+
+--------------------------------------------------------------------------------
