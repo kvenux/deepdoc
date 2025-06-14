@@ -1,0 +1,727 @@
+body,
+html {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    background-color: var(--vscode-sideBar-background);
+    color: var(--vscode-editor-foreground);
+    font-family: var(--vscode-font-family);
+    display: flex;
+    /* Make body/html a flex container */
+    flex-direction: column;
+    /* Stack children vertically */
+    position: absolute;
+    /* Position absolutely to fill the entire webview */
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+}
+
+#root {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    /* Use 100% relative to absolute positioned parent */
+    flex: 1;
+    /* Allow #root to grow and take available space */
+}
+
+.top-toolbar {
+    display: flex;
+    justify-content: flex-start;
+    padding: 5px;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    flex-shrink: 0;
+}
+
+.nav-icon {
+    cursor: pointer;
+    padding: 5px;
+    margin: 0 5px;
+    border-radius: 5px;
+}
+
+.nav-icon:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.nav-icon.active {
+    background-color: var(--vscode-list-activeSelectionBackground);
+}
+
+.main-content {
+    flex-grow: 1;
+    /* Removed overflow-y: hidden to allow internal scrolling */
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+}
+
+.view {
+    display: none;
+    height: 100%;
+    width: 100%;
+    flex-direction: column;
+}
+
+.view.active {
+    display: flex;
+}
+
+
+/* Chat View & Focus Editor Common Styles */
+.chat-container,
+.focus-editor-container {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    /* Ensure it takes full available space within its flex parent */
+}
+
+.messages-list {
+    flex-grow: 1;
+    /* Allow it to grow and take available space */
+    overflow-y: auto;
+    /* Make this the scrolling container */
+    min-height: 0;
+    /* Allow the flex item to shrink below its content size */
+    width: 100%;
+    /* Ensure it takes full width of its flex container */
+    box-sizing: border-box;
+    /* Include padding and border in the element's total width and height */
+}
+
+.chat-sticky-bottom {
+    /* No position: sticky needed, flexbox handles it */
+    flex-shrink: 0;
+    /* Prevent shrinking */
+    width: 100%;
+    /* Ensure it takes full width of its flex container */
+    box-sizing: border-box;
+    /* Include padding and border in the element's total width and height */
+
+    padding: 10px;
+    border-top: 1px solid var(--vscode-editorGroup-border);
+    background-color: var(--vscode-sideBar-background);
+    /* Give it a solid background */
+
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.chat-quick-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.chat-quick-actions label {
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+}
+
+#model-selector,
+#prompt-selector {
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 5px;
+    border-radius: 5px;
+    flex-grow: 1;
+}
+
+.chat-quick-actions button {
+    margin-left: auto;
+    margin-top: 0;
+}
+
+.chat-input-box-container {
+    display: flex;
+}
+
+.chat-input-box-container textarea {
+    flex-grow: 1;
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 8px;
+    resize: none;
+    border-radius: 5px;
+}
+
+/* Chat View Specific */
+.chat-container .chat-input-box-container textarea {
+    max-height: 250px;
+    /* Increased height */
+}
+
+/* Focus Editor View Specific */
+.focus-editor-container {
+    padding: 10px;
+}
+
+.focus-editor-container .chat-input-box-container {
+    flex-grow: 1;
+}
+
+.focus-editor-container .chat-input-box-container textarea {
+    height: 100%;
+    width: 100%;
+    max-height: none;
+    box-sizing: border-box;
+}
+
+
+/* Message Block Styles */
+.message-block {
+    padding: 15px;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    position: relative;
+}
+
+.message-content {
+    transition: max-height 0.3s ease-in-out;
+    overflow: hidden;
+    /* Hide content that exceeds max-height */
+    position: relative;
+}
+
+.message-block.folded .message-content {
+    max-height: 70px;
+    /* Adjust as needed, approx 3-4 lines */
+}
+
+/* Add a "read more" fade effect when folded */
+.message-block.folded .message-content::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 30px;
+    background: linear-gradient(to bottom, transparent, var(--vscode-editor-background));
+    pointer-events: none;
+    /* Allows clicks to pass through */
+}
+
+.message-block:last-child {
+    border-bottom: none;
+}
+
+.message-toolbar {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    background-color: var(--vscode-editorWidget-background);
+    border-radius: 5px;
+    padding: 2px;
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.1s ease-in-out;
+    pointer-events: none;
+}
+
+.message-block:hover .message-toolbar {
+    opacity: 1;
+    pointer-events: all;
+}
+
+.message-block.user {
+    background-color: var(--vscode-list-hoverBackground);
+    border-left: 3px solid var(--vscode-focusBorder);
+    padding-left: 12px;
+}
+
+.message-block.folded.user .message-content::after {
+    background: linear-gradient(to bottom, transparent, var(--vscode-list-hoverBackground));
+}
+
+.message-block.assistant {
+    background-color: var(--vscode-editor-background);
+}
+
+.message-block.editing {
+    border: 1px solid var(--vscode-focusBorder);
+    box-shadow: 0 0 3px var(--vscode-focusBorder);
+    border-radius: 5px;
+}
+
+.message-block.error {
+    color: var(--vscode-errorForeground);
+}
+
+button.streaming {
+    background-color: var(--vscode-button-secondaryBackground);
+}
+
+button.streaming:hover {
+    background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+/* Settings View */
+.config-form {
+    border: 1px solid var(--vscode-editorGroup-border);
+    padding: 15px;
+    margin-bottom: 15px;
+    border-radius: 5px;
+    background-color: var(--vscode-sideBar-sectionHeader-background);
+}
+
+.form-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.form-title {
+    font-size: 1.1em;
+}
+
+.default-badge {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-size: 0.8em;
+}
+
+.form-group {
+    margin-bottom: 10px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+}
+
+.config-form input {
+    width: calc(100% - 20px);
+    margin-bottom: 5px;
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 5px;
+}
+
+.form-actions {
+    margin-top: 15px;
+    display: flex;
+    gap: 10px;
+}
+
+.form-actions button {
+    margin-top: 0;
+}
+
+button {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none;
+    padding: 8px 12px;
+    cursor: pointer;
+    border-radius: 5px;
+}
+
+button:hover {
+    background-color: var(--vscode-button-hoverBackground);
+}
+
+/* Generic View Header */
+.view-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.view-header h2 {
+    margin: 0;
+}
+
+.add-btn {
+    font-size: 20px;
+    font-weight: bold;
+    padding: 0px 8px;
+}
+
+/* Chat History View */
+.history-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.history-item {
+    display: flex;
+    align-items: center;
+    padding: 15px;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    cursor: pointer;
+    position: relative;
+}
+
+.history-item:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.history-item-content {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.history-item-timestamp {
+    font-size: 0.8em;
+    color: var(--vscode-descriptionForeground);
+    margin-bottom: 5px;
+}
+
+.history-item-title {
+    font-size: 1em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.history-item-actions {
+    display: flex;
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    background-color: var(--vscode-list-hoverBackground);
+    opacity: 0;
+    transition: opacity 0.1s ease-in-out;
+    pointer-events: none;
+}
+
+.history-item:hover .history-item-actions {
+    opacity: 1;
+    pointer-events: all;
+}
+
+.icon-button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--vscode-foreground);
+    padding: 5px;
+    border-radius: 5px;
+}
+
+.icon-button:hover {
+    background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.history-empty {
+    text-align: center;
+    padding: 20px;
+    color: var(--vscode-descriptionForeground);
+}
+
+/*=================================*/
+/*========= Prompt Manager ========*/
+/*=================================*/
+
+.prompt-manager-view,
+.prompt-editor-view {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+.prompt-editor-view {
+    display: none;
+    /* Hidden by default */
+}
+
+/* Search Bar in Header */
+.search-bar {
+    display: flex;
+    align-items: center;
+    flex-grow: 1;
+    margin-right: 15px;
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border);
+    border-radius: 5px;
+    padding: 0 8px;
+}
+
+.search-bar i {
+    margin-right: 8px;
+    color: var(--vscode-descriptionForeground);
+}
+
+.search-bar input {
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--vscode-input-foreground);
+    padding: 6px 0;
+    outline: none;
+}
+
+.codicon-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none;
+    padding: 6px 12px;
+    cursor: pointer;
+    border-radius: 5px;
+}
+
+.codicon-btn:hover {
+    background-color: var(--vscode-button-hoverBackground);
+}
+
+.codicon-btn.secondary {
+    background-color: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+}
+
+.codicon-btn.secondary:hover {
+    background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+.icon-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--vscode-foreground);
+    padding: 5px;
+    border-radius: 5px;
+}
+
+.icon-btn:hover {
+    background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+
+/* Prompt List */
+.prompt-list-container {
+    flex-grow: 1;
+    overflow-y: auto;
+}
+
+.prompt-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.prompt-list-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 15px;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    cursor: pointer;
+    transition: background-color 0.1s ease-in-out;
+}
+
+.prompt-list-item:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.prompt-item-main {
+    flex-grow: 1;
+    margin-right: 15px;
+    overflow: hidden;
+}
+
+.prompt-item-title {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 4px;
+}
+
+.prompt-item-summary {
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.prompt-item-meta {
+    flex-shrink: 0;
+    text-align: right;
+}
+
+.prompt-item-time {
+    font-size: 0.8em;
+    color: var(--vscode-descriptionForeground);
+    margin-bottom: 8px;
+}
+
+.prompt-item-actions {
+    display: flex;
+    gap: 5px;
+    opacity: 0;
+    transition: opacity 0.1s ease-in-out;
+}
+
+.prompt-list-item:hover .prompt-item-actions {
+    opacity: 1;
+}
+
+/* Empty State */
+.empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--vscode-descriptionForeground);
+}
+
+.empty-state p {
+    margin-bottom: 15px;
+}
+
+.highlighted-btn {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: 1px solid var(--vscode-button-border, transparent);
+    padding: 8px 15px;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.highlighted-btn:hover {
+    background-color: var(--vscode-button-hoverBackground);
+}
+
+/*=================================*/
+/*========= Prompt Editor =========*/
+/*=================================*/
+
+.prompt-editor-form {
+    flex-grow: 1;
+    overflow-y: auto;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+}
+
+.prompt-editor-form .form-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.prompt-editor-form .form-group:last-child {
+    flex-grow: 1;
+}
+
+.prompt-editor-form input,
+.prompt-editor-form textarea {
+    width: calc(100% - 22px);
+    /* 100% - padding - border */
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 10px;
+    border-radius: 5px;
+}
+
+.prompt-editor-form textarea {
+    flex-grow: 1;
+    resize: none;
+    font-family: var(--vscode-editor-font-family);
+}
+
+/*=================================*/
+/*====== Rich Input & Pills =======*/
+/*=================================*/
+
+/* 将原来的输入框容器升级为富文本样式 */
+.chat-input-box {
+    flex-grow: 1;
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 8px;
+    resize: none;
+    /* 虽然不是 textarea，但保留这个概念 */
+    border-radius: 5px;
+    min-height: 22px;
+    /* 约等于单行 textarea 的高度 */
+    max-height: 250px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    /* 保证空格和换行被保留 */
+    word-wrap: break-word;
+}
+
+.chat-input-box:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+}
+
+/* 胶囊 (Pill) 的样式 */
+.content-pill {
+    display: inline-block;
+    background-color: var(--vscode-toolbar-hoverBackground);
+    border-radius: 12px;
+    padding: 2px 10px;
+    margin: 0 2px;
+    cursor: pointer;
+    font-size: 0.9em;
+    transition: background-color 0.2s ease;
+}
+
+.content-pill:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.content-pill .pill-tag {
+    font-weight: bold;
+    color: var(--vscode-button-background);
+    /* 使用主题色突出标签名 */
+}
+
+/* 展开后的编辑器容器 */
+.pill-editor {
+    display: block;
+    border: 1px solid var(--vscode-focusBorder);
+    border-radius: 5px;
+    margin: 8px 0;
+    padding: 8px;
+    background-color: var(--vscode-input-background);
+}
+
+.pill-editor textarea {
+    width: 100%;
+    height: 150px;
+    /* 初始高度 */
+    background: transparent;
+    border: none;
+    color: var(--vscode-input-foreground);
+    resize: vertical;
+    /* 允许用户调整高度 */
+    font-family: var(--vscode-editor-font-family);
+}
+
+.pill-editor textarea:focus {
+    outline: none;
+}
+
+.pill-editor-actions {
+    text-align: right;
+    margin-top: 5px;
+}
+
+/* 确保 contenteditable div 中的 p 标签没有多余的 margin */
+.chat-input-box p {
+    margin: 0;
+}
