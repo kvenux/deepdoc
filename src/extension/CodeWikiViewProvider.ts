@@ -1,8 +1,22 @@
+// src/extension/CodeWikiViewProvider.ts (在顶部添加)
+
 import * as vscode from 'vscode';
 import { PostMessage, Conversation, ChatMessage, Prompt } from '../common/types';
 import { StateManager } from './StateManager';
 import { LLMService } from './LLMService';
 import { v4 as uuidv4 } from 'uuid';
+
+
+// 导入 YAML 解析器
+import * as yaml from 'js-yaml';
+// 导入新的工具
+import { GetFileSummariesTool, GetFilesContentByListTool } from './tools/fileSystemTools';
+import { createFileSelectorLLMTool } from './tools/llmTools';
+// 导入我们的执行器和相关类型
+import { CustomAgentExecutor, ToolChainStep, LlmPromptTemplate, AgentExecutorCallbacks } from './agents/CustomAgentExecutor';
+// 导入 LangChain 相关类
+import { ChatOpenAI } from '@langchain/openai';
+import { StructuredTool } from '@langchain/core/tools';
 
 export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
 
@@ -13,6 +27,9 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
     private _stateManager: StateManager;
     private _llmService: LLMService;
     private _activeConversation: Conversation | null = null;
+    private _tools: StructuredTool[];
+    private _agentExecutor: CustomAgentExecutor | null = null;
+
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -20,6 +37,38 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
     ) {
         this._stateManager = new StateManager(this._context.globalState);
         this._llmService = new LLMService();
+        this._tools = []; // 初始化为空数组
+        this.initializeTools();
+    }
+
+    private async initializeTools() {
+        // 创建一个临时的 LLM 实例，仅用于初始化 LLM-as-a-Tool
+        // Agent 执行时会根据当前配置动态创建新的 LLM 实例
+        const modelConfigs = await this._stateManager.getModelConfigs();
+        const defaultModelConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
+
+        if (defaultModelConfig) {
+            const toolLlm = new ChatOpenAI({
+                modelName: defaultModelConfig.modelId,
+                apiKey: defaultModelConfig.apiKey,
+                configuration: { baseURL: defaultModelConfig.baseUrl },
+                temperature: 0.1, // 工具型LLM温度可以低一些
+            });
+
+            this._tools = [
+                new GetFileSummariesTool(),
+                new GetFilesContentByListTool(),
+                createFileSelectorLLMTool(toolLlm),
+            ];
+
+            this._agentExecutor = new CustomAgentExecutor(this._tools, toolLlm); // 这里的llm只是个占位，运行时会用新的
+        } else {
+            this._tools = [
+                new GetFileSummariesTool(),
+                new GetFilesContentByListTool(),
+            ];
+            console.warn("No default model config found. LLM-based tools will not be available.");
+        }
     }
 
     public resolveWebviewView(
@@ -218,6 +267,76 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
             case 'stopMessage':
                 {
                     this._llmService.abortRequest();
+                    break;
+                }
+            case 'executeActionPrompt':
+                {
+                    if (!this._agentExecutor) {
+                        vscode.window.showErrorMessage("Agent Executor is not initialized. Please configure a model in settings.");
+                        return;
+                    }
+
+                    const { yamlContent, userInputs, modelConfig } = data.payload;
+
+                    try {
+                        const actionPrompt = yaml.load(yamlContent) as {
+                            tool_chain: ToolChainStep[];
+                            llm_prompt_template: LlmPromptTemplate;
+                        };
+
+                        if (!actionPrompt.tool_chain || !actionPrompt.llm_prompt_template) {
+                            throw new Error("Invalid Action Prompt YAML format. Missing 'tool_chain' or 'llm_prompt_template'.");
+                        }
+
+                        // 根据用户在UI上选择的模型配置，动态创建LLM实例
+                        const finalLlm = new ChatOpenAI({
+                            modelName: modelConfig.modelId,
+                            apiKey: modelConfig.apiKey,
+                            streaming: true,
+                            temperature: 0.7,
+                            configuration: { baseURL: modelConfig.baseUrl },
+                        });
+
+                        // 注意：我们需要重新配置 Agent Executor，使其使用最新的 LLM
+                        this._agentExecutor = new CustomAgentExecutor(this._tools, finalLlm);
+
+                        const webview = this._view?.webview;
+                        if (!webview) return;
+
+                        // 定义回调函数，将 Agent 的执行过程实时发送到前端
+                        const callbacks: AgentExecutorCallbacks = {
+                            onToolStart: (toolName, input) => {
+                                webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'tool_start', toolName, input: JSON.stringify(input, null, 2) } });
+                            },
+                            onToolEnd: (toolName, output) => {
+                                webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'tool_end', toolName, output } });
+                            },
+                            onLlmStart: () => {
+                                webview.postMessage({ command: 'startStreaming' }); // 复用已有的流式开始命令
+                            },
+                            onLlmStream: (chunk) => {
+                                webview.postMessage({ command: 'streamData', payload: chunk }); // 复用已有的流式数据命令
+                            },
+                            onLlmEnd: () => {
+                                webview.postMessage({ command: 'streamEnd' }); // 复用已有的流式结束命令
+                            },
+                            onError: (error) => {
+                                webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });
+                            }
+                        };
+
+                        // 启动 Agent Executor
+                        this._agentExecutor.run(
+                            actionPrompt.tool_chain,
+                            userInputs,
+                            actionPrompt.llm_prompt_template,
+                            callbacks
+                        );
+
+                    } catch (error: any) {
+                        vscode.window.showErrorMessage(`Failed to execute action prompt: ${error.message}`);
+                        this._view?.webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });
+                    }
                     break;
                 }
             case 'regenerate':

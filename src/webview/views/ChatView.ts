@@ -192,23 +192,90 @@ export class ChatView {
         if (!inputBox) return;
 
         const prompt = inputBox.value.trim();
-        if (prompt) {
+        if (!prompt) return;
+
+        // --- 临时的 Agent 触发器 ---
+        if (prompt.startsWith('/agent')) {
             const selectedModelId = this.modelSelector.value;
             const selectedConfig = this.modelConfigs.find(c => c.id === selectedModelId);
-
             if (!selectedConfig) {
-                vscode.postMessage({ command: 'error', payload: 'Please select a valid model from settings.' });
+                 vscode.postMessage({ command: 'error', payload: 'Please select a valid model from settings.' });
                 return;
             }
 
-            const message: ChatMessage = { role: 'user', content: prompt };
-            this.messages.push(message);
-            this.renderMessages();
+            const testYaml = `
+title: "生成核心模块设计文档 (智能筛选版)"
+description: "智能分析模块内的所有文件，找出核心文件，并基于它们生成技术文档。"
+input_variables:
+  - name: module_path
+    description: "请输入或选择要分析的模块/文件夹路径。"
+    type: "path"
+    default: "src/extension"
+  - name: task_description
+    description: "简要描述你想分析的核心任务是什么？"
+    type: "text"
+    default: "这个模块的核心功能是处理大模型请求和管理插件状态。"
+tool_chain:
+  - tool: "get_file_summaries"
+    # 修正: 将 input 从字符串改为对象格式，以匹配工具的 schema
+    input: 
+      path: "{module_path}"
+    output_variable: all_file_summaries
+  - tool: "file_selector_llm_tool"
+    input: 
+      file_summaries: "{all_file_summaries}"
+      task_description: "{task_description}"
+    output_variable: selected_files_list
+  - tool: "get_files_content_by_list"
+    # 修正: 将 input 从字符串改为对象格式
+    input:
+      file_paths: "{selected_files_list}"
+    output_variable: selected_files_content
+llm_prompt_template:
+  system: |
+    你是一个经验丰富的软件架构师，你的任务是基于提供的核心文件内容，为模块生成一份详细、专业的技术设计文档。文档需要包含以下部分：1. 模块概述 2. 核心职责 3. 主要组件分析（逐一分析每个文件） 4. 数据流和交互 5. 潜在改进点。请使用 Markdown 格式化你的回答。
+  human: |
+    请根据以下精心筛选出的核心文件，为模块生成一份详细设计文档。
 
+    **核心文件内容如下：**
+    {selected_files_content}
+`;
+            
+            const userInputs = {
+                module_path: "src/extension", // 可以硬编码或从 prompt 中解析
+                task_description: "这个模块的核心功能是处理大模型请求、状态管理和视图提供。"
+            };
+
+            vscode.postMessage({ 
+                command: 'executeActionPrompt', 
+                payload: {
+                    yamlContent: testYaml,
+                    userInputs: userInputs,
+                    modelConfig: selectedConfig
+                }
+            });
             inputBox.value = '';
             this.autoResizeInput(inputBox);
-            vscode.postMessage({ command: 'sendMessage', payload: { prompt, config: selectedConfig } });
+            return; // 结束执行
         }
+        // --- 结束 Agent 触发器 ---
+
+
+        const selectedModelId = this.modelSelector.value;
+        const selectedConfig = this.modelConfigs.find(c => c.id === selectedModelId);
+
+        if (!selectedConfig) {
+            vscode.postMessage({ command: 'error', payload: 'Please select a valid model from settings.' });
+            return;
+        }
+
+        const message: ChatMessage = { role: 'user', content: prompt };
+        this.messages.push(message);
+        this.renderMessages();
+
+        inputBox.value = '';
+        this.autoResizeInput(inputBox);
+        vscode.postMessage({ command: 'sendMessage', payload: { prompt, config: selectedConfig } });
     }
 
     private handleCopy(index: number) {
