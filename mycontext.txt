@@ -4,10 +4,18 @@ src
 ├── common
 │   └── types.ts
 ├── extension
+│   ├── agents
+│   │   └── CustomAgentExecutor.ts
+│   ├── tools
+│   │   ├── fileSystemTools.ts
+│   │   └── llmTools.ts
 │   ├── CodeWikiViewProvider.ts
 │   ├── LLMService.ts
 │   ├── StateManager.ts
 │   └── extension.ts
+├── test
+│   └── suite
+│       └── index.ts
 └── webview
     ├── components
     │   └── MessageBlock.ts
@@ -81,11 +89,25 @@ export interface Prompt {
 --------------------------------------------------------------------------------
 
 --- file_path: extension/CodeWikiViewProvider.ts ---
+// src/extension/CodeWikiViewProvider.ts (在顶部添加)
+
 import * as vscode from 'vscode';
 import { PostMessage, Conversation, ChatMessage, Prompt } from '../common/types';
 import { StateManager } from './StateManager';
 import { LLMService } from './LLMService';
 import { v4 as uuidv4 } from 'uuid';
+
+
+// 导入 YAML 解析器
+import * as yaml from 'js-yaml';
+// 导入新的工具
+import { GetFileSummariesTool, GetFilesContentByListTool } from './tools/fileSystemTools';
+import { createFileSelectorLLMTool } from './tools/llmTools';
+// 导入我们的执行器和相关类型
+import { CustomAgentExecutor, ToolChainStep, LlmPromptTemplate, AgentExecutorCallbacks } from './agents/CustomAgentExecutor';
+// 导入 LangChain 相关类
+import { ChatOpenAI } from '@langchain/openai';
+import { StructuredTool } from '@langchain/core/tools';
 
 export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
 
@@ -96,6 +118,9 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
     private _stateManager: StateManager;
     private _llmService: LLMService;
     private _activeConversation: Conversation | null = null;
+    private _tools: StructuredTool[];
+    private _agentExecutor: CustomAgentExecutor | null = null;
+
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -103,6 +128,38 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
     ) {
         this._stateManager = new StateManager(this._context.globalState);
         this._llmService = new LLMService();
+        this._tools = []; // 初始化为空数组
+        this.initializeTools();
+    }
+
+    private async initializeTools() {
+        // 创建一个临时的 LLM 实例，仅用于初始化 LLM-as-a-Tool
+        // Agent 执行时会根据当前配置动态创建新的 LLM 实例
+        const modelConfigs = await this._stateManager.getModelConfigs();
+        const defaultModelConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
+
+        if (defaultModelConfig) {
+            const toolLlm = new ChatOpenAI({
+                modelName: defaultModelConfig.modelId,
+                apiKey: defaultModelConfig.apiKey,
+                configuration: { baseURL: defaultModelConfig.baseUrl },
+                temperature: 0.1, // 工具型LLM温度可以低一些
+            });
+
+            this._tools = [
+                new GetFileSummariesTool(),
+                new GetFilesContentByListTool(),
+                createFileSelectorLLMTool(toolLlm),
+            ];
+
+            this._agentExecutor = new CustomAgentExecutor(this._tools, toolLlm); // 这里的llm只是个占位，运行时会用新的
+        } else {
+            this._tools = [
+                new GetFileSummariesTool(),
+                new GetFilesContentByListTool(),
+            ];
+            console.warn("No default model config found. LLM-based tools will not be available.");
+        }
     }
 
     public resolveWebviewView(
@@ -301,6 +358,76 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
             case 'stopMessage':
                 {
                     this._llmService.abortRequest();
+                    break;
+                }
+            case 'executeActionPrompt':
+                {
+                    if (!this._agentExecutor) {
+                        vscode.window.showErrorMessage("Agent Executor is not initialized. Please configure a model in settings.");
+                        return;
+                    }
+
+                    const { yamlContent, userInputs, modelConfig } = data.payload;
+
+                    try {
+                        const actionPrompt = yaml.load(yamlContent) as {
+                            tool_chain: ToolChainStep[];
+                            llm_prompt_template: LlmPromptTemplate;
+                        };
+
+                        if (!actionPrompt.tool_chain || !actionPrompt.llm_prompt_template) {
+                            throw new Error("Invalid Action Prompt YAML format. Missing 'tool_chain' or 'llm_prompt_template'.");
+                        }
+
+                        // 根据用户在UI上选择的模型配置，动态创建LLM实例
+                        const finalLlm = new ChatOpenAI({
+                            modelName: modelConfig.modelId,
+                            apiKey: modelConfig.apiKey,
+                            streaming: true,
+                            temperature: 0.7,
+                            configuration: { baseURL: modelConfig.baseUrl },
+                        });
+
+                        // 注意：我们需要重新配置 Agent Executor，使其使用最新的 LLM
+                        this._agentExecutor = new CustomAgentExecutor(this._tools, finalLlm);
+
+                        const webview = this._view?.webview;
+                        if (!webview) return;
+
+                        // 定义回调函数，将 Agent 的执行过程实时发送到前端
+                        const callbacks: AgentExecutorCallbacks = {
+                            onToolStart: (toolName, input) => {
+                                webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'tool_start', toolName, input: JSON.stringify(input, null, 2) } });
+                            },
+                            onToolEnd: (toolName, output) => {
+                                webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'tool_end', toolName, output } });
+                            },
+                            onLlmStart: () => {
+                                webview.postMessage({ command: 'startStreaming' }); // 复用已有的流式开始命令
+                            },
+                            onLlmStream: (chunk) => {
+                                webview.postMessage({ command: 'streamData', payload: chunk }); // 复用已有的流式数据命令
+                            },
+                            onLlmEnd: () => {
+                                webview.postMessage({ command: 'streamEnd' }); // 复用已有的流式结束命令
+                            },
+                            onError: (error) => {
+                                webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });
+                            }
+                        };
+
+                        // 启动 Agent Executor
+                        this._agentExecutor.run(
+                            actionPrompt.tool_chain,
+                            userInputs,
+                            actionPrompt.llm_prompt_template,
+                            callbacks
+                        );
+
+                    } catch (error: any) {
+                        vscode.window.showErrorMessage(`Failed to execute action prompt: ${error.message}`);
+                        this._view?.webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });
+                    }
                     break;
                 }
             case 'regenerate':
@@ -673,6 +800,175 @@ export class StateManager {
 
 --------------------------------------------------------------------------------
 
+--- file_path: extension/agents/CustomAgentExecutor.ts ---
+// src/extension/agents/CustomAgentExecutor.ts (已再次修正)
+
+import { BaseLanguageModel } from '@langchain/core/language_models/base';
+import { StructuredTool } from '@langchain/core/tools';
+import { ChatPromptTemplate } from '@langchain/core/prompts';
+import { AIMessage, BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { StringOutputParser } from '@langchain/core/output_parsers';
+
+// ... (接口定义保持不变) ...
+export interface ToolChainStep {
+    tool: string;
+    input: string | Record<string, any>;
+    output_variable: string;
+}
+export interface LlmPromptTemplate {
+    system: string;
+    human: string;
+}
+export interface AgentExecutorCallbacks {
+    onToolStart?: (toolName: string, input: any) => void;
+    onToolEnd?: (toolName:string, output: string) => void;
+    onLlmStart?: () => void;
+    onLlmStream?: (chunk: string) => void;
+    onLlmEnd?: () => void;
+    onError?: (error: Error) => void;
+}
+
+
+export class CustomAgentExecutor {
+    private tools: Map<string, StructuredTool>;
+    private finalLlm: BaseLanguageModel;
+
+    constructor(tools: StructuredTool[], finalLlm: BaseLanguageModel) {
+        this.tools = new Map(tools.map(tool => [tool.name, tool]));
+        this.finalLlm = finalLlm;
+    }
+
+    public async run(
+        tool_chain: ToolChainStep[],
+        initialInputs: Record<string, string>,
+        llm_prompt_template: LlmPromptTemplate,
+        callbacks: AgentExecutorCallbacks
+    ): Promise<void> {
+        const context: Record<string, any> = { ...initialInputs };
+        
+        // --- 日志: 打印初始上下文 ---
+        console.log("--- [Agent Start] ---");
+        console.log("Initial Context:", JSON.stringify(context, null, 2));
+        console.log("----------------------");
+
+        try {
+            for (const step of tool_chain) {
+                const tool = this.tools.get(step.tool);
+                if (!tool) {
+                    throw new Error(`Tool "${step.tool}" not found.`);
+                }
+                
+                // --- 日志: 打印将要执行的工具和它的输入模板 ---
+                console.log(`\n--- [Tool Start] Executing: ${step.tool} ---`);
+                console.log("Input Template:", JSON.stringify(step.input, null, 2));
+
+                const toolInput = this.resolveInput(step.input, context);
+
+                // --- 日志: 打印解析后的、实际传递给工具的输入 ---
+                console.log("Resolved Input:", JSON.stringify(toolInput, null, 2));
+                
+                callbacks.onToolStart?.(tool.name, toolInput);
+
+                const toolOutputString = await tool.call(toolInput);
+                
+                const toolOutputParsed = this.parseToolOutput(toolOutputString);
+                context[step.output_variable] = toolOutputParsed;
+
+                // --- 日志: 打印工具的原始输出和解析后的输出 ---
+                const outputSummary = toolOutputString.length > 500 ? `${toolOutputString.substring(0, 500)}...` : toolOutputString;
+                console.log("Tool Raw Output (truncated):", outputSummary);
+                if (typeof toolOutputParsed !== 'string') {
+                    console.log(`Parsed Output (variable "${step.output_variable}"):`, toolOutputParsed);
+                }
+                console.log(`--- [Tool End] Finished: ${step.tool} ---\n`);
+
+                callbacks.onToolEnd?.(tool.name, outputSummary);
+            }
+            
+            // --- 日志: 打印工具链执行完毕后的最终上下文 ---
+            console.log("--- [Final LLM Start] ---");
+            // 注意：不直接打印整个 context，因为 selected_files_content 可能非常大
+            const contextKeys = Object.keys(context);
+            console.log("Final Context Keys:", contextKeys);
+            if(context.selected_files_list) {
+                console.log("Final Context 'selected_files_list':", context.selected_files_list);
+            }
+            console.log("LLM Prompt Template:", llm_prompt_template);
+            
+            callbacks.onLlmStart?.();
+            
+            const systemMessageContent = this.resolveInput(llm_prompt_template.system, context) as string;
+            const humanMessageContent = this.resolveInput(llm_prompt_template.human, context) as string;
+
+            // --- 日志: 打印最终注入到 LLM 的 Prompt ---
+            const finalPromptSummary = humanMessageContent.length > 1000 ? `${humanMessageContent.substring(0, 1000)}...` : humanMessageContent;
+            console.log("Final Human Message (truncated):", finalPromptSummary);
+            console.log("-------------------------");
+
+            const finalPrompt = ChatPromptTemplate.fromMessages([
+                new SystemMessage(systemMessageContent),
+                new HumanMessage(humanMessageContent)
+            ]);
+
+            const finalChain = finalPrompt.pipe(this.finalLlm).pipe(new StringOutputParser());
+
+            const stream = await finalChain.stream({});
+            for await (const chunk of stream) {
+                callbacks.onLlmStream?.(chunk);
+            }
+            
+            callbacks.onLlmEnd?.();
+
+        } catch (error: any) {
+            console.error("Error in CustomAgentExecutor:", error);
+            callbacks.onError?.(error instanceof Error ? error : new Error(String(error)));
+        }
+    }
+
+    /**
+     * 解析工具的输入，用上下文中的值替换 {placeholder}。
+     * @param inputTemplate - 来自 tool_chain 的输入定义。
+     * @param context - 当前的执行上下文。
+     * @returns 解析后的输入，准备传递给工具。
+     */
+    private resolveInput(inputTemplate: string | Record<string, any>, context: Record<string, any>): any {
+        if (typeof inputTemplate === 'string') {
+            const match = inputTemplate.match(/^\{(\w+)\}$/);
+            // 关键修正: 检查占位符是否是模板字符串的唯一内容
+            // 如果是，并且上下文中的值不是字符串，则直接返回该值（如数组）
+            if (match && context[match[1]] !== undefined) {
+                return context[match[1]];
+            }
+            
+            // 否则，执行常规的字符串替换 (所有值都会被转为字符串)
+            return inputTemplate.replace(/\{(\w+)\}/g, (m, key) => {
+                return context[key] !== undefined ? String(context[key]) : m;
+            });
+        }
+        
+        // 递归处理对象
+        const resolvedObject: Record<string, any> = {};
+        for (const key in inputTemplate) {
+            const value = inputTemplate[key];
+            resolvedObject[key] = this.resolveInput(value, context);
+        }
+        return resolvedObject;
+    }
+
+    private parseToolOutput(outputString: string): any {
+        try {
+            if ((outputString.startsWith('[') && outputString.endsWith(']')) || (outputString.startsWith('{') && outputString.endsWith('}'))) {
+                return JSON.parse(outputString);
+            }
+        } catch (e) {
+            // 解析失败，不是有效的JSON，返回原始字符串
+        }
+        return outputString;
+    }
+}
+
+--------------------------------------------------------------------------------
+
 --- file_path: extension/extension.ts ---
 import * as vscode from 'vscode';
 import { CodeWikiViewProvider } from './CodeWikiViewProvider';
@@ -686,6 +982,247 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/tools/fileSystemTools.ts ---
+import * as vscode from 'vscode';
+import * as path from 'path';
+import { z } from 'zod';
+// highlight-start
+import { StructuredTool } from '@langchain/core/tools';
+// highlight-end
+
+/**
+ * 获取当前工作区的根路径。
+ * @returns {string} 工作区根目录的绝对路径。
+ * @throws {Error} 如果没有打开的工作区。
+ */
+function getWorkspaceRoot(): string {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+        throw new Error("No workspace folder is open. Please open a project folder.");
+    }
+    return workspaceFolders[0].uri.fsPath;
+}
+
+/**
+ * 一个LangChain工具，用于获取指定目录下所有文件的路径和内容摘要。
+ * 摘要是文件的前20行。
+ */
+// highlight-start
+export class GetFileSummariesTool extends StructuredTool {
+// highlight-end
+    static lc_name() {
+        return "GetFileSummariesTool";
+    }
+
+    name = "get_file_summaries";
+    description = "Gets the path and a content summary (first 20 lines) of all files in a given directory. Useful for understanding a module's structure before reading full files.";
+
+    // 使用Zod定义工具的输入模式
+    schema = z.object({
+        path: z.string().describe("The relative path to the directory from the workspace root."),
+    });
+
+    protected async _call({ path: relativePath }: z.infer<typeof this.schema>): Promise<string> {
+        try {
+            const workspaceRoot = getWorkspaceRoot();
+            const absolutePath = path.join(workspaceRoot, relativePath);
+
+            const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(absolutePath));
+            const fileSummaries: string[] = [];
+
+            for (const [name, type] of entries) {
+                if (type === vscode.FileType.File) {
+                    const filePath = path.join(absolutePath, name);
+                    const fileUri = vscode.Uri.file(filePath);
+                    
+                    const contentBytes = await vscode.workspace.fs.readFile(fileUri);
+                    const content = Buffer.from(contentBytes).toString('utf-8');
+                    const summary = content.split('\n').slice(0, 20).join('\n');
+                    
+                    const fileRelativePath = path.relative(workspaceRoot, filePath);
+
+                    fileSummaries.push(
+                        `--- FILE: ${fileRelativePath.replace(/\\/g, '/')} ---\n${summary}\n--- END OF SUMMARY ---\n`
+                    );
+                }
+            }
+
+            if (fileSummaries.length === 0) {
+                return `No files found in the directory: ${relativePath}`;
+            }
+
+            return fileSummaries.join('\n');
+        } catch (error: any) {
+            return `Error getting file summaries for path "${relativePath}": ${error.message}`;
+        }
+    }
+}
+
+
+/**
+ * 一个LangChain工具，根据提供的文件路径列表，获取这些文件的完整内容。
+ */
+// highlight-start
+export class GetFilesContentByListTool extends StructuredTool {
+// highlight-end
+    static lc_name() {
+        return "GetFilesContentByListTool";
+    }
+
+    name = "get_files_content_by_list";
+    description = "Reads the full content of files specified in a list of relative paths. The list should be the output of a file selection tool.";
+
+    schema = z.object({
+        file_paths: z.array(z.string()).describe("An array of relative paths from the workspace root for the files to be read."),
+    });
+
+    protected async _call({ file_paths }: z.infer<typeof this.schema>): Promise<string> {
+        if (!file_paths || file_paths.length === 0) {
+            return "Input file list is empty. No content to read.";
+        }
+
+        try {
+            const workspaceRoot = getWorkspaceRoot();
+            const contentPromises = file_paths.map(async (relativePath) => {
+                const absolutePath = path.join(workspaceRoot, relativePath);
+                const fileUri = vscode.Uri.file(absolutePath);
+                
+                try {
+                    const contentBytes = await vscode.workspace.fs.readFile(fileUri);
+                    const content = Buffer.from(contentBytes).toString('utf-8');
+                    return `--- FILE: ${relativePath.replace(/\\/g, '/')} ---\n${content}\n--- END OF FILE ---\n`;
+                } catch (fileError: any) {
+                    // 如果单个文件读取失败，返回错误信息而不是让整个工具失败
+                    return `--- FILE: ${relativePath.replace(/\\/g, '/')} ---\nERROR: Could not read file. ${fileError.message}\n--- END OF FILE ---\n`;
+                }
+            });
+
+            const allContents = await Promise.all(contentPromises);
+            return allContents.join('\n');
+
+        } catch (error: any) {
+            // 捕获 getWorkspaceRoot 的错误
+            return `Error getting files content: ${error.message}`;
+        }
+    }
+}
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/tools/llmTools.ts ---
+// src/extension/tools/llmTools.ts
+
+import { z } from 'zod';
+import { StructuredTool } from '@langchain/core/tools';
+import { BaseLanguageModel } from '@langchain/core/language_models/base';
+import { ChatPromptTemplate } from '@langchain/core/prompts';
+import { StringOutputParser } from '@langchain/core/output_parsers';
+
+// 这是 FileSelectorLLMTool 内部使用的 Prompt 模板
+const SELECTION_PROMPT = `You are an expert software engineer assistant. Your task is to analyze a list of file summaries and select the most relevant files based on a user's task description.
+
+Analyze the following file summaries:
+---
+{file_summaries}
+---
+
+The user's task is: "{task_description}"
+
+Based on this, which files are the most critical for understanding and completing the task?
+
+Please provide your answer as a clean, comma-separated list of file paths. Do NOT include any other text, explanations, or formatting.
+
+Example response:
+src/common/types.ts,src/extension/LLMService.ts,src/webview/views/ChatView.ts
+`;
+
+/**
+ * 一个内部类，代表了 LLM-as-a-Tool 的具体实现。
+ * 我们不直接导出它，而是通过工厂函数创建。
+ */
+class FileSelectorLLMTool extends StructuredTool {
+    static lc_name() {
+        return "FileSelectorLLMTool";
+    }
+
+    name = "file_selector_llm_tool";
+    description = "Analyzes a list of file summaries and a task description to intelligently select the most relevant files. The output is an array of file paths.";
+    
+    // 该工具的输入 schema
+    schema = z.object({
+        file_summaries: z.string().describe("A single string containing all file summaries, separated by markers."),
+        task_description: z.string().describe("A description of the goal or task to guide the file selection."),
+    });
+
+    // 持有传入的 LLM 实例
+    private llm: BaseLanguageModel;
+
+    constructor(llm: BaseLanguageModel) {
+        super(); // 调用父类构造函数
+        this.llm = llm;
+    }
+
+    protected async _call({ file_summaries, task_description }: z.infer<typeof this.schema>): Promise<string> {
+        try {
+            // 1. 构建专门用于文件筛选的 Prompt
+            const selectionPrompt = ChatPromptTemplate.fromTemplate(SELECTION_PROMPT);
+
+            // 2. 构建一个临时的、用于该工具内部的 LangChain "子链"
+            //    它接收格式化的 prompt，调用 LLM，然后解析出字符串结果。
+            const selectionChain = selectionPrompt
+                .pipe(this.llm)
+                .pipe(new StringOutputParser());
+
+            // 3. 调用子链来执行 LLM 推理
+            console.log("Invoking file_selector_llm_tool with task:", task_description);
+            const llmResult = await selectionChain.invoke({
+                file_summaries,
+                task_description
+            });
+            console.log("File selector LLM raw response:", llmResult);
+
+            // 4. 解析 LLM 返回的结果
+            //    LLM 可能返回一些额外的空格或换行符，我们进行清理。
+            //    我们期望的结果是 "path/a.ts, path/b.ts, ..."
+            const cleanedResult = llmResult.replace(/```/g, '').trim(); // 移除代码块标记和多余空格
+            const filePaths = cleanedResult.split(',')
+                .map(p => p.trim())
+                .filter(p => p.length > 0 && p.includes('/')); // 过滤掉空字符串和无效条目
+
+            if (filePaths.length === 0) {
+                console.warn("File selector LLM did not return any valid file paths.");
+                return "[]"; // 返回一个表示空数组的JSON字符串
+            }
+            
+            // 5. 将结果（一个字符串数组）序列化为 JSON 字符串返回。
+            //    这是因为 LangChain 工具的标准输出是 string。
+            //    我们的自定义 Agent Executor (将在下一阶段实现) 将负责解析这个JSON。
+            return JSON.stringify(filePaths);
+
+        } catch (error: any) {
+            console.error("Error in FileSelectorLLMTool:", error);
+            return `Error during file selection LLM call: ${error.message}`;
+        }
+    }
+}
+
+/**
+ * 工厂函数，用于创建和配置 FileSelectorLLMTool。
+ * 这是我们从外部调用的函数。
+ * @param llm - 一个配置好的、可用于调用的 BaseLanguageModel 实例。
+ * @returns {StructuredTool} 一个配置好的、可直接使用的工具实例。
+ */
+export function createFileSelectorLLMTool(llm: BaseLanguageModel): StructuredTool {
+    return new FileSelectorLLMTool(llm);
+}
+
+--------------------------------------------------------------------------------
+
+--- file_path: test/suite/index.ts ---
 
 
 --------------------------------------------------------------------------------
@@ -1988,23 +2525,90 @@ export class ChatView {
         if (!inputBox) return;
 
         const prompt = inputBox.value.trim();
-        if (prompt) {
+        if (!prompt) return;
+
+        // --- 临时的 Agent 触发器 ---
+        if (prompt.startsWith('/agent')) {
             const selectedModelId = this.modelSelector.value;
             const selectedConfig = this.modelConfigs.find(c => c.id === selectedModelId);
-
             if (!selectedConfig) {
-                vscode.postMessage({ command: 'error', payload: 'Please select a valid model from settings.' });
+                 vscode.postMessage({ command: 'error', payload: 'Please select a valid model from settings.' });
                 return;
             }
 
-            const message: ChatMessage = { role: 'user', content: prompt };
-            this.messages.push(message);
-            this.renderMessages();
+            const testYaml = `
+title: "生成核心模块设计文档 (智能筛选版)"
+description: "智能分析模块内的所有文件，找出核心文件，并基于它们生成技术文档。"
+input_variables:
+  - name: module_path
+    description: "请输入或选择要分析的模块/文件夹路径。"
+    type: "path"
+    default: "src/extension"
+  - name: task_description
+    description: "简要描述你想分析的核心任务是什么？"
+    type: "text"
+    default: "这个模块的核心功能是处理大模型请求和管理插件状态。"
+tool_chain:
+  - tool: "get_file_summaries"
+    # 修正: 将 input 从字符串改为对象格式，以匹配工具的 schema
+    input: 
+      path: "{module_path}"
+    output_variable: all_file_summaries
+  - tool: "file_selector_llm_tool"
+    input: 
+      file_summaries: "{all_file_summaries}"
+      task_description: "{task_description}"
+    output_variable: selected_files_list
+  - tool: "get_files_content_by_list"
+    # 修正: 将 input 从字符串改为对象格式
+    input:
+      file_paths: "{selected_files_list}"
+    output_variable: selected_files_content
+llm_prompt_template:
+  system: |
+    你是一个经验丰富的软件架构师，你的任务是基于提供的核心文件内容，为模块生成一份详细、专业的技术设计文档。文档需要包含以下部分：1. 模块概述 2. 核心职责 3. 主要组件分析（逐一分析每个文件） 4. 数据流和交互 5. 潜在改进点。请使用 Markdown 格式化你的回答。
+  human: |
+    请根据以下精心筛选出的核心文件，为模块生成一份详细设计文档。
 
+    **核心文件内容如下：**
+    {selected_files_content}
+`;
+            
+            const userInputs = {
+                module_path: "src/extension", // 可以硬编码或从 prompt 中解析
+                task_description: "这个模块的核心功能是处理大模型请求、状态管理和视图提供。"
+            };
+
+            vscode.postMessage({ 
+                command: 'executeActionPrompt', 
+                payload: {
+                    yamlContent: testYaml,
+                    userInputs: userInputs,
+                    modelConfig: selectedConfig
+                }
+            });
             inputBox.value = '';
             this.autoResizeInput(inputBox);
-            vscode.postMessage({ command: 'sendMessage', payload: { prompt, config: selectedConfig } });
+            return; // 结束执行
         }
+        // --- 结束 Agent 触发器 ---
+
+
+        const selectedModelId = this.modelSelector.value;
+        const selectedConfig = this.modelConfigs.find(c => c.id === selectedModelId);
+
+        if (!selectedConfig) {
+            vscode.postMessage({ command: 'error', payload: 'Please select a valid model from settings.' });
+            return;
+        }
+
+        const message: ChatMessage = { role: 'user', content: prompt };
+        this.messages.push(message);
+        this.renderMessages();
+
+        inputBox.value = '';
+        this.autoResizeInput(inputBox);
+        vscode.postMessage({ command: 'sendMessage', payload: { prompt, config: selectedConfig } });
     }
 
     private handleCopy(index: number) {

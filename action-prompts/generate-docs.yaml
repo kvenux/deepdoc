@@ -1,0 +1,36 @@
+title: "生成核心模块设计文档 (智能筛选版)"
+description: "智能分析模块内的所有文件，找出核心文件，并基于它们生成技术文档。"
+# 注意: user_inputs 在命令行脚本中目前是硬编码的，这里仅为描述
+user_inputs:
+  - name: module_path
+    description: "请输入或选择要分析的模块/文件夹路径。"
+    default: "src/extension"
+  - name: task_description
+    description: "简要描述你想分析的核心任务是什么？"
+    default: "这个模块的核心功能是处理大模型请求、状态管理和视图提供。"
+tool_chain:
+  - tool: "get_file_summaries"
+    input: 
+      path: "{module_path}"
+    output_variable: all_file_summaries
+  - tool: "file_selector_llm_tool"
+    input: 
+      file_summaries: "{all_file_summaries}"
+      task_description: "{task_description}"
+    output_variable: selected_files_list
+  - tool: "get_files_content_by_list"
+    input:
+      file_paths: "{selected_files_list}"
+    output_variable: selected_files_content
+llm_prompt_template:
+  system: |
+    你是一个经验丰富的软件架构师，你的任务是基于提供的核心文件内容，为模块生成一份详细、专业的技术设计文档。文档需要包含以下部分：1. 模块概述 2. 核心职责 3. 主要组件分析（逐一分析每个文件） 4. 数据流和交互 5. 潜在改进点。请使用 Markdown 格式化你的回答，确保格式清晰、专业。
+  human: |
+    请根据以下精心筛选出的核心文件，为模块 `{module_path}` 生成一份详细设计文档。
+
+    我的核心任务描述是：`{task_description}`
+
+    **核心文件内容如下：**
+    ```
+    {selected_files_content}
+    ```

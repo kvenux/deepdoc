@@ -1,4 +1,4 @@
-// src/extension/tools/llmTools.ts
+// src/extension/tools/llmTools.ts (完整文件)
 
 import { z } from 'zod';
 import { StructuredTool } from '@langchain/core/tools';
@@ -34,12 +34,14 @@ class FileSelectorLLMTool extends StructuredTool {
     }
 
     name = "file_selector_llm_tool";
-    description = "Analyzes a list of file summaries and a task description to intelligently select the most relevant files. The output is an array of file paths.";
+    // highlight-start
+    description = "分析文件摘要列表和任务描述，以智能地选择最相关的文件。输出是一个包含文件路径的数组。";
+    // highlight-end
     
     // 该工具的输入 schema
     schema = z.object({
-        file_summaries: z.string().describe("A single string containing all file summaries, separated by markers."),
-        task_description: z.string().describe("A description of the goal or task to guide the file selection."),
+        file_summaries: z.string().describe("一个包含所有文件摘要的单一字符串，每个摘要由标记分隔。"),
+        task_description: z.string().describe("用于指导文件选择的目标或任务的描述。"),
     });
 
     // 持有传入的 LLM 实例
@@ -89,7 +91,7 @@ class FileSelectorLLMTool extends StructuredTool {
 
         } catch (error: any) {
             console.error("Error in FileSelectorLLMTool:", error);
-            return `Error during file selection LLM call: ${error.message}`;
+            return `在文件选择LLM调用期间出错: ${error.message}`;
         }
     }
 }

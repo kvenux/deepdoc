@@ -1,4 +1,4 @@
-// src/extension/agents/CustomAgentExecutor.ts (已再次修正)
+// src/extension/agents/CustomAgentExecutor.ts (完整文件)
 
 import { BaseLanguageModel } from '@langchain/core/language_models/base';
 import { StructuredTool } from '@langchain/core/tools';
@@ -19,7 +19,7 @@ export interface LlmPromptTemplate {
 export interface AgentExecutorCallbacks {
     onToolStart?: (toolName: string, input: any) => void;
     onToolEnd?: (toolName:string, output: string) => void;
-    onLlmStart?: () => void;
+    onLlmStart?: (finalSystemPrompt: string, finalHumanPrompt: string) => void; // 我们可以给 onLlmStart 添加参数
     onLlmStream?: (chunk: string) => void;
     onLlmEnd?: () => void;
     onError?: (error: Error) => void;
@@ -92,15 +92,23 @@ export class CustomAgentExecutor {
             }
             console.log("LLM Prompt Template:", llm_prompt_template);
             
-            callbacks.onLlmStart?.();
-            
+            // highlight-start
+            // ======== 准备并打印最终的 Prompt ========
             const systemMessageContent = this.resolveInput(llm_prompt_template.system, context) as string;
             const humanMessageContent = this.resolveInput(llm_prompt_template.human, context) as string;
+            
+            // 打印到调试控制台
+            const finalHumanPromptSummary = humanMessageContent.length > 1000 ? `${humanMessageContent.substring(0, 1000)}... (truncated)` : humanMessageContent;
+            console.log("--- Final Prompt to LLM ---");
+            console.log("[SYSTEM]\n", systemMessageContent);
+            console.log("\n[HUMAN] (truncated)\n", finalHumanPromptSummary);
+            console.log("----------------------------");
 
-            // --- 日志: 打印最终注入到 LLM 的 Prompt ---
-            const finalPromptSummary = humanMessageContent.length > 1000 ? `${humanMessageContent.substring(0, 1000)}...` : humanMessageContent;
-            console.log("Final Human Message (truncated):", finalPromptSummary);
-            console.log("-------------------------");
+            // 通过回调函数将最终 Prompt 发送到 OutputChannel
+            // (这里的 onLlmStart 现在接收两个参数)
+            callbacks.onLlmStart?.(systemMessageContent, humanMessageContent);
+            // ======== 结束打印 ========
+            // highlight-end
 
             const finalPrompt = ChatPromptTemplate.fromMessages([
                 new SystemMessage(systemMessageContent),

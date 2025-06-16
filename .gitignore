@@ -14,3 +14,8 @@
 # Local settings
 /src/common/default-models.json
 mycontext.txt
+
+.env
+
+# Agent script outputs
+/outputs/
