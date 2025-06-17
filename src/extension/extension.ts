@@ -5,12 +5,11 @@ import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { CodeWikiViewProvider } from './CodeWikiViewProvider';
 import { StateManager } from './StateManager';
-import { runActionPrompt } from './agentRunner';
-import { GetFileSummariesTool, GetFilesContentByListTool, GetAllFilesContentTool, GetDirectoryTreeTool } from './tools/fileSystemTools';
-import { createFileSelectorLLMTool } from './tools/llmTools';
-import { ChatOpenAI } from '@langchain/openai';
-import { StructuredTool } from '@langchain/core/tools';
-import { AgentExecutorCallbacks } from './agents/CustomAgentExecutor';
+// highlight-start
+// 导入新的 Map-Reduce 流程执行器
+import { runMapReduceAgent } from './agentOrchestrator';
+// 不再需要导入旧的 agentRunner 或它的依赖
+// highlight-end
 
 export function activate(context: vscode.ExtensionContext) {
     const provider = new CodeWikiViewProvider(context.extensionUri, context);
@@ -20,7 +19,7 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // =========================================================================
-    // == 重构：注册一个灵活的、可交互的 Agent 运行命令
+    // == 注册一个灵活的、可交互的 Agent 运行命令
     // =========================================================================
     const disposable = vscode.commands.registerCommand('codewiki.runAgent', async () => {
         const outputChannel = vscode.window.createOutputChannel("CodeWiki Agent Run");
@@ -63,23 +62,20 @@ export function activate(context: vscode.ExtensionContext) {
                 outputChannel.appendLine("[INFO] User cancelled the operation. Exiting.");
                 return; // 用户取消选择
             }
-            outputChannel.appendLine(`[STEP 1] User selected prompt: ${selectedFileName}`);
+            outputChannel.appendLine(`[INFO] User selected prompt: ${selectedFileName}`);
 
             // 4. 读取并解析选中的 YAML 文件
             const promptUri = vscode.Uri.joinPath(codewikiDir, selectedFileName);
             const fileContent = await vscode.workspace.fs.readFile(promptUri);
             const yamlContent = Buffer.from(fileContent).toString('utf-8');
-            const actionPrompt = yaml.load(yamlContent) as {
-                title?: string;
-                description?: string;
-                input_variables?: { name: string; description: string; type: string; default?: string }[];
-            };
-            outputChannel.appendLine(`[STEP 2] Successfully loaded and parsed: ${actionPrompt.title || selectedFileName}`);
+            // 初步解析以获取元数据和判断类型
+            const actionPrompt = yaml.load(yamlContent) as any;
+            outputChannel.appendLine(`[INFO] Successfully loaded and parsed: ${actionPrompt.title || selectedFileName}`);
             
             // 5. 动态获取用户输入
             const userInputs: Record<string, string> = {};
             if (actionPrompt.input_variables && Array.isArray(actionPrompt.input_variables)) {
-                outputChannel.appendLine(`[STEP 3] Requesting user inputs...`);
+                outputChannel.appendLine(`[INFO] Requesting user inputs...`);
                 for (const variable of actionPrompt.input_variables) {
                     const value = await vscode.window.showInputBox({
                         prompt: `Enter value for '${variable.name}'`,
@@ -96,69 +92,37 @@ export function activate(context: vscode.ExtensionContext) {
                     outputChannel.appendLine(`  - Input '${variable.name}': ${value}`);
                 }
             } else {
-                outputChannel.appendLine(`[STEP 3] No 'input_variables' defined in the prompt. Proceeding without user input.`);
+                outputChannel.appendLine(`[INFO] No 'input_variables' defined in the prompt. Proceeding without user input.`);
             }
 
             outputChannel.appendLine(`\n--- Starting Agent Execution ---`);
             
-            // 6. 获取模型配置和工具 (与之前逻辑相同)
+            // 6. 获取模型配置
             const stateManager = new StateManager(context.globalState);
             const modelConfigs = await stateManager.getModelConfigs();
             const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
             if (!defaultConfig) { throw new Error("No default model config found."); }
             
-            const url = new URL(defaultConfig.baseUrl);
-            if (!url.pathname.includes('/v1')) { url.pathname = ('/v1' + url.pathname).replace(/\/+/g, '/'); }
-            const finalBaseUrl = url.toString().replace(/\/$/, '');
-            const toolLlm = new ChatOpenAI({ modelName: defaultConfig.modelId, apiKey: defaultConfig.apiKey, configuration: { baseURL: finalBaseUrl }, temperature: 0.1 });
-            const tools: StructuredTool[] = [
-                new GetFileSummariesTool(), 
-                new GetFilesContentByListTool(), 
-                new GetAllFilesContentTool(), 
-                new GetDirectoryTreeTool(),
-                createFileSelectorLLMTool(toolLlm)
-            ];
-
-            // 7. 定义回调并执行 Agent (与之前逻辑相同)
-            let fullResponse = '';
             // highlight-start
-            const callbacks: AgentExecutorCallbacks = {
-                onToolStart: (toolName, input) => { outputChannel.appendLine(`\n--- [TOOL START] ---\nTool: ${toolName}\nInput: ${JSON.stringify(input, null, 2)}`); },
-                onToolEnd: (toolName, output) => { const summary = output.length > 500 ? `${output.substring(0, 500)}... (truncated)` : output; outputChannel.appendLine(`Output: ${summary}\n--- [TOOL END] ---\n`); },
-                
-                // 修改 onLlmStart 的实现以接收并打印 prompt
-                onLlmStart: (finalSystemPrompt, finalHumanPrompt) => {
-                    outputChannel.appendLine(`--- [LLM PROMPT] ---`);
-                    outputChannel.appendLine(`SYSTEM: ${finalSystemPrompt}`);
-                    
-                    const humanSummary = finalHumanPrompt.length > 1500 ? `${finalHumanPrompt.substring(0, 1500)}... (truncated)` : finalHumanPrompt;
-                    outputChannel.appendLine(`\nHUMAN (truncated): ${humanSummary}`);
-                    outputChannel.appendLine(`--- [END LLM PROMPT] ---\n`);
-                    
-                    outputChannel.appendLine(`--- [LLM START] ---\nCalling final LLM to generate response...`);
-                },
-                
-                onLlmStream: (chunk) => { fullResponse += chunk; },
-                onLlmEnd: async () => {
-                    outputChannel.appendLine(`\n--- [LLM END] ---`);
-                    outputChannel.appendLine(`Final Response (length: ${fullResponse.length}):\n${fullResponse}`);
-                    
-                    const outputDir = vscode.Uri.joinPath(codewikiDir, 'output');
-                    await vscode.workspace.fs.createDirectory(outputDir);
-                    const outputFilePath = vscode.Uri.joinPath(outputDir, `${path.parse(selectedFileName).name}-result-${Date.now()}.md`);
-                    await vscode.workspace.fs.writeFile(outputFilePath, Buffer.from(fullResponse, 'utf8'));
-                    
-                    outputChannel.appendLine(`\n[SUCCESS] Agent run finished. Result saved to: ${outputFilePath.fsPath}`);
-                    vscode.window.showInformationMessage(`Agent run successful. Output saved.`);
-                },
-                onError: (error) => {
-                    const errorMsg = `Agent execution failed: ${error.message}`;
-                    outputChannel.appendLine(`\n--- [ERROR] ---\n${errorMsg}\n${error.stack}\n---`);
-                    vscode.window.showErrorMessage(errorMsg);
-                }
-            };
-            
-            await runActionPrompt({ yamlContent, userInputs, modelConfig: defaultConfig, tools, callbacks });
+            // =========================================================================
+            // == 核心修改：根据YAML内容选择不同的执行器
+            // =========================================================================
+            if (actionPrompt.map_prompt_template && actionPrompt.reduce_prompt_template) {
+                // 这是新的 Map-Reduce Agent
+                outputChannel.appendLine("[INFO] Detected Map-Reduce Agent type. Starting orchestrator...");
+                await runMapReduceAgent(yamlContent, userInputs, defaultConfig, outputChannel);
+
+            } else if (actionPrompt.tool_chain && actionPrompt.llm_prompt_template) {
+                // 这是旧的 Tool-Chain Agent
+                outputChannel.appendLine("[ERROR] Detected Tool-Chain Agent type.");
+                // 旧的 runActionPrompt 逻辑应该在这里被调用，但我们在此示例中将其标记为未实现
+                // 以便专注于新的 Map-Reduce 流程。
+                // await runActionPrompt({ yamlContent, userInputs, modelConfig: defaultConfig, tools, callbacks });
+                throw new Error("Standard Tool-Chain agent runner is not connected in this version. Please use a Map-Reduce prompt YAML file.");
+            } else {
+                throw new Error("Unknown or invalid Action Prompt YAML format. It must contain either ('map_prompt_template' and 'reduce_prompt_template') or ('tool_chain' and 'llm_prompt_template').");
+            }
+            // highlight-end
 
         } catch (error: any) {
             const finalError = `[FATAL] An unexpected error occurred: ${error.message}`;
