@@ -4,57 +4,10 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { get_encoding, Tiktoken } from 'tiktoken';
-import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { ModelConfig } from '../common/types';
-
-// highlight-start
-// ================= Gemini 支持模块 =================
-import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { LLMService } from './LLMService'; // 导入 LLMService
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-
-/**
- * 标志位：设置为 true 以使用 Gemini，设置为 false 则使用 settings.json 中的模型配置。
- * 使用 Gemini 前，请确保已安装 `@langchain/google-genai` 并在 `.codewiki/.env` 文件中配置了 GOOGLE_API_KEY。
- */
-const USE_GEMINI = false;
-
-/**
- * 从工作区的 .codewiki/.env 文件中安全地读取 Google API 密钥。
- * @returns {Promise<string | undefined>} 返回 API 密钥或 undefined。
- */
-async function getGoogleApiKey(): Promise<string | undefined> {
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders) {
-        // 没有打开的工作区，无法查找文件
-        return undefined;
-    }
-    const workspaceRoot = workspaceFolders[0].uri;
-    const envPath = vscode.Uri.joinPath(workspaceRoot, '.codewiki', '.env');
-
-    try {
-        const contentBytes = await vscode.workspace.fs.readFile(envPath);
-        const content = Buffer.from(contentBytes).toString('utf-8');
-        const lines = content.split('\n');
-        for (const line of lines) {
-            const trimmedLine = line.trim();
-            // 简单解析，找到以 GOOGLE_API_KEY= 开头的行
-            if (trimmedLine.startsWith('GOOGLE_API_KEY=')) {
-                return trimmedLine.substring('GOOGLE_API_KEY='.length).trim();
-            }
-        }
-    } catch (error) {
-        // 如果文件不存在，这是正常情况，直接返回 undefined。
-        // 如果是其他读取错误，可以在控制台打印日志。
-        if (!(error instanceof vscode.FileSystemError && error.code === 'FileNotFound')) {
-            console.error("Error reading .codewiki/.env file:", error);
-        }
-    }
-    return undefined;
-}
-// ================================================
-// highlight-end
-
 
 // 定义我们新的YAML格式
 interface MapReducePrompt {
@@ -81,7 +34,6 @@ async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
     for (const [name, type] of entries) {
         const entryUri = vscode.Uri.joinPath(dirUri, name);
         if (type === vscode.FileType.File) {
-            // 简单过滤，可以根据需要扩展
             if (!name.startsWith('.') && !['node_modules', 'dist', 'out'].some(part => entryUri.path.includes(`/${part}/`))) {
                 files.push(entryUri);
             }
@@ -99,7 +51,8 @@ export async function runMapReduceAgent(
     yamlContent: string,
     userInputs: Record<string, string>,
     modelConfig: ModelConfig,
-    outputChannel: vscode.OutputChannel
+    outputChannel: vscode.OutputChannel,
+    llmService: LLMService // 接收 LLMService 实例
 ): Promise<string> {
     return new Promise(async (resolve, reject) => {
         let tokenizer: Tiktoken | null = null;
@@ -169,61 +122,20 @@ export async function runMapReduceAgent(
 
             // 4. MAP 阶段：循环处理每个批次
             outputChannel.appendLine("\n[STEP 4/6] Starting MAP phase: Analyzing batches...");
+            
+            // 使用 LLMService 创建模型实例
+            outputChannel.appendLine(`[INFO] Creating LLM instances...`);
+            const llm: BaseChatModel = await llmService.createModel({
+                modelConfig,
+                temperature: 0.1,
+                streaming: false,
+            });
+            const reduceLlm: BaseChatModel = await llmService.createModel({
+                modelConfig,
+                temperature: 0.5,
+                streaming: false,
+            });
 
-            // highlight-start
-            // ================= LLM 初始化（支持 Gemini） =================
-            let llm: BaseChatModel;
-            let reduceLlm: BaseChatModel;
-
-            if (USE_GEMINI) {
-                outputChannel.appendLine("[INFO] Using Google Gemini for execution.");
-                const apiKey = await getGoogleApiKey();
-                if (!apiKey) {
-                    throw new Error("Gemini execution failed: 'GOOGLE_API_KEY' not found in your .codewiki/.env file.");
-                }
-
-                // 用于 Map 阶段的 LLM，需要确定性
-                llm = new ChatGoogleGenerativeAI({
-                    model: "gemini-2.5-flash", // 或其他兼容模型如 'gemini-1.5-flash'
-                    apiKey: apiKey,
-                    temperature: 0.1,
-                });
-
-                // 用于 Reduce 阶段的 LLM，可以更有创造性
-                reduceLlm = new ChatGoogleGenerativeAI({
-                    model: "gemini-2.5-flash",
-                    apiKey: apiKey,
-                    temperature: 0.5,
-                });
-
-            } else {
-                outputChannel.appendLine(`[INFO] Using configured model '${modelConfig.name}' for execution.`);
-                // 保持原有的 ChatOpenAI 逻辑
-                let finalBaseUrl = '';
-                const url = new URL(modelConfig.baseUrl);
-                if (!url.pathname.includes('/v1')) {
-                    url.pathname = ('/v1' + url.pathname).replace(/\/+/g, '/');
-                }
-                finalBaseUrl = url.toString().replace(/\/$/, '');
-
-                llm = new ChatOpenAI({
-                    modelName: modelConfig.modelId,
-                    apiKey: modelConfig.apiKey,
-                    streaming: false,
-                    configuration: { baseURL: finalBaseUrl },
-                    temperature: 0.1,
-                });
-
-                reduceLlm = new ChatOpenAI({
-                    modelName: modelConfig.modelId,
-                    apiKey: modelConfig.apiKey,
-                    streaming: false,
-                    configuration: { baseURL: finalBaseUrl },
-                    temperature: 0.5,
-                });
-            }
-            // =============================================================
-            // highlight-end
 
             let combinedMarkdownSummaries = "";
             for (let i = 0; i < batches.length; i++) {

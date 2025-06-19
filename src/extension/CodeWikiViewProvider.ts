@@ -17,7 +17,6 @@ import { CustomAgentExecutor, ToolChainStep, LlmPromptTemplate, AgentExecutorCal
 // 导入新的 Agent Runner
 import { runActionPrompt } from './agentRunner';
 // 导入 LangChain 相关类
-import { ChatOpenAI } from '@langchain/openai';
 import { StructuredTool } from '@langchain/core/tools';
 
 export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
@@ -30,8 +29,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
     private _llmService: LLMService;
     private _activeConversation: Conversation | null = null;
     private _tools: StructuredTool[];
-    // private _agentExecutor: CustomAgentExecutor | null = null; // 不再需要持久化的 executor 实例
-
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -40,24 +37,19 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
         this._stateManager = new StateManager(this._context.globalState);
         this._llmService = new LLMService();
         this._tools = []; // 初始化为空数组
-        // highlight-start
-        // _agentExecutor 的初始化被移除，因为它现在是即时创建的
-        // highlight-end
         this.initializeTools();
     }
 
     private async initializeTools() {
-        // 创建一个临时的 LLM 实例，仅用于初始化 LLM-as-a-Tool
-        // Agent 执行时会根据当前配置动态创建新的 LLM 实例
         const modelConfigs = await this._stateManager.getModelConfigs();
         const defaultModelConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
 
         if (defaultModelConfig) {
-            const toolLlm = new ChatOpenAI({
-                modelName: defaultModelConfig.modelId,
-                apiKey: defaultModelConfig.apiKey,
-                configuration: { baseURL: defaultModelConfig.baseUrl },
-                temperature: 0.1, // 工具型LLM温度可以低一些
+            // 使用 LLMService 创建工具所需的 LLM 实例
+            const toolLlm = await this._llmService.createModel({
+                modelConfig: defaultModelConfig,
+                temperature: 0.1,
+                streaming: false,
             });
 
             this._tools = [
@@ -278,7 +270,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._llmService.abortRequest();
                     break;
                 }
-            // highlight-start
             case 'executeActionPrompt':
                 {
                     const webview = this._view?.webview;
@@ -286,7 +277,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     
                     const { yamlContent, userInputs, modelConfig } = data.payload;
 
-                    // 定义将 Agent 执行过程实时发送到前端的回调函数
                     const callbacks: AgentExecutorCallbacks = {
                         onToolStart: (toolName, input) => {
                             webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'tool_start', toolName, input: JSON.stringify(input, null, 2) } });
@@ -308,18 +298,18 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                         }
                     };
 
-                    // 调用重构后的核心函数
+                    // 调用核心函数，并传入 LLMService
                     await runActionPrompt({
                         yamlContent,
                         userInputs,
                         modelConfig,
                         tools: this._tools,
-                        callbacks
+                        callbacks,
+                        llmService: this._llmService
                     });
                     
                     break;
                 }
-            // highlight-end
             case 'regenerate':
             case 'editMessage':
                 {

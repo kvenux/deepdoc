@@ -7,6 +7,7 @@ import { CodeWikiViewProvider } from './CodeWikiViewProvider';
 import { StateManager } from './StateManager';
 import { runMapReduceAgent } from './agentOrchestrator';
 import { ProjectDocumentationAgent } from './agents/ProjectDocumentationAgent';
+import { LLMService } from './LLMService';
 
 
 export function activate(context: vscode.ExtensionContext) {
@@ -95,32 +96,32 @@ export function activate(context: vscode.ExtensionContext) {
 
             outputChannel.appendLine(`\n--- Starting Agent Execution ---`);
             
-            // 6. 获取模型配置
+            // 6. 获取模型配置并创建 LLMService 实例
             const stateManager = new StateManager(context.globalState);
             const modelConfigs = await stateManager.getModelConfigs();
             const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
             if (!defaultConfig) { throw new Error("No default model config found."); }
             
-            // highlight-start
+            const llmService = new LLMService(); // 创建服务实例
+
             // =========================================================================
             // == 核心修改：根据YAML内容选择不同的执行器
             // =========================================================================
             if (actionPrompt.map_prompt_template && actionPrompt.reduce_prompt_template) {
                 // 这是新的 Map-Reduce Agent
                 outputChannel.appendLine("[INFO] Detected Map-Reduce Agent type. Starting orchestrator...");
-                await runMapReduceAgent(yamlContent, userInputs, defaultConfig, outputChannel);
+                await runMapReduceAgent(yamlContent, userInputs, defaultConfig, outputChannel, llmService);
 
             } else if (actionPrompt.tool_chain && actionPrompt.llm_prompt_template) {
                 // 这是旧的 Tool-Chain Agent
                 outputChannel.appendLine("[ERROR] Detected Tool-Chain Agent type.");
                 // 旧的 runActionPrompt 逻辑应该在这里被调用，但我们在此示例中将其标记为未实现
                 // 以便专注于新的 Map-Reduce 流程。
-                // await runActionPrompt({ yamlContent, userInputs, modelConfig: defaultConfig, tools, callbacks });
-                throw new Error("Standard Tool-Chain agent runner is not connected in this version. Please use a Map-Reduce prompt YAML file.");
+                // await runActionPrompt({ yamlContent, userInputs, modelConfig: defaultConfig, tools, callbacks, llmService });
+                throw new Error("Standard Tool-Chain agent runner is not connected in this version. Please use a Map-Reduce prompt YAML file or trigger it from the webview.");
             } else {
                 throw new Error("Unknown or invalid Action Prompt YAML format. It must contain either ('map_prompt_template' and 'reduce_prompt_template') or ('tool_chain' and 'llm_prompt_template').");
             }
-            // highlight-end
 
         } catch (error: any) {
             const finalError = `[FATAL] An unexpected error occurred: ${error.message}`;
@@ -151,8 +152,9 @@ export function activate(context: vscode.ExtensionContext) {
             }
              outputChannel.appendLine(`[INFO] Using model: ${defaultConfig.name}`);
 
-            // 2. 创建并运行文档生成智能体
-            const docAgent = new ProjectDocumentationAgent(outputChannel, defaultConfig);
+            // 2. 创建 LLMService 和文档生成智能体
+            const llmService = new LLMService();
+            const docAgent = new ProjectDocumentationAgent(outputChannel, defaultConfig, llmService);
             await docAgent.run();
 
         } catch (error: any) {

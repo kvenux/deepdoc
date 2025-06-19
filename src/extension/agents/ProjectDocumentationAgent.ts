@@ -4,8 +4,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { ModelConfig } from '../../common/types';
-import { ChatOpenAI } from '@langchain/openai';
-import { HumanMessage, SystemMessage, BaseMessage } from '@langchain/core/messages';
+import { BaseMessage, HumanMessage } from '@langchain/core/messages';
 import { get_encoding, Tiktoken } from 'tiktoken';
 import { GetDirectoryTreeTool, GetAllFilesContentTool } from '../tools/fileSystemTools';
 import { runMapReduceAgent } from '../agentOrchestrator';
@@ -13,6 +12,8 @@ import { runActionPrompt } from '../agentRunner';
 import { createFileSelectorLLMTool } from '../tools/llmTools';
 import { StructuredTool } from '@langchain/core/tools';
 import { AgentExecutorCallbacks } from './CustomAgentExecutor';
+import { LLMService } from '../LLMService'; // 导入 LLMService
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 
 // 定义规划阶段的输出结构
 interface PlannerOutput {
@@ -35,24 +36,29 @@ async function loadPromptFile(workspaceRoot: vscode.Uri, fileName: string): Prom
 export class ProjectDocumentationAgent {
     private outputChannel: vscode.OutputChannel;
     private modelConfig: ModelConfig;
-    private llm: ChatOpenAI;
+    private llmService: LLMService; // 使用 LLMService
     private tokenizer: Tiktoken;
     private readonly MAX_TOKENS_FOR_DIRECT_ANALYSIS = 32000;
-    private tools: StructuredTool[];
+    private tools: StructuredTool[] = [];
 
-    constructor(outputChannel: vscode.OutputChannel, modelConfig: ModelConfig) {
+    constructor(outputChannel: vscode.OutputChannel, modelConfig: ModelConfig, llmService: LLMService) {
         this.outputChannel = outputChannel;
         this.modelConfig = modelConfig;
-        this.llm = new ChatOpenAI({
-            modelName: modelConfig.modelId,
-            apiKey: modelConfig.apiKey,
-            temperature: 0.1,
-            streaming: true,
-            configuration: { baseURL: modelConfig.baseUrl },
-        });
+        this.llmService = llmService; // 存储 LLMService 实例
         this.tokenizer = get_encoding("cl100k_base");
+    }
+
+    private async initialize() {
+        // 如果工具已初始化，则跳过
+        if (this.tools.length > 0) return;
+
+        // 异步创建用于工具的 LLM
+        const toolLlm = await this.llmService.createModel({
+            modelConfig: this.modelConfig,
+            temperature: 0.1,
+            streaming: false
+        });
         
-        const toolLlm = new ChatOpenAI({ ...this.llm.lc_kwargs, temperature: 0.1, streaming: false });
         this.tools = [
             new GetDirectoryTreeTool(),
             new GetAllFilesContentTool(),
@@ -68,13 +74,19 @@ export class ProjectDocumentationAgent {
         messages: BaseMessage[], 
         logFileBaseName: string, 
         runDirUri: vscode.Uri,
-        llmInstance: ChatOpenAI = this.llm
+        temperature: number = 0.1 // 允许指定温度
     ): Promise<string> {
         const requestContent = messages.map(m => `[${m._getType()}]\n${m.content}`).join('\n\n---\n\n');
         const requestPath = vscode.Uri.joinPath(runDirUri, `${logFileBaseName}_request.txt`);
         await vscode.workspace.fs.writeFile(requestPath, Buffer.from(requestContent, 'utf8'));
 
-        const nonStreamingLlm = new ChatOpenAI({ ...llmInstance.lc_kwargs, streaming: false });
+        // 使用 LLMService 创建一个具有特定配置的、非流式的 LLM
+        const nonStreamingLlm = await this.llmService.createModel({
+            modelConfig: this.modelConfig,
+            streaming: false,
+            temperature,
+        });
+
         const response = await nonStreamingLlm.invoke(messages);
         const responseContent = response.content.toString();
 
@@ -90,6 +102,9 @@ export class ProjectDocumentationAgent {
         if (!workspaceRoot) {
             throw new Error("请先打开一个工作区文件夹。");
         }
+        
+        // 在运行开始时进行异步初始化
+        await this.initialize();
 
         const runId = `doc-gen_${this.modelConfig.modelId.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().replace(/[:.]/g, '-')}`;
         const runDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki', 'runs', runId);
@@ -155,6 +170,7 @@ export class ProjectDocumentationAgent {
         const prompt = promptTemplate.replace('{file_tree}', fileTree);
         const messages: BaseMessage[] = [new HumanMessage(prompt)];
         
+        // 使用默认温度 (0.1)
         const responseContent = await this.invokeLlmAndLog(messages, "01_planning", runDir);
         
         try {
@@ -213,7 +229,8 @@ export class ProjectDocumentationAgent {
                 userInputs: { module_path: module.path, language },
                 modelConfig: this.modelConfig,
                 tools: this.tools,
-                callbacks
+                callbacks,
+                llmService: this.llmService // 传入 LLMService
             });
         } else {
             this.log(` -> Token数超出限制，使用Map-Reduce流程 (runMapReduceAgent)...`);
@@ -231,7 +248,8 @@ export class ProjectDocumentationAgent {
                 yamlContent, 
                 { module_path: module.path, language }, 
                 this.modelConfig, 
-                mapReduceChannel
+                mapReduceChannel,
+                this.llmService // 传入 LLMService
             );
         }
 
@@ -252,9 +270,9 @@ ${doc.content}
             .replace('{detailed_module_docs}', detailedModuleDocs);
 
         this.log("[综合] 正在调用大模型生成最终文档...");
-        const synthesisLlm = new ChatOpenAI({ ...this.llm.lc_kwargs, temperature: 0.4, streaming: false });
         const messages: BaseMessage[] = [new HumanMessage(prompt)];
 
-        return await this.invokeLlmAndLog(messages, "03_synthesis", runDir, synthesisLlm);
+        // 使用稍高的温度进行综合
+        return await this.invokeLlmAndLog(messages, "03_synthesis", runDir, 0.4);
     }
 }

@@ -1,10 +1,10 @@
 // src/extension/agentRunner.ts
 
 import * as yaml from 'js-yaml';
-import { ChatOpenAI } from '@langchain/openai';
 import { StructuredTool } from '@langchain/core/tools';
 import { CustomAgentExecutor, ToolChainStep, LlmPromptTemplate, AgentExecutorCallbacks } from './agents/CustomAgentExecutor';
 import { ModelConfig } from '../common/types';
+import { LLMService } from './LLMService';
 
 interface RunActionPromptOptions {
     yamlContent: string;
@@ -12,6 +12,7 @@ interface RunActionPromptOptions {
     modelConfig: ModelConfig;
     tools: StructuredTool[];
     callbacks: AgentExecutorCallbacks;
+    llmService: LLMService; // 新增：传入 LLMService 实例
 }
 
 /**
@@ -21,7 +22,7 @@ interface RunActionPromptOptions {
  */
 export async function runActionPrompt(options: RunActionPromptOptions): Promise<string> {
     return new Promise(async (resolve, reject) => {
-        const { yamlContent, userInputs, modelConfig, tools, callbacks } = options;
+        const { yamlContent, userInputs, modelConfig, tools, callbacks, llmService } = options;
         
         try {
             const actionPrompt = yaml.load(yamlContent) as {
@@ -33,12 +34,11 @@ export async function runActionPrompt(options: RunActionPromptOptions): Promise<
                 throw new Error("Invalid Action Prompt YAML format. Missing 'tool_chain' or 'llm_prompt_template'.");
             }
 
-            const finalLlm = new ChatOpenAI({
-                modelName: modelConfig.modelId,
-                apiKey: modelConfig.apiKey,
+            // 使用 LLMService 创建最终的 LLM 实例
+            const finalLlm = await llmService.createModel({
+                modelConfig,
                 streaming: true,
                 temperature: 0.7,
-                configuration: { baseURL: modelConfig.baseUrl },
             });
 
             // 增强 callbacks 以支持 Promise 解析
