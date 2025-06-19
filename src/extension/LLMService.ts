@@ -24,6 +24,16 @@ export interface CreateModelOptions {
 }
 
 /**
+ * 定义一个可以放入队列的LLM任务。
+ * 它包含一个返回Promise的函数，以及用于解决该Promise的resolver和rejecter。
+ */
+type LlmTask<T> = {
+    task: () => Promise<T>;
+    resolve: (value: T) => void;
+    reject: (reason?: any) => void;
+};
+
+/**
  * 从工作区的 .codewiki/.env 文件中安全地读取 Google API 密钥。
  * @returns {Promise<string | undefined>} 返回 API 密钥或 undefined。
  */
@@ -60,6 +70,9 @@ async function getGoogleApiKey(): Promise<string | undefined> {
  */
 export class LLMService {
     private _abortController: AbortController | null = null;
+    private requestQueue: LlmTask<any>[] = [];
+    private isProcessingQueue = false;
+    private readonly RATE_LIMIT_DELAY_MS = 1500; // 为1 QPS设置1.5秒延迟，提供安全缓冲
 
     constructor() {}
 
@@ -105,6 +118,46 @@ export class LLMService {
         });
     }
 
+    /**
+     * 将一个非流式的LLM调用任务加入队列，并由调度器按速率限制执行。
+     * 这是所有Agent和Tool进行非流式调用的新入口点。
+     * @param task 一个返回LLM调用Promise的函数，例如 `() => llm.invoke(messages)`
+     * @returns 一个在任务完成时解析的Promise
+     */
+    public scheduleLlmCall<T>(task: () => Promise<T>): Promise<T> {
+        console.log(`[LLMService] A new call was scheduled. Queue size: ${this.requestQueue.length + 1}`);
+        return new Promise<T>((resolve, reject) => {
+            this.requestQueue.push({ task, resolve, reject });
+            this.processQueue();
+        });
+    }
+
+    private async processQueue() {
+        if (this.isProcessingQueue || this.requestQueue.length === 0) {
+            return;
+        }
+
+        this.isProcessingQueue = true;
+        const { task, resolve, reject } = this.requestQueue.shift()!;
+        
+        console.log(`[LLMService] Executing call from queue. Remaining: ${this.requestQueue.length}`);
+
+        try {
+            const result = await task();
+            resolve(result);
+        } catch (error) {
+            console.error("[LLMService] Error executing task from queue:", error);
+            reject(error);
+        } finally {
+            // 在完成（无论成功或失败）后，等待指定的延迟
+            await new Promise(res => setTimeout(res, this.RATE_LIMIT_DELAY_MS));
+            
+            this.isProcessingQueue = false;
+            // 尝试处理队列中的下一个项目
+            this.processQueue();
+        }
+    }
+    // highlight-end
 
     /**
      * 获取模型的流式补全。

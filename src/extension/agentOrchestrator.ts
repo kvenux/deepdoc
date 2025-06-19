@@ -46,11 +46,6 @@ async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
     return files;
 }
 
-// 辅助函数：用于创建延迟
-function sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 // 核心执行函数
 export async function runMapReduceAgent(
     yamlContent: string,
@@ -126,8 +121,8 @@ export async function runMapReduceAgent(
             outputChannel.appendLine(` -> Created ${batches.length} batches.`);
 
             // 4. MAP 阶段：循环处理每个批次
-            outputChannel.appendLine("\n[STEP 4/6] Starting MAP phase: Analyzing batches in parallel with delay...");
-            
+            outputChannel.appendLine("\n[STEP 4/6] Starting MAP phase: Scheduling all batches for analysis...");
+
             // 使用 LLMService 创建模型实例
             outputChannel.appendLine(`[INFO] Creating LLM instances...`);
             const llm: BaseChatModel = await llmService.createModel({
@@ -160,7 +155,7 @@ export async function runMapReduceAgent(
                         new HumanMessage(humanPrompt),
                     ];
 
-                    const response = await llm.invoke(mapMessages);
+                    const response = await llmService.scheduleLlmCall(() => llm.invoke(mapMessages));
                     outputChannel.appendLine(` -> [MAP] Finished analysis for Batch ${i + 1}.`);
                     return response.content as string;
                 };
@@ -168,11 +163,6 @@ export async function runMapReduceAgent(
                 // 启动任务并将其Promise添加到数组中
                 mapAnalysisPromises.push(processBatch());
                 
-                // 如果不是最后一个批次，则等待1.5秒再启动下一个任务，以避免超出QPS限制
-                if (i < batches.length - 1) {
-                    outputChannel.appendLine(`    (Waiting 1.5s before next MAP request to respect QPS limit)`);
-                    await sleep(1500);
-                }
             }
 
             outputChannel.appendLine(" -> [MAP] All batch analysis requests sent. Waiting for all to complete...");
@@ -199,7 +189,7 @@ export async function runMapReduceAgent(
             outputChannel.appendLine("\n--- [FINAL DOCUMENT] ---");
             outputChannel.appendLine("\n--- NOT Steamming ---");
 
-            const finalResponse = await reduceLlm.invoke(reduceMessages);
+            const finalResponse = await llmService.scheduleLlmCall(() => reduceLlm.invoke(reduceMessages));
             const fullResponse = finalResponse.content as string;
 
             outputChannel.appendLine("\n--- [END OF DOCUMENT] ---");

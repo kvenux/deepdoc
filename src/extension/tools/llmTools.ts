@@ -5,6 +5,7 @@ import { StructuredTool } from '@langchain/core/tools';
 import { BaseLanguageModel } from '@langchain/core/language_models/base';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import { StringOutputParser } from '@langchain/core/output_parsers';
+import { LLMService } from '../LLMService'; // 导入 LLMService
 
 // 这是 FileSelectorLLMTool 内部使用的 Prompt 模板
 const SELECTION_PROMPT = `You are an expert software engineer assistant. Your task is to analyze a list of file summaries and select the most relevant files based on a user's task description.
@@ -46,10 +47,12 @@ class FileSelectorLLMTool extends StructuredTool {
 
     // 持有传入的 LLM 实例
     private llm: BaseLanguageModel;
+    private llmService: LLMService; // 新增
 
-    constructor(llm: BaseLanguageModel) {
+    constructor(llm: BaseLanguageModel, llmService: LLMService) { // 修改构造函数
         super(); // 调用父类构造函数
         this.llm = llm;
+        this.llmService = llmService; // 存储 LLMService 实例
     }
 
     protected async _call({ file_summaries, task_description }: z.infer<typeof this.schema>): Promise<string> {
@@ -64,12 +67,13 @@ class FileSelectorLLMTool extends StructuredTool {
                 .pipe(new StringOutputParser());
 
             // 3. 调用子链来执行 LLM 推理
-            console.log("Invoking file_selector_llm_tool with task:", task_description);
-            const llmResult = await selectionChain.invoke({
-                file_summaries,
-                task_description
-            });
-            console.log("File selector LLM raw response:", llmResult);
+            console.log("Scheduling file_selector_llm_tool with task:", task_description);
+            const llmResult = await this.llmService.scheduleLlmCall(() => 
+                selectionChain.invoke({
+                    file_summaries,
+                    task_description
+                })
+            );
 
             // 4. 解析 LLM 返回的结果
             //    LLM 可能返回一些额外的空格或换行符，我们进行清理。
@@ -98,10 +102,10 @@ class FileSelectorLLMTool extends StructuredTool {
 
 /**
  * 工厂函数，用于创建和配置 FileSelectorLLMTool。
- * 这是我们从外部调用的函数。
  * @param llm - 一个配置好的、可用于调用的 BaseLanguageModel 实例。
+ * @param llmService - 用于调度LLM调用的服务实例。
  * @returns {StructuredTool} 一个配置好的、可直接使用的工具实例。
  */
-export function createFileSelectorLLMTool(llm: BaseLanguageModel): StructuredTool {
-    return new FileSelectorLLMTool(llm);
+export function createFileSelectorLLMTool(llm: BaseLanguageModel, llmService: LLMService): StructuredTool {
+    return new FileSelectorLLMTool(llm, llmService);
 }

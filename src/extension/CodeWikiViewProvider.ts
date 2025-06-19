@@ -57,7 +57,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 new GetFilesContentByListTool(),
                 new GetAllFilesContentTool(),
                 new GetDirectoryTreeTool(),
-                createFileSelectorLLMTool(toolLlm),
+                createFileSelectorLLMTool(toolLlm, this._llmService), // 传入 llmService
             ];
 
         } else {

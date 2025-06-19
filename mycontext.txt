@@ -1579,7 +1579,6 @@ export class ProjectDocumentationAgent {
             onToolStart: (toolName, input) => this.log(`   [TOOL START] ${toolName}: ${JSON.stringify(input)}`),
             onToolEnd: (toolName, output) => {
                 const summary = output.length > 300 ? `${output.substring(0, 300)}...` : output;
-                this.log(`   [TOOL END] ${toolName} -> (输出预览): ${summary}`);
             },
             onLlmStart: (system, human) => {
                 this.log(`   [LLM START]`);
