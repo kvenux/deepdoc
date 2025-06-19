@@ -21,7 +21,7 @@ export interface AgentExecutorCallbacks {
     onToolEnd?: (toolName:string, output: string) => void;
     onLlmStart?: (finalSystemPrompt: string, finalHumanPrompt: string) => void; // 我们可以给 onLlmStart 添加参数
     onLlmStream?: (chunk: string) => void;
-    onLlmEnd?: () => void;
+    onLlmEnd?: (finalResult: string) => void; // 增加 finalResult 参数
     onError?: (error: Error) => void;
 }
 
@@ -118,11 +118,13 @@ export class CustomAgentExecutor {
             const finalChain = finalPrompt.pipe(this.finalLlm).pipe(new StringOutputParser());
 
             const stream = await finalChain.stream({});
+            let fullReply = '';
             for await (const chunk of stream) {
+                fullReply += chunk;
                 callbacks.onLlmStream?.(chunk);
             }
-            
-            callbacks.onLlmEnd?.();
+            callbacks.onLlmEnd?.(fullReply); // 传递完整结果
+
 
         } catch (error: any) {
             console.error("Error in CustomAgentExecutor:", error);

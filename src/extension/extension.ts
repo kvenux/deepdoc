@@ -5,11 +5,9 @@ import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { CodeWikiViewProvider } from './CodeWikiViewProvider';
 import { StateManager } from './StateManager';
-// highlight-start
-// 导入新的 Map-Reduce 流程执行器
 import { runMapReduceAgent } from './agentOrchestrator';
-// 不再需要导入旧的 agentRunner 或它的依赖
-// highlight-end
+import { ProjectDocumentationAgent } from './agents/ProjectDocumentationAgent';
+
 
 export function activate(context: vscode.ExtensionContext) {
     const provider = new CodeWikiViewProvider(context.extensionUri, context);
@@ -21,7 +19,7 @@ export function activate(context: vscode.ExtensionContext) {
     // =========================================================================
     // == 注册一个灵活的、可交互的 Agent 运行命令
     // =========================================================================
-    const disposable = vscode.commands.registerCommand('codewiki.runAgent', async () => {
+    const runAgentDisposable = vscode.commands.registerCommand('codewiki.runAgent', async () => {
         const outputChannel = vscode.window.createOutputChannel("CodeWiki Agent Run");
         outputChannel.show(true);
         outputChannel.clear();
@@ -131,7 +129,39 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    context.subscriptions.push(disposable);
+    context.subscriptions.push(runAgentDisposable);
+
+    // =========================================================================
+    // == 新增：运行项目级文档生成器的命令
+    // =========================================================================
+    const generateProjectDocDisposable = vscode.commands.registerCommand('codewiki.generateProjectDocumentation', async () => {
+        const outputChannel = vscode.window.createOutputChannel("CodeWiki Project Documentation");
+        outputChannel.show(true);
+        outputChannel.clear();
+
+        try {
+            // 1. 获取模型配置
+            outputChannel.appendLine("[INFO] 开始生成项目文档...");
+            const stateManager = new StateManager(context.globalState);
+            const modelConfigs = await stateManager.getModelConfigs();
+            const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
+            
+            if (!defaultConfig) {
+                throw new Error("No default model configuration found. Please configure a model in the CodeWiki settings.");
+            }
+             outputChannel.appendLine(`[INFO] Using model: ${defaultConfig.name}`);
+
+            // 2. 创建并运行文档生成智能体
+            const docAgent = new ProjectDocumentationAgent(outputChannel, defaultConfig);
+            await docAgent.run();
+
+        } catch (error: any) {
+            const finalError = `[FATAL] An unexpected error occurred: ${error.message}`;
+            outputChannel.appendLine(finalError);
+            vscode.window.showErrorMessage(finalError);
+        }
+    });
+    context.subscriptions.push(generateProjectDocDisposable);
 }
 
 export function deactivate() {}

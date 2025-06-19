@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { z } from 'zod';
 import { StructuredTool } from '@langchain/core/tools';
+import { languageFilters, GENERIC_EXCLUDE, LanguageFilter } from '../config/fileFilters';
 
 /**
  * 获取当前工作区的根路径。
@@ -16,6 +17,44 @@ function getWorkspaceRoot(): string {
         throw new Error("没有打开的工作区。请先打开一个项目文件夹。");
     }
     return workspaceFolders[0].uri.fsPath;
+}
+
+/**
+ * 新增的辅助函数，用于递归获取过滤后的文件路径。
+ * @param dirUri 起始目录的URI
+ * @param language 用于选择过滤规则的语言
+ * @returns {Promise<vscode.Uri[]>} 过滤后的文件URI列表
+ */
+async function getFilteredFilePathsRecursive(dirUri: vscode.Uri, language: string = 'unknown'): Promise<vscode.Uri[]> {
+    let files: vscode.Uri[] = [];
+    const filter: LanguageFilter = languageFilters[language.toLowerCase()] || languageFilters.unknown;
+
+    try {
+        const entries = await vscode.workspace.fs.readDirectory(dirUri);
+
+        for (const [name, type] of entries) {
+            // 检查是否在通用排除列表中
+            if (GENERIC_EXCLUDE.includes(name)) {
+                continue;
+            }
+
+            const entryUri = vscode.Uri.joinPath(dirUri, name);
+            if (type === vscode.FileType.File) {
+                const extension = path.extname(name);
+                const shouldInclude = filter.include.includes(extension);
+                const shouldExclude = filter.exclude.some(pattern => name.endsWith(pattern));
+
+                if (shouldInclude && !shouldExclude) {
+                    files.push(entryUri);
+                }
+            } else if (type === vscode.FileType.Directory) {
+                files = files.concat(await getFilteredFilePathsRecursive(entryUri, language));
+            }
+        }
+    } catch (error) {
+        console.warn(`Could not read directory ${dirUri.fsPath}:`, error);
+    }
+    return files;
 }
 
 /**
@@ -32,6 +71,7 @@ export class GetFileSummariesTool extends StructuredTool {
 
     schema = z.object({
         path: z.string().describe("从工作区根目录出发的相对路径。"),
+        language: z.string().optional().describe("项目的编程语言 (例如 'typescript', 'python')，用于智能过滤文件。如果未提供，则使用通用规则。"),
     });
 
     protected async _call({ path: relativePath }: z.infer<typeof this.schema>): Promise<string> {
@@ -131,6 +171,7 @@ export class GetAllFilesContentTool extends StructuredTool {
 
     schema = z.object({
         path: z.string().describe("从工作区根目录出发的相对路径。"),
+        language: z.string().optional().describe("项目的编程语言 (例如 'typescript', 'python')，用于智能过滤文件。如果未提供，则使用通用规则。"),
     });
 
     /**
@@ -163,19 +204,35 @@ export class GetAllFilesContentTool extends StructuredTool {
         return allContents;
     }
 
-    protected async _call({ path: relativePath }: z.infer<typeof this.schema>): Promise<string> {
+    protected async _call({ path: relativePath, language }: z.infer<typeof this.schema>): Promise<string> {
         try {
             const workspaceRoot = getWorkspaceRoot();
             const absolutePath = path.join(workspaceRoot, relativePath);
             const dirUri = vscode.Uri.file(absolutePath);
 
-            const allContents = await this._traverseDirectory(dirUri, workspaceRoot);
+            // highlight-start
+            // 使用新的过滤辅助函数
+            const fileUris = await getFilteredFilePathsRecursive(dirUri, language);
+            // highlight-end
 
-            if (allContents.length === 0) {
-                return `在目录 "${relativePath}" 及其子目录中没有找到任何文件。`;
+            if (fileUris.length === 0) {
+                return `在目录 "${relativePath}" 及其子目录中没有找到与语言 '${language}' 相关的任何文件。`;
             }
-
+            
+            const contentPromises = fileUris.map(async (uri) => {
+                 const fileRelativePath = path.relative(workspaceRoot, uri.fsPath).replace(/\\/g, '/');
+                 try {
+                    const contentBytes = await vscode.workspace.fs.readFile(uri);
+                    const content = Buffer.from(contentBytes).toString('utf-8');
+                    return `--- FILE: ${fileRelativePath} ---\n${content}\n--- END OF FILE ---\n`;
+                 } catch (fileError: any) {
+                    return `--- FILE: ${fileRelativePath} ---\n错误: 无法读取文件。 ${fileError.message}\n--- END OF FILE ---\n`;
+                 }
+            });
+            
+            const allContents = await Promise.all(contentPromises);
             return allContents.join('\n');
+
         } catch (error: any) {
             return `递归获取路径 "${relativePath}" 的所有文件内容时出错: ${error.message}`;
         }

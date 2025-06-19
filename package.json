@@ -36,6 +36,10 @@
       {
         "command": "codewiki.runAgent",
         "title": "CodeWiki: Run Agent..."
+      },
+      {
+        "command": "codewiki.generateProjectDocumentation",
+        "title": "CodeWiki: Generate Project Documentation"
       }
     ]
   },

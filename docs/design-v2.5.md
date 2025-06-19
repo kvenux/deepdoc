@@ -42,21 +42,26 @@
 要在全量智能体先要进行规划，依据当前项目的结构，调用大模型分析当前项目语言是什么，项目有哪些模块要去分析；
 文件树、文件清单等tools要考虑结合语言进行过滤，每个语言单独定一个过滤文件，包括include、exclude的列表，还有通用的exclude列表
 相关的中间内容都要保存，保存文件名需要包括agent、model、时间
+在分析模块详细设计文档的时候，根据最大能分析的token（给一个全局参数）去选择不同的策略，小于token max时候，采用runActionPrompt，如果大于这个值，就调用runMapReduceAgent
+
 
 先生成设计文档，先不给代码；
 
 
-好的，这是一个非常棒的迭代方向，从单一模块分析升级到全项目文档的智能生成。这需要一个更高层次的编排（Orchestration）逻辑，我们可以称之为“文档生成总控代理”（Documentation Orchestrator Agent）。
-这个总控代理将分步执行任务：规划 -> 逐一执行 -> 综合。
-规划（Planning）: 分析项目结构，确定编程语言和核心模块。
-执行（Execution）: 对每个识别出的核心模块，调用我们现有的 Map-Reduce 代理（runMapReduceAgent）来生成详细的模块设计文档。
-综合（Synthesis）: 收集所有模块的分析结果和项目概况，调用一个新的“综合代理”（Synthesizer Agent），按照您提供的模板生成最终的总体设计文档。
-为了实现这个目标，我们需要进行以下修改和添加：
-新增 GetAllFilesContentTool: fileSystemTools.ts 中需要一个新工具，可以递归获取一个目录下所有文件的内容。这对于 Map-Reduce 代理在分析整个模块时非常有用。
-增强文件系统工具: GetDirectoryTreeTool 和新的 GetAllFilesContentTool 需要支持按语言类型进行文件过滤。
-重构 agentOrchestrator.ts: 将 runMapReduceAgent 的核心逻辑提取出来，使其可以被其他代码以编程方式调用，而不仅仅是通过 codewiki.runAgent 命令。
-创建新的代理:
-PlannerAgent: 一个简单的代理，用于分析文件树并输出项目语言和模块列表。
-SynthesizerAgent: 一个代理，用于接收所有中间产物并生成最终文档。
-创建总控流程 (documentationOrchestrator.ts): 这是所有逻辑的核心，它将编排上述所有代理和工具的调用。
-注册新命令 (extension.ts): 添加一个新的 VS Code 命令，例如 codewiki.generateProjectDocumentation，来启动整个流程。
+好的，这个需求非常棒，是 `CodeWiki` 项目从“工具集”走向“解决方案”的关键一步。它要求我们构建一个更高层次的、有规划能力的“元智能体”（meta-agent），这个智能体能够编排现有的能力（如 `runMapReduceAgent` 和 `runActionPrompt`）来完成一个复杂的、多步骤的文档生成任务。
+
+我将按照您的思路，分阶段实现这个功能。
+
+### 核心设计思路
+
+1.  **引入新的 Agent 类型**: 我们将在 `.codewiki` 目录中支持一种新的 YAML 文件格式，专门用于“总体设计文档生成”。这种 YAML 将定义三个核心阶段：`planning_prompt`（规划）, `module_analysis_prompt`（模块分析，这将是 `map-reduce` 类型的模板）, 和 `synthesis_prompt`（综合）。
+2.  **创建新的顶层编排器 (`documentationAgent.ts`)**: 这个编排器将负责执行“规划 -> 逐一分析 -> 综合”的完整流程。
+3.  **语言感知的项目分析**: 创建一个 `projectStructureAnalyzer.ts` 模块，用于：
+    *   根据语言（如 TypeScript, Python 等）过滤文件。
+    *   识别项目的主要语言。
+    *   计算目录的 Token 数量，为后续的策略选择（`runActionPrompt` vs `runMapReduceAgent`）做准备。
+4.  **改造现有模块以支持编排**:
+    *   修改 `agentOrchestrator.ts` 中的 `runMapReduceAgent`，使其不仅能将结果写入文件，还能将结果作为字符串返回，以便上层编排器使用。
+5.  **更新入口点 (`extension.ts`)**: 修改 `codewiki.runAgent` 命令，使其能识别并启动新的“总体设计文档”Agent。
+6.  **文件和状态管理**: 所有中间产物（规划结果、各模块分析文档）和最终产物都将保存在一个以时间戳命名的独立目录中，方便追溯。
+
