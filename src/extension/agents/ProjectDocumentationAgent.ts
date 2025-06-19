@@ -33,6 +33,11 @@ async function loadPromptFile(workspaceRoot: vscode.Uri, fileName: string): Prom
     }
 }
 
+// 辅助函数：用于创建延迟
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export class ProjectDocumentationAgent {
     private outputChannel: vscode.OutputChannel;
     private modelConfig: ModelConfig;
@@ -123,18 +128,35 @@ export class ProjectDocumentationAgent {
             await vscode.workspace.fs.writeFile(planPath, Buffer.from(JSON.stringify(plan, null, 2), 'utf8'));
             this.log(`[成功] 规划完成。规划文件已保存至 plan.json。`);
 
-            this.log("\n--- [阶段 2/4] 执行: 分析独立模块... ---");
-            const moduleDocs: { name: string, path: string, content: string }[] = [];
-            for (const [index, module] of plan.modules.entries()) {
-                this.log(`\n[模块 ${index + 1}/${plan.modules.length}] 正在分析 '${module.name}' (路径: '${module.path}')...`);
-                const moduleDocContent = await this.analyzeModule(workspaceRoot, module, plan.language, runDir);
-                
-                const moduleDocPath = vscode.Uri.joinPath(runDir, `module_${module.name.replace(/[\s\/]/g, '_')}.md`);
-                await vscode.workspace.fs.writeFile(moduleDocPath, Buffer.from(moduleDocContent, 'utf8'));
+            this.log("\n--- [阶段 2/4] 执行: 并行分析独立模块 (带延迟)... ---");
+            const moduleAnalysisPromises: Promise<{ name: string; path: string; content: string; }>[] = [];
 
-                moduleDocs.push({ ...module, content: moduleDocContent });
-                this.log(`[成功] 模块 '${module.name}' 分析完成，文档已保存。`);
+            for (const [index, module] of plan.modules.entries()) {
+                // 为每个模块创建一个异步分析任务
+                const analyzeSingleModule = async (): Promise<{ name: string; path: string; content: string; }> => {
+                    this.log(`\n[模块 ${index + 1}/${plan.modules.length}] 开始分析 '${module.name}' (路径: '${module.path}')...`);
+                    const moduleDocContent = await this.analyzeModule(workspaceRoot, module, plan.language, runDir);
+                    
+                    const moduleDocPath = vscode.Uri.joinPath(runDir, `module_${module.name.replace(/[\s\/]/g, '_')}.md`);
+                    await vscode.workspace.fs.writeFile(moduleDocPath, Buffer.from(moduleDocContent, 'utf8'));
+
+                    this.log(`[成功] 模块 '${module.name}' 分析完成，文档已保存。`);
+                    return { ...module, content: moduleDocContent };
+                };
+
+                // 启动任务并将其Promise添加到列表中
+                moduleAnalysisPromises.push(analyzeSingleModule());
+
+                // 如果不是最后一个模块，则等待1.5秒再启动下一个
+                if (index < plan.modules.length - 1) {
+                    this.log(`    (等待 1.5s 后启动下一个模块的分析...)`);
+                    await sleep(1500);
+                }
             }
+
+            this.log(`\n[信息] 所有 ${plan.modules.length} 个模块的分析任务已启动，正在等待全部完成...`);
+            const moduleDocs = await Promise.all(moduleAnalysisPromises);
+            this.log(`\n[成功] 所有模块均已分析完毕。`);
 
             this.log("\n--- [阶段 3/4] 综合: 生成最终文档... ---");
             const synthesisPromptContent = await loadPromptFile(workspaceRoot, 'project_synthesis.yml');

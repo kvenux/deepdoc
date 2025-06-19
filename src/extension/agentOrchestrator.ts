@@ -46,6 +46,11 @@ async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
     return files;
 }
 
+// 辅助函数：用于创建延迟
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // 核心执行函数
 export async function runMapReduceAgent(
     yamlContent: string,
@@ -121,7 +126,7 @@ export async function runMapReduceAgent(
             outputChannel.appendLine(` -> Created ${batches.length} batches.`);
 
             // 4. MAP 阶段：循环处理每个批次
-            outputChannel.appendLine("\n[STEP 4/6] Starting MAP phase: Analyzing batches...");
+            outputChannel.appendLine("\n[STEP 4/6] Starting MAP phase: Analyzing batches in parallel with delay...");
             
             // 使用 LLMService 创建模型实例
             outputChannel.appendLine(`[INFO] Creating LLM instances...`);
@@ -137,24 +142,42 @@ export async function runMapReduceAgent(
             });
 
 
-            let combinedMarkdownSummaries = "";
+            const mapAnalysisPromises: Promise<string>[] = [];
             for (let i = 0; i < batches.length; i++) {
                 const batch = batches[i];
-                outputChannel.appendLine(` -> [MAP] Processing Batch ${i + 1} of ${batches.length} (${batch.length} files)...`);
+                
+                // 为每个批次创建一个异步处理函数
+                const processBatch = async (): Promise<string> => {
+                    outputChannel.appendLine(` -> [MAP] Starting analysis for Batch ${i + 1} of ${batches.length} (${batch.length} files)...`);
 
-                const batchContent = batch
-                    .map(file => `--- START OF FILE: ${file.path} ---\n${file.content}\n--- END OF FILE ---`)
-                    .join('\n\n');
+                    const batchContent = batch
+                        .map(file => `--- START OF FILE: ${file.path} ---\n${file.content}\n--- END OF FILE ---`)
+                        .join('\n\n');
 
-                const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
-                const mapMessages = [
-                    new SystemMessage(actionPrompt.map_prompt_template.system),
-                    new HumanMessage(humanPrompt),
-                ];
+                    const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
+                    const mapMessages = [
+                        new SystemMessage(actionPrompt.map_prompt_template.system),
+                        new HumanMessage(humanPrompt),
+                    ];
 
-                const response = await llm.invoke(mapMessages);
-                combinedMarkdownSummaries += response.content + "\n\n";
+                    const response = await llm.invoke(mapMessages);
+                    outputChannel.appendLine(` -> [MAP] Finished analysis for Batch ${i + 1}.`);
+                    return response.content as string;
+                };
+
+                // 启动任务并将其Promise添加到数组中
+                mapAnalysisPromises.push(processBatch());
+                
+                // 如果不是最后一个批次，则等待1.5秒再启动下一个任务，以避免超出QPS限制
+                if (i < batches.length - 1) {
+                    outputChannel.appendLine(`    (Waiting 1.5s before next MAP request to respect QPS limit)`);
+                    await sleep(1500);
+                }
             }
+
+            outputChannel.appendLine(" -> [MAP] All batch analysis requests sent. Waiting for all to complete...");
+            const mapResults = await Promise.all(mapAnalysisPromises);
+            const combinedMarkdownSummaries = mapResults.join("\n\n");
             outputChannel.appendLine(" -> [MAP] All batches analyzed successfully.");
 
 

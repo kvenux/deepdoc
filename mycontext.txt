@@ -113,7 +113,6 @@ import { CustomAgentExecutor, ToolChainStep, LlmPromptTemplate, AgentExecutorCal
 // 导入新的 Agent Runner
 import { runActionPrompt } from './agentRunner';
 // 导入 LangChain 相关类
-import { ChatOpenAI } from '@langchain/openai';
 import { StructuredTool } from '@langchain/core/tools';
 
 export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
@@ -126,8 +125,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
     private _llmService: LLMService;
     private _activeConversation: Conversation | null = null;
     private _tools: StructuredTool[];
-    // private _agentExecutor: CustomAgentExecutor | null = null; // 不再需要持久化的 executor 实例
-
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -136,24 +133,19 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
         this._stateManager = new StateManager(this._context.globalState);
         this._llmService = new LLMService();
         this._tools = []; // 初始化为空数组
-        // highlight-start
-        // _agentExecutor 的初始化被移除，因为它现在是即时创建的
-        // highlight-end
         this.initializeTools();
     }
 
     private async initializeTools() {
-        // 创建一个临时的 LLM 实例，仅用于初始化 LLM-as-a-Tool
-        // Agent 执行时会根据当前配置动态创建新的 LLM 实例
         const modelConfigs = await this._stateManager.getModelConfigs();
         const defaultModelConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
 
         if (defaultModelConfig) {
-            const toolLlm = new ChatOpenAI({
-                modelName: defaultModelConfig.modelId,
-                apiKey: defaultModelConfig.apiKey,
-                configuration: { baseURL: defaultModelConfig.baseUrl },
-                temperature: 0.1, // 工具型LLM温度可以低一些
+            // 使用 LLMService 创建工具所需的 LLM 实例
+            const toolLlm = await this._llmService.createModel({
+                modelConfig: defaultModelConfig,
+                temperature: 0.1,
+                streaming: false,
             });
 
             this._tools = [
@@ -374,7 +366,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._llmService.abortRequest();
                     break;
                 }
-            // highlight-start
             case 'executeActionPrompt':
                 {
                     const webview = this._view?.webview;
@@ -382,7 +373,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     
                     const { yamlContent, userInputs, modelConfig } = data.payload;
 
-                    // 定义将 Agent 执行过程实时发送到前端的回调函数
                     const callbacks: AgentExecutorCallbacks = {
                         onToolStart: (toolName, input) => {
                             webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'tool_start', toolName, input: JSON.stringify(input, null, 2) } });
@@ -404,18 +394,18 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                         }
                     };
 
-                    // 调用重构后的核心函数
+                    // 调用核心函数，并传入 LLMService
                     await runActionPrompt({
                         yamlContent,
                         userInputs,
                         modelConfig,
                         tools: this._tools,
-                        callbacks
+                        callbacks,
+                        llmService: this._llmService
                     });
                     
                     break;
                 }
-            // highlight-end
             case 'regenerate':
             case 'editMessage':
                 {
@@ -599,19 +589,122 @@ function getNonce() {
 --------------------------------------------------------------------------------
 
 --- file_path: extension/LLMService.ts ---
+// src/extension/LLMService.ts
+
+import vscode from 'vscode';
 import { ChatMessage, ModelConfig } from '../common/types';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, AIMessage, BaseMessage } from '@langchain/core/messages';
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 
 /**
- * Service to interact with a Large Language Model using Langchain.js.
- * It handles API requests, including streaming responses and aborting requests.
+ * 标志位：设置为 true 以使用 Gemini，设置为 false 则使用 settings.json 中的模型配置。
+ * 使用 Gemini 前，请确保已安装 `@langchain/google-genai` 并在 `.codewiki/.env` 文件中配置了 GOOGLE_API_KEY。
+ */
+const USE_GEMINI = true;
+
+/**
+ * 创建模型实例时使用的选项。
+ */
+export interface CreateModelOptions {
+    // 当不使用 Gemini 时，需要此配置来创建 OpenAI 或兼容模型
+    modelConfig: ModelConfig; 
+    temperature?: number;
+    streaming?: boolean;
+}
+
+/**
+ * 从工作区的 .codewiki/.env 文件中安全地读取 Google API 密钥。
+ * @returns {Promise<string | undefined>} 返回 API 密钥或 undefined。
+ */
+async function getGoogleApiKey(): Promise<string | undefined> {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders) {
+        return undefined;
+    }
+    const workspaceRoot = workspaceFolders[0].uri;
+    const envPath = vscode.Uri.joinPath(workspaceRoot, '.codewiki', '.env');
+
+    try {
+        const contentBytes = await vscode.workspace.fs.readFile(envPath);
+        const content = Buffer.from(contentBytes).toString('utf-8');
+        const lines = content.split('\n');
+        for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (trimmedLine.startsWith('GOOGLE_API_KEY=')) {
+                return trimmedLine.substring('GOOGLE_API_KEY='.length).trim();
+            }
+        }
+    } catch (error) {
+        if (!(error instanceof vscode.FileSystemError && error.code === 'FileNotFound')) {
+            console.error("Error reading .codewiki/.env file:", error);
+        }
+    }
+    return undefined;
+}
+
+
+/**
+ * 服务类，用于与大语言模型交互。
+ * 此类现在是创建模型实例的唯一入口点，整合了 OpenAI 和 Gemini 的逻辑。
  */
 export class LLMService {
     private _abortController: AbortController | null = null;
 
     constructor() {}
 
+    /**
+     * 统一的模型创建工厂方法。
+     * 根据 USE_GEMINI 标志和传入的选项，创建并返回一个 LLM 实例。
+     * @param options - 创建模型所需的配置，包括温度、是否流式等。
+     * @returns {Promise<BaseChatModel>} 一个配置好的 LangChain 模型实例。
+     */
+    public async createModel(options: CreateModelOptions): Promise<BaseChatModel> {
+        const { modelConfig, temperature = 0.7, streaming = false } = options;
+
+        if (USE_GEMINI) {
+            console.log("[LLMService] Creating model using Google Gemini.");
+            const apiKey = await getGoogleApiKey();
+            if (!apiKey) {
+                throw new Error("Gemini execution failed: 'GOOGLE_API_KEY' not found in your .codewiki/.env file.");
+            }
+            // Gemini 对温度的支持可能与 OpenAI 不同，这里直接传入
+            return new ChatGoogleGenerativeAI({
+                model: "gemini-2.5-flash", 
+                apiKey: apiKey,
+                temperature,
+                // Gemini 的 streaming 是通过 .stream() 方法控制的，这里设置 streaming 属性可能无效，但为了接口统一保留
+            });
+        }
+        
+        // 默认使用 OpenAI 或兼容的代理
+        const url = new URL(modelConfig.baseUrl);
+        if (!url.pathname.includes('/v1')) {
+            url.pathname = ('/v1' + url.pathname).replace(/\/+/g, '/');
+        }
+        const finalBaseUrl = url.toString().replace(/\/$/, '');
+
+        return new ChatOpenAI({
+            modelName: modelConfig.modelId,
+            apiKey: modelConfig.apiKey,
+            streaming,
+            temperature,
+            configuration: {
+                baseURL: finalBaseUrl,
+            }
+        });
+    }
+
+
+    /**
+     * 获取模型的流式补全。
+     * @param messages 聊天消息历史
+     * @param config 选定的模型配置
+     * @param onData 接收到数据块时的回调
+     * @param onEnd 完成时的回调
+     * @param onError 出错时的回调
+     */
     public async getCompletion(
         messages: ChatMessage[],
         config: ModelConfig,
@@ -621,37 +714,15 @@ export class LLMService {
     ): Promise<void> {
         this._abortController = new AbortController();
         const signal = this._abortController.signal;
-
-        let finalBaseUrl = '';
+        let llm: BaseChatModel;
 
         try {
-            // ==================== FINAL AND CORRECT FIX ====================
-            // The root cause is the missing `/v1` in the final URL.
-            // Langchain's `@langchain/openai` expects the `baseURL` to contain the API version,
-            // e.g., `https://api.openai.com/v1`. It only appends the resource path like `/chat/completions`.
-
-            // Let's create a robust logic to ensure the baseURL is correct.
-            const url = new URL(config.baseUrl);
-
-            // Check if the path already contains `/v1`. If not, add it.
-            // This handles inputs like "https://api.openai.com" and "https://my-proxy.com".
-            if (!url.pathname.includes('/v1')) {
-                // Prepend `/v1` to any existing path, or set it if path is empty.
-                url.pathname = ('/v1' + url.pathname).replace(/\/+/g, '/'); // Avoids double slashes
-            }
-
-            finalBaseUrl = url.toString().replace(/\/$/, ''); // Remove trailing slash
-
-            const llm = new ChatOpenAI({
-                modelName: config.modelId,
-                apiKey: config.apiKey,
+            // 使用新的工厂方法创建模型实例
+            llm = await this.createModel({
+                modelConfig: config,
                 streaming: true,
-                temperature: 0.7,
-                configuration: {
-                    baseURL: finalBaseUrl,
-                }
+                temperature: 0.7 // Standard temperature for chat
             });
-            // ===============================================================
 
             const langchainMessages: BaseMessage[] = messages.map(msg => {
                 return msg.role === 'user' ? new HumanMessage(msg.content) : new AIMessage(msg.content);
@@ -667,17 +738,20 @@ export class LLMService {
                 }
             }
 
-        } catch (error) {
+        } catch (error: any) {
             if (signal.aborted) {
                 console.log('Request aborted by user.');
             } else {
                 console.error("--- LANGCHAIN REQUEST FAILED ---");
-                const attemptedUrl = `${finalBaseUrl}/chat/completions`;
-                console.error(`Attempted to request: POST ${attemptedUrl}`);
-                console.error("Model Config Used:", { ...config, apiKey: `...${config.apiKey.slice(-4)}`, finalBaseUrlUsed: finalBaseUrl });
-                console.error("Full Error Object:", error);
+                // 构造错误信息，因为我们不知道是哪个URL
+                 if (error instanceof Error) {
+                     console.error("Full Error Object:", error);
+                     onError(error);
+                 } else {
+                     console.error("Unknown Error:", error);
+                     onError(new Error(String(error)));
+                 }
                 console.error("--- END OF ERROR ---");
-                onError(error);
             }
         } finally {
             onEnd();
@@ -794,57 +868,10 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { get_encoding, Tiktoken } from 'tiktoken';
-import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { ModelConfig } from '../common/types';
-
-// highlight-start
-// ================= Gemini 支持模块 =================
-import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { LLMService } from './LLMService'; // 导入 LLMService
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-
-/**
- * 标志位：设置为 true 以使用 Gemini，设置为 false 则使用 settings.json 中的模型配置。
- * 使用 Gemini 前，请确保已安装 `@langchain/google-genai` 并在 `.codewiki/.env` 文件中配置了 GOOGLE_API_KEY。
- */
-const USE_GEMINI = false;
-
-/**
- * 从工作区的 .codewiki/.env 文件中安全地读取 Google API 密钥。
- * @returns {Promise<string | undefined>} 返回 API 密钥或 undefined。
- */
-async function getGoogleApiKey(): Promise<string | undefined> {
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders) {
-        // 没有打开的工作区，无法查找文件
-        return undefined;
-    }
-    const workspaceRoot = workspaceFolders[0].uri;
-    const envPath = vscode.Uri.joinPath(workspaceRoot, '.codewiki', '.env');
-
-    try {
-        const contentBytes = await vscode.workspace.fs.readFile(envPath);
-        const content = Buffer.from(contentBytes).toString('utf-8');
-        const lines = content.split('\n');
-        for (const line of lines) {
-            const trimmedLine = line.trim();
-            // 简单解析，找到以 GOOGLE_API_KEY= 开头的行
-            if (trimmedLine.startsWith('GOOGLE_API_KEY=')) {
-                return trimmedLine.substring('GOOGLE_API_KEY='.length).trim();
-            }
-        }
-    } catch (error) {
-        // 如果文件不存在，这是正常情况，直接返回 undefined。
-        // 如果是其他读取错误，可以在控制台打印日志。
-        if (!(error instanceof vscode.FileSystemError && error.code === 'FileNotFound')) {
-            console.error("Error reading .codewiki/.env file:", error);
-        }
-    }
-    return undefined;
-}
-// ================================================
-// highlight-end
-
 
 // 定义我们新的YAML格式
 interface MapReducePrompt {
@@ -871,7 +898,6 @@ async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
     for (const [name, type] of entries) {
         const entryUri = vscode.Uri.joinPath(dirUri, name);
         if (type === vscode.FileType.File) {
-            // 简单过滤，可以根据需要扩展
             if (!name.startsWith('.') && !['node_modules', 'dist', 'out'].some(part => entryUri.path.includes(`/${part}/`))) {
                 files.push(entryUri);
             }
@@ -884,12 +910,18 @@ async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
     return files;
 }
 
+// 辅助函数：用于创建延迟
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // 核心执行函数
 export async function runMapReduceAgent(
     yamlContent: string,
     userInputs: Record<string, string>,
     modelConfig: ModelConfig,
-    outputChannel: vscode.OutputChannel
+    outputChannel: vscode.OutputChannel,
+    llmService: LLMService // 接收 LLMService 实例
 ): Promise<string> {
     return new Promise(async (resolve, reject) => {
         let tokenizer: Tiktoken | null = null;
@@ -958,81 +990,58 @@ export async function runMapReduceAgent(
             outputChannel.appendLine(` -> Created ${batches.length} batches.`);
 
             // 4. MAP 阶段：循环处理每个批次
-            outputChannel.appendLine("\n[STEP 4/6] Starting MAP phase: Analyzing batches...");
+            outputChannel.appendLine("\n[STEP 4/6] Starting MAP phase: Analyzing batches in parallel with delay...");
+            
+            // 使用 LLMService 创建模型实例
+            outputChannel.appendLine(`[INFO] Creating LLM instances...`);
+            const llm: BaseChatModel = await llmService.createModel({
+                modelConfig,
+                temperature: 0.1,
+                streaming: false,
+            });
+            const reduceLlm: BaseChatModel = await llmService.createModel({
+                modelConfig,
+                temperature: 0.5,
+                streaming: false,
+            });
 
-            // highlight-start
-            // ================= LLM 初始化（支持 Gemini） =================
-            let llm: BaseChatModel;
-            let reduceLlm: BaseChatModel;
 
-            if (USE_GEMINI) {
-                outputChannel.appendLine("[INFO] Using Google Gemini for execution.");
-                const apiKey = await getGoogleApiKey();
-                if (!apiKey) {
-                    throw new Error("Gemini execution failed: 'GOOGLE_API_KEY' not found in your .codewiki/.env file.");
-                }
-
-                // 用于 Map 阶段的 LLM，需要确定性
-                llm = new ChatGoogleGenerativeAI({
-                    model: "gemini-2.5-flash", // 或其他兼容模型如 'gemini-1.5-flash'
-                    apiKey: apiKey,
-                    temperature: 0.1,
-                });
-
-                // 用于 Reduce 阶段的 LLM，可以更有创造性
-                reduceLlm = new ChatGoogleGenerativeAI({
-                    model: "gemini-2.5-flash",
-                    apiKey: apiKey,
-                    temperature: 0.5,
-                });
-
-            } else {
-                outputChannel.appendLine(`[INFO] Using configured model '${modelConfig.name}' for execution.`);
-                // 保持原有的 ChatOpenAI 逻辑
-                let finalBaseUrl = '';
-                const url = new URL(modelConfig.baseUrl);
-                if (!url.pathname.includes('/v1')) {
-                    url.pathname = ('/v1' + url.pathname).replace(/\/+/g, '/');
-                }
-                finalBaseUrl = url.toString().replace(/\/$/, '');
-
-                llm = new ChatOpenAI({
-                    modelName: modelConfig.modelId,
-                    apiKey: modelConfig.apiKey,
-                    streaming: false,
-                    configuration: { baseURL: finalBaseUrl },
-                    temperature: 0.1,
-                });
-
-                reduceLlm = new ChatOpenAI({
-                    modelName: modelConfig.modelId,
-                    apiKey: modelConfig.apiKey,
-                    streaming: false,
-                    configuration: { baseURL: finalBaseUrl },
-                    temperature: 0.5,
-                });
-            }
-            // =============================================================
-            // highlight-end
-
-            let combinedMarkdownSummaries = "";
+            const mapAnalysisPromises: Promise<string>[] = [];
             for (let i = 0; i < batches.length; i++) {
                 const batch = batches[i];
-                outputChannel.appendLine(` -> [MAP] Processing Batch ${i + 1} of ${batches.length} (${batch.length} files)...`);
+                
+                // 为每个批次创建一个异步处理函数
+                const processBatch = async (): Promise<string> => {
+                    outputChannel.appendLine(` -> [MAP] Starting analysis for Batch ${i + 1} of ${batches.length} (${batch.length} files)...`);
 
-                const batchContent = batch
-                    .map(file => `--- START OF FILE: ${file.path} ---\n${file.content}\n--- END OF FILE ---`)
-                    .join('\n\n');
+                    const batchContent = batch
+                        .map(file => `--- START OF FILE: ${file.path} ---\n${file.content}\n--- END OF FILE ---`)
+                        .join('\n\n');
 
-                const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
-                const mapMessages = [
-                    new SystemMessage(actionPrompt.map_prompt_template.system),
-                    new HumanMessage(humanPrompt),
-                ];
+                    const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
+                    const mapMessages = [
+                        new SystemMessage(actionPrompt.map_prompt_template.system),
+                        new HumanMessage(humanPrompt),
+                    ];
 
-                const response = await llm.invoke(mapMessages);
-                combinedMarkdownSummaries += response.content + "\n\n";
+                    const response = await llm.invoke(mapMessages);
+                    outputChannel.appendLine(` -> [MAP] Finished analysis for Batch ${i + 1}.`);
+                    return response.content as string;
+                };
+
+                // 启动任务并将其Promise添加到数组中
+                mapAnalysisPromises.push(processBatch());
+                
+                // 如果不是最后一个批次，则等待1.5秒再启动下一个任务，以避免超出QPS限制
+                if (i < batches.length - 1) {
+                    outputChannel.appendLine(`    (Waiting 1.5s before next MAP request to respect QPS limit)`);
+                    await sleep(1500);
+                }
             }
+
+            outputChannel.appendLine(" -> [MAP] All batch analysis requests sent. Waiting for all to complete...");
+            const mapResults = await Promise.all(mapAnalysisPromises);
+            const combinedMarkdownSummaries = mapResults.join("\n\n");
             outputChannel.appendLine(" -> [MAP] All batches analyzed successfully.");
 
 
@@ -1092,10 +1101,10 @@ export async function runMapReduceAgent(
 // src/extension/agentRunner.ts
 
 import * as yaml from 'js-yaml';
-import { ChatOpenAI } from '@langchain/openai';
 import { StructuredTool } from '@langchain/core/tools';
 import { CustomAgentExecutor, ToolChainStep, LlmPromptTemplate, AgentExecutorCallbacks } from './agents/CustomAgentExecutor';
 import { ModelConfig } from '../common/types';
+import { LLMService } from './LLMService';
 
 interface RunActionPromptOptions {
     yamlContent: string;
@@ -1103,6 +1112,7 @@ interface RunActionPromptOptions {
     modelConfig: ModelConfig;
     tools: StructuredTool[];
     callbacks: AgentExecutorCallbacks;
+    llmService: LLMService; // 新增：传入 LLMService 实例
 }
 
 /**
@@ -1112,7 +1122,7 @@ interface RunActionPromptOptions {
  */
 export async function runActionPrompt(options: RunActionPromptOptions): Promise<string> {
     return new Promise(async (resolve, reject) => {
-        const { yamlContent, userInputs, modelConfig, tools, callbacks } = options;
+        const { yamlContent, userInputs, modelConfig, tools, callbacks, llmService } = options;
         
         try {
             const actionPrompt = yaml.load(yamlContent) as {
@@ -1124,12 +1134,11 @@ export async function runActionPrompt(options: RunActionPromptOptions): Promise<
                 throw new Error("Invalid Action Prompt YAML format. Missing 'tool_chain' or 'llm_prompt_template'.");
             }
 
-            const finalLlm = new ChatOpenAI({
-                modelName: modelConfig.modelId,
-                apiKey: modelConfig.apiKey,
+            // 使用 LLMService 创建最终的 LLM 实例
+            const finalLlm = await llmService.createModel({
+                modelConfig,
                 streaming: true,
                 temperature: 0.7,
-                configuration: { baseURL: modelConfig.baseUrl },
             });
 
             // 增强 callbacks 以支持 Promise 解析
@@ -1351,8 +1360,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { ModelConfig } from '../../common/types';
-import { ChatOpenAI } from '@langchain/openai';
-import { HumanMessage, SystemMessage, BaseMessage } from '@langchain/core/messages';
+import { BaseMessage, HumanMessage } from '@langchain/core/messages';
 import { get_encoding, Tiktoken } from 'tiktoken';
 import { GetDirectoryTreeTool, GetAllFilesContentTool } from '../tools/fileSystemTools';
 import { runMapReduceAgent } from '../agentOrchestrator';
@@ -1360,6 +1368,8 @@ import { runActionPrompt } from '../agentRunner';
 import { createFileSelectorLLMTool } from '../tools/llmTools';
 import { StructuredTool } from '@langchain/core/tools';
 import { AgentExecutorCallbacks } from './CustomAgentExecutor';
+import { LLMService } from '../LLMService'; // 导入 LLMService
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 
 // 定义规划阶段的输出结构
 interface PlannerOutput {
@@ -1379,27 +1389,37 @@ async function loadPromptFile(workspaceRoot: vscode.Uri, fileName: string): Prom
     }
 }
 
+// 辅助函数：用于创建延迟
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export class ProjectDocumentationAgent {
     private outputChannel: vscode.OutputChannel;
     private modelConfig: ModelConfig;
-    private llm: ChatOpenAI;
+    private llmService: LLMService; // 使用 LLMService
     private tokenizer: Tiktoken;
     private readonly MAX_TOKENS_FOR_DIRECT_ANALYSIS = 32000;
-    private tools: StructuredTool[];
+    private tools: StructuredTool[] = [];
 
-    constructor(outputChannel: vscode.OutputChannel, modelConfig: ModelConfig) {
+    constructor(outputChannel: vscode.OutputChannel, modelConfig: ModelConfig, llmService: LLMService) {
         this.outputChannel = outputChannel;
         this.modelConfig = modelConfig;
-        this.llm = new ChatOpenAI({
-            modelName: modelConfig.modelId,
-            apiKey: modelConfig.apiKey,
-            temperature: 0.1,
-            streaming: true,
-            configuration: { baseURL: modelConfig.baseUrl },
-        });
+        this.llmService = llmService; // 存储 LLMService 实例
         this.tokenizer = get_encoding("cl100k_base");
+    }
+
+    private async initialize() {
+        // 如果工具已初始化，则跳过
+        if (this.tools.length > 0) return;
+
+        // 异步创建用于工具的 LLM
+        const toolLlm = await this.llmService.createModel({
+            modelConfig: this.modelConfig,
+            temperature: 0.1,
+            streaming: false
+        });
         
-        const toolLlm = new ChatOpenAI({ ...this.llm.lc_kwargs, temperature: 0.1, streaming: false });
         this.tools = [
             new GetDirectoryTreeTool(),
             new GetAllFilesContentTool(),
@@ -1415,13 +1435,19 @@ export class ProjectDocumentationAgent {
         messages: BaseMessage[], 
         logFileBaseName: string, 
         runDirUri: vscode.Uri,
-        llmInstance: ChatOpenAI = this.llm
+        temperature: number = 0.1 // 允许指定温度
     ): Promise<string> {
         const requestContent = messages.map(m => `[${m._getType()}]\n${m.content}`).join('\n\n---\n\n');
         const requestPath = vscode.Uri.joinPath(runDirUri, `${logFileBaseName}_request.txt`);
         await vscode.workspace.fs.writeFile(requestPath, Buffer.from(requestContent, 'utf8'));
 
-        const nonStreamingLlm = new ChatOpenAI({ ...llmInstance.lc_kwargs, streaming: false });
+        // 使用 LLMService 创建一个具有特定配置的、非流式的 LLM
+        const nonStreamingLlm = await this.llmService.createModel({
+            modelConfig: this.modelConfig,
+            streaming: false,
+            temperature,
+        });
+
         const response = await nonStreamingLlm.invoke(messages);
         const responseContent = response.content.toString();
 
@@ -1437,6 +1463,9 @@ export class ProjectDocumentationAgent {
         if (!workspaceRoot) {
             throw new Error("请先打开一个工作区文件夹。");
         }
+        
+        // 在运行开始时进行异步初始化
+        await this.initialize();
 
         const runId = `doc-gen_${this.modelConfig.modelId.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().replace(/[:.]/g, '-')}`;
         const runDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki', 'runs', runId);
@@ -1455,18 +1484,35 @@ export class ProjectDocumentationAgent {
             await vscode.workspace.fs.writeFile(planPath, Buffer.from(JSON.stringify(plan, null, 2), 'utf8'));
             this.log(`[成功] 规划完成。规划文件已保存至 plan.json。`);
 
-            this.log("\n--- [阶段 2/4] 执行: 分析独立模块... ---");
-            const moduleDocs: { name: string, path: string, content: string }[] = [];
-            for (const [index, module] of plan.modules.entries()) {
-                this.log(`\n[模块 ${index + 1}/${plan.modules.length}] 正在分析 '${module.name}' (路径: '${module.path}')...`);
-                const moduleDocContent = await this.analyzeModule(workspaceRoot, module, plan.language, runDir);
-                
-                const moduleDocPath = vscode.Uri.joinPath(runDir, `module_${module.name.replace(/[\s\/]/g, '_')}.md`);
-                await vscode.workspace.fs.writeFile(moduleDocPath, Buffer.from(moduleDocContent, 'utf8'));
+            this.log("\n--- [阶段 2/4] 执行: 并行分析独立模块 (带延迟)... ---");
+            const moduleAnalysisPromises: Promise<{ name: string; path: string; content: string; }>[] = [];
 
-                moduleDocs.push({ ...module, content: moduleDocContent });
-                this.log(`[成功] 模块 '${module.name}' 分析完成，文档已保存。`);
+            for (const [index, module] of plan.modules.entries()) {
+                // 为每个模块创建一个异步分析任务
+                const analyzeSingleModule = async (): Promise<{ name: string; path: string; content: string; }> => {
+                    this.log(`\n[模块 ${index + 1}/${plan.modules.length}] 开始分析 '${module.name}' (路径: '${module.path}')...`);
+                    const moduleDocContent = await this.analyzeModule(workspaceRoot, module, plan.language, runDir);
+                    
+                    const moduleDocPath = vscode.Uri.joinPath(runDir, `module_${module.name.replace(/[\s\/]/g, '_')}.md`);
+                    await vscode.workspace.fs.writeFile(moduleDocPath, Buffer.from(moduleDocContent, 'utf8'));
+
+                    this.log(`[成功] 模块 '${module.name}' 分析完成，文档已保存。`);
+                    return { ...module, content: moduleDocContent };
+                };
+
+                // 启动任务并将其Promise添加到列表中
+                moduleAnalysisPromises.push(analyzeSingleModule());
+
+                // 如果不是最后一个模块，则等待1.5秒再启动下一个
+                if (index < plan.modules.length - 1) {
+                    this.log(`    (等待 1.5s 后启动下一个模块的分析...)`);
+                    await sleep(1500);
+                }
             }
+
+            this.log(`\n[信息] 所有 ${plan.modules.length} 个模块的分析任务已启动，正在等待全部完成...`);
+            const moduleDocs = await Promise.all(moduleAnalysisPromises);
+            this.log(`\n[成功] 所有模块均已分析完毕。`);
 
             this.log("\n--- [阶段 3/4] 综合: 生成最终文档... ---");
             const synthesisPromptContent = await loadPromptFile(workspaceRoot, 'project_synthesis.yml');
@@ -1502,6 +1548,7 @@ export class ProjectDocumentationAgent {
         const prompt = promptTemplate.replace('{file_tree}', fileTree);
         const messages: BaseMessage[] = [new HumanMessage(prompt)];
         
+        // 使用默认温度 (0.1)
         const responseContent = await this.invokeLlmAndLog(messages, "01_planning", runDir);
         
         try {
@@ -1560,7 +1607,8 @@ export class ProjectDocumentationAgent {
                 userInputs: { module_path: module.path, language },
                 modelConfig: this.modelConfig,
                 tools: this.tools,
-                callbacks
+                callbacks,
+                llmService: this.llmService // 传入 LLMService
             });
         } else {
             this.log(` -> Token数超出限制，使用Map-Reduce流程 (runMapReduceAgent)...`);
@@ -1578,7 +1626,8 @@ export class ProjectDocumentationAgent {
                 yamlContent, 
                 { module_path: module.path, language }, 
                 this.modelConfig, 
-                mapReduceChannel
+                mapReduceChannel,
+                this.llmService // 传入 LLMService
             );
         }
 
@@ -1599,10 +1648,10 @@ ${doc.content}
             .replace('{detailed_module_docs}', detailedModuleDocs);
 
         this.log("[综合] 正在调用大模型生成最终文档...");
-        const synthesisLlm = new ChatOpenAI({ ...this.llm.lc_kwargs, temperature: 0.4, streaming: false });
         const messages: BaseMessage[] = [new HumanMessage(prompt)];
 
-        return await this.invokeLlmAndLog(messages, "03_synthesis", runDir, synthesisLlm);
+        // 使用稍高的温度进行综合
+        return await this.invokeLlmAndLog(messages, "03_synthesis", runDir, 0.4);
     }
 }
 
@@ -1708,6 +1757,7 @@ import { CodeWikiViewProvider } from './CodeWikiViewProvider';
 import { StateManager } from './StateManager';
 import { runMapReduceAgent } from './agentOrchestrator';
 import { ProjectDocumentationAgent } from './agents/ProjectDocumentationAgent';
+import { LLMService } from './LLMService';
 
 
 export function activate(context: vscode.ExtensionContext) {
@@ -1796,32 +1846,32 @@ export function activate(context: vscode.ExtensionContext) {
 
             outputChannel.appendLine(`\n--- Starting Agent Execution ---`);
             
-            // 6. 获取模型配置
+            // 6. 获取模型配置并创建 LLMService 实例
             const stateManager = new StateManager(context.globalState);
             const modelConfigs = await stateManager.getModelConfigs();
             const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
             if (!defaultConfig) { throw new Error("No default model config found."); }
             
-            // highlight-start
+            const llmService = new LLMService(); // 创建服务实例
+
             // =========================================================================
             // == 核心修改：根据YAML内容选择不同的执行器
             // =========================================================================
             if (actionPrompt.map_prompt_template && actionPrompt.reduce_prompt_template) {
                 // 这是新的 Map-Reduce Agent
                 outputChannel.appendLine("[INFO] Detected Map-Reduce Agent type. Starting orchestrator...");
-                await runMapReduceAgent(yamlContent, userInputs, defaultConfig, outputChannel);
+                await runMapReduceAgent(yamlContent, userInputs, defaultConfig, outputChannel, llmService);
 
             } else if (actionPrompt.tool_chain && actionPrompt.llm_prompt_template) {
                 // 这是旧的 Tool-Chain Agent
                 outputChannel.appendLine("[ERROR] Detected Tool-Chain Agent type.");
                 // 旧的 runActionPrompt 逻辑应该在这里被调用，但我们在此示例中将其标记为未实现
                 // 以便专注于新的 Map-Reduce 流程。
-                // await runActionPrompt({ yamlContent, userInputs, modelConfig: defaultConfig, tools, callbacks });
-                throw new Error("Standard Tool-Chain agent runner is not connected in this version. Please use a Map-Reduce prompt YAML file.");
+                // await runActionPrompt({ yamlContent, userInputs, modelConfig: defaultConfig, tools, callbacks, llmService });
+                throw new Error("Standard Tool-Chain agent runner is not connected in this version. Please use a Map-Reduce prompt YAML file or trigger it from the webview.");
             } else {
                 throw new Error("Unknown or invalid Action Prompt YAML format. It must contain either ('map_prompt_template' and 'reduce_prompt_template') or ('tool_chain' and 'llm_prompt_template').");
             }
-            // highlight-end
 
         } catch (error: any) {
             const finalError = `[FATAL] An unexpected error occurred: ${error.message}`;
@@ -1852,8 +1902,9 @@ export function activate(context: vscode.ExtensionContext) {
             }
              outputChannel.appendLine(`[INFO] Using model: ${defaultConfig.name}`);
 
-            // 2. 创建并运行文档生成智能体
-            const docAgent = new ProjectDocumentationAgent(outputChannel, defaultConfig);
+            // 2. 创建 LLMService 和文档生成智能体
+            const llmService = new LLMService();
+            const docAgent = new ProjectDocumentationAgent(outputChannel, defaultConfig, llmService);
             await docAgent.run();
 
         } catch (error: any) {
