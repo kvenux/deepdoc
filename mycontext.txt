@@ -153,7 +153,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 new GetFilesContentByListTool(),
                 new GetAllFilesContentTool(),
                 new GetDirectoryTreeTool(),
-                createFileSelectorLLMTool(toolLlm),
+                createFileSelectorLLMTool(toolLlm, this._llmService), // 传入 llmService
             ];
 
         } else {
@@ -615,6 +615,16 @@ export interface CreateModelOptions {
 }
 
 /**
+ * 定义一个可以放入队列的LLM任务。
+ * 它包含一个返回Promise的函数，以及用于解决该Promise的resolver和rejecter。
+ */
+type LlmTask<T> = {
+    task: () => Promise<T>;
+    resolve: (value: T) => void;
+    reject: (reason?: any) => void;
+};
+
+/**
  * 从工作区的 .codewiki/.env 文件中安全地读取 Google API 密钥。
  * @returns {Promise<string | undefined>} 返回 API 密钥或 undefined。
  */
@@ -651,6 +661,9 @@ async function getGoogleApiKey(): Promise<string | undefined> {
  */
 export class LLMService {
     private _abortController: AbortController | null = null;
+    private requestQueue: LlmTask<any>[] = [];
+    private isProcessingQueue = false;
+    private readonly RATE_LIMIT_DELAY_MS = 1500; // 为1 QPS设置1.5秒延迟，提供安全缓冲
 
     constructor() {}
 
@@ -696,6 +709,46 @@ export class LLMService {
         });
     }
 
+    /**
+     * 将一个非流式的LLM调用任务加入队列，并由调度器按速率限制执行。
+     * 这是所有Agent和Tool进行非流式调用的新入口点。
+     * @param task 一个返回LLM调用Promise的函数，例如 `() => llm.invoke(messages)`
+     * @returns 一个在任务完成时解析的Promise
+     */
+    public scheduleLlmCall<T>(task: () => Promise<T>): Promise<T> {
+        console.log(`[LLMService] A new call was scheduled. Queue size: ${this.requestQueue.length + 1}`);
+        return new Promise<T>((resolve, reject) => {
+            this.requestQueue.push({ task, resolve, reject });
+            this.processQueue();
+        });
+    }
+
+    private async processQueue() {
+        if (this.isProcessingQueue || this.requestQueue.length === 0) {
+            return;
+        }
+
+        this.isProcessingQueue = true;
+        const { task, resolve, reject } = this.requestQueue.shift()!;
+        
+        console.log(`[LLMService] Executing call from queue. Remaining: ${this.requestQueue.length}`);
+
+        try {
+            const result = await task();
+            resolve(result);
+        } catch (error) {
+            console.error("[LLMService] Error executing task from queue:", error);
+            reject(error);
+        } finally {
+            // 在完成（无论成功或失败）后，等待指定的延迟
+            await new Promise(res => setTimeout(res, this.RATE_LIMIT_DELAY_MS));
+            
+            this.isProcessingQueue = false;
+            // 尝试处理队列中的下一个项目
+            this.processQueue();
+        }
+    }
+    // highlight-end
 
     /**
      * 获取模型的流式补全。
@@ -910,11 +963,6 @@ async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
     return files;
 }
 
-// 辅助函数：用于创建延迟
-function sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 // 核心执行函数
 export async function runMapReduceAgent(
     yamlContent: string,
@@ -990,8 +1038,8 @@ export async function runMapReduceAgent(
             outputChannel.appendLine(` -> Created ${batches.length} batches.`);
 
             // 4. MAP 阶段：循环处理每个批次
-            outputChannel.appendLine("\n[STEP 4/6] Starting MAP phase: Analyzing batches in parallel with delay...");
-            
+            outputChannel.appendLine("\n[STEP 4/6] Starting MAP phase: Scheduling all batches for analysis...");
+
             // 使用 LLMService 创建模型实例
             outputChannel.appendLine(`[INFO] Creating LLM instances...`);
             const llm: BaseChatModel = await llmService.createModel({
@@ -1024,7 +1072,7 @@ export async function runMapReduceAgent(
                         new HumanMessage(humanPrompt),
                     ];
 
-                    const response = await llm.invoke(mapMessages);
+                    const response = await llmService.scheduleLlmCall(() => llm.invoke(mapMessages));
                     outputChannel.appendLine(` -> [MAP] Finished analysis for Batch ${i + 1}.`);
                     return response.content as string;
                 };
@@ -1032,11 +1080,6 @@ export async function runMapReduceAgent(
                 // 启动任务并将其Promise添加到数组中
                 mapAnalysisPromises.push(processBatch());
                 
-                // 如果不是最后一个批次，则等待1.5秒再启动下一个任务，以避免超出QPS限制
-                if (i < batches.length - 1) {
-                    outputChannel.appendLine(`    (Waiting 1.5s before next MAP request to respect QPS limit)`);
-                    await sleep(1500);
-                }
             }
 
             outputChannel.appendLine(" -> [MAP] All batch analysis requests sent. Waiting for all to complete...");
@@ -1063,7 +1106,7 @@ export async function runMapReduceAgent(
             outputChannel.appendLine("\n--- [FINAL DOCUMENT] ---");
             outputChannel.appendLine("\n--- NOT Steamming ---");
 
-            const finalResponse = await reduceLlm.invoke(reduceMessages);
+            const finalResponse = await llmService.scheduleLlmCall(() => reduceLlm.invoke(reduceMessages));
             const fullResponse = finalResponse.content as string;
 
             outputChannel.appendLine("\n--- [END OF DOCUMENT] ---");
@@ -1389,10 +1432,6 @@ async function loadPromptFile(workspaceRoot: vscode.Uri, fileName: string): Prom
     }
 }
 
-// 辅助函数：用于创建延迟
-function sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 export class ProjectDocumentationAgent {
     private outputChannel: vscode.OutputChannel;
@@ -1423,7 +1462,7 @@ export class ProjectDocumentationAgent {
         this.tools = [
             new GetDirectoryTreeTool(),
             new GetAllFilesContentTool(),
-            createFileSelectorLLMTool(toolLlm)
+            createFileSelectorLLMTool(toolLlm, this.llmService)
         ];
     }
 
@@ -1448,7 +1487,7 @@ export class ProjectDocumentationAgent {
             temperature,
         });
 
-        const response = await nonStreamingLlm.invoke(messages);
+        const response = await this.llmService.scheduleLlmCall(() => nonStreamingLlm.invoke(messages));
         const responseContent = response.content.toString();
 
         const responsePath = vscode.Uri.joinPath(runDirUri, `${logFileBaseName}_response.txt`);
@@ -1488,7 +1527,6 @@ export class ProjectDocumentationAgent {
             const moduleAnalysisPromises: Promise<{ name: string; path: string; content: string; }>[] = [];
 
             for (const [index, module] of plan.modules.entries()) {
-                // 为每个模块创建一个异步分析任务
                 const analyzeSingleModule = async (): Promise<{ name: string; path: string; content: string; }> => {
                     this.log(`\n[模块 ${index + 1}/${plan.modules.length}] 开始分析 '${module.name}' (路径: '${module.path}')...`);
                     const moduleDocContent = await this.analyzeModule(workspaceRoot, module, plan.language, runDir);
@@ -1499,18 +1537,10 @@ export class ProjectDocumentationAgent {
                     this.log(`[成功] 模块 '${module.name}' 分析完成，文档已保存。`);
                     return { ...module, content: moduleDocContent };
                 };
-
-                // 启动任务并将其Promise添加到列表中
                 moduleAnalysisPromises.push(analyzeSingleModule());
-
-                // 如果不是最后一个模块，则等待1.5秒再启动下一个
-                if (index < plan.modules.length - 1) {
-                    this.log(`    (等待 1.5s 后启动下一个模块的分析...)`);
-                    await sleep(1500);
-                }
             }
 
-            this.log(`\n[信息] 所有 ${plan.modules.length} 个模块的分析任务已启动，正在等待全部完成...`);
+            this.log(`\n[信息] 所有 ${plan.modules.length} 个模块的分析任务已提交到队列，正在等待全部完成...`);
             const moduleDocs = await Promise.all(moduleAnalysisPromises);
             this.log(`\n[成功] 所有模块均已分析完毕。`);
 
@@ -2231,6 +2261,7 @@ import { StructuredTool } from '@langchain/core/tools';
 import { BaseLanguageModel } from '@langchain/core/language_models/base';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import { StringOutputParser } from '@langchain/core/output_parsers';
+import { LLMService } from '../LLMService'; // 导入 LLMService
 
 // 这是 FileSelectorLLMTool 内部使用的 Prompt 模板
 const SELECTION_PROMPT = `You are an expert software engineer assistant. Your task is to analyze a list of file summaries and select the most relevant files based on a user's task description.
@@ -2272,10 +2303,12 @@ class FileSelectorLLMTool extends StructuredTool {
 
     // 持有传入的 LLM 实例
     private llm: BaseLanguageModel;
+    private llmService: LLMService; // 新增
 
-    constructor(llm: BaseLanguageModel) {
+    constructor(llm: BaseLanguageModel, llmService: LLMService) { // 修改构造函数
         super(); // 调用父类构造函数
         this.llm = llm;
+        this.llmService = llmService; // 存储 LLMService 实例
     }
 
     protected async _call({ file_summaries, task_description }: z.infer<typeof this.schema>): Promise<string> {
@@ -2290,12 +2323,13 @@ class FileSelectorLLMTool extends StructuredTool {
                 .pipe(new StringOutputParser());
 
             // 3. 调用子链来执行 LLM 推理
-            console.log("Invoking file_selector_llm_tool with task:", task_description);
-            const llmResult = await selectionChain.invoke({
-                file_summaries,
-                task_description
-            });
-            console.log("File selector LLM raw response:", llmResult);
+            console.log("Scheduling file_selector_llm_tool with task:", task_description);
+            const llmResult = await this.llmService.scheduleLlmCall(() => 
+                selectionChain.invoke({
+                    file_summaries,
+                    task_description
+                })
+            );
 
             // 4. 解析 LLM 返回的结果
             //    LLM 可能返回一些额外的空格或换行符，我们进行清理。
@@ -2324,12 +2358,12 @@ class FileSelectorLLMTool extends StructuredTool {
 
 /**
  * 工厂函数，用于创建和配置 FileSelectorLLMTool。
- * 这是我们从外部调用的函数。
  * @param llm - 一个配置好的、可用于调用的 BaseLanguageModel 实例。
+ * @param llmService - 用于调度LLM调用的服务实例。
  * @returns {StructuredTool} 一个配置好的、可直接使用的工具实例。
  */
-export function createFileSelectorLLMTool(llm: BaseLanguageModel): StructuredTool {
-    return new FileSelectorLLMTool(llm);
+export function createFileSelectorLLMTool(llm: BaseLanguageModel, llmService: LLMService): StructuredTool {
+    return new FileSelectorLLMTool(llm, llmService);
 }
 
 --------------------------------------------------------------------------------

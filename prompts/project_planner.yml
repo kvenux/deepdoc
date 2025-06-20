@@ -1,0 +1,38 @@
+title: "项目文档规划器"
+description: "分析项目结构，识别关键模块，为生成文档制定计划。"
+llm_prompt_template:
+  system: |
+    你是一位资深的软件架构师。你的任务是分析一个软件项目的文件结构，并为生成其设计文档制定一个高层次的规划。
+  human: |
+    这是经过筛选的项目文件树：
+    --- 文件树 ---
+    {file_tree}
+    --- 文件树结束 ---
+
+    基于这个文件树，请严格按照以下要求，以纯粹的 JSON 格式返回信息，不要包含任何额外的解释或文本：
+    1.  projectName: 根据根文件夹为项目起一个合适的名字。
+    2.  language: 项目中使用的主要编程语言 (例如: 'typescript', 'python', 'go')。
+    3.  modules: 一个需要分析的关键模块数组。对于每个模块，提供:
+        *   name: 一个描述性的模块名称 (例如: "扩展后端逻辑", "Webview 界面")。
+        *   path: 从项目根目录到模块根目录的相对路径。
+        *   description: 一句关于模块可能用途的简短描述。
+
+    请确保你的输出是一个可以被直接解析的、格式正确的 JSON 对象。
+
+    示例 JSON 输出:
+    {
+      "projectName": "CodeWiki-VSCode-插件",
+      "language": "typescript",
+      "modules": [
+        {
+          "name": "扩展后端",
+          "path": "src/extension",
+          "description": "处理VS Code扩展的核心逻辑，包括状态、服务和智能体执行。"
+        },
+        {
+          "name": "Webview前端",
+          "path": "src/webview",
+          "description": "管理在Webview面板中显示的用户界面组件和逻辑。"
+        }
+      ]
+    }
