@@ -5,7 +5,7 @@ import { StructuredTool } from '@langchain/core/tools';
 import { BaseLanguageModel } from '@langchain/core/language_models/base';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import { StringOutputParser } from '@langchain/core/output_parsers';
-import { LLMService } from '../LLMService'; // 导入 LLMService
+import { LLMService } from '../services/LLMService'; // 导入 LLMService
 
 // 这是 FileSelectorLLMTool 内部使用的 Prompt 模板
 const SELECTION_PROMPT = `You are an expert software engineer assistant. Your task is to analyze a list of file summaries and select the most relevant files based on a user's task description.

@@ -1,7 +1,7 @@
 // src/extension/LLMService.ts
 
 import vscode from 'vscode';
-import { ChatMessage, ModelConfig } from '../common/types';
+import { ChatMessage, ModelConfig } from '../../common/types';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, AIMessage, BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';

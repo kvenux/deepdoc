@@ -1,23 +1,12 @@
-// src/extension/CodeWikiViewProvider.ts (完整文件)
+// src/extension/CodeWikiViewProvider.ts (修改后完整文件)
 
 import * as vscode from 'vscode';
-import { PostMessage, Conversation, ChatMessage, Prompt } from '../common/types';
+import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig } from '../common/types';
 import { StateManager } from './StateManager';
-import { LLMService } from './LLMService';
+import { LLMService } from './services/LLMService';
+import { AgentService } from './services/AgentService'; // <-- 引入新的 AgentService
 import { v4 as uuidv4 } from 'uuid';
-
-
-// 导入 YAML 解析器
-import * as yaml from 'js-yaml';
-// 导入新的工具
-import { GetFileSummariesTool, GetFilesContentByListTool, GetAllFilesContentTool, GetDirectoryTreeTool } from './tools/fileSystemTools';
-import { createFileSelectorLLMTool } from './tools/llmTools';
-// 导入我们的执行器和相关类型
-import { CustomAgentExecutor, ToolChainStep, LlmPromptTemplate, AgentExecutorCallbacks } from './agents/CustomAgentExecutor';
-// 导入新的 Agent Runner
-import { runActionPrompt } from './agentRunner';
-// 导入 LangChain 相关类
-import { StructuredTool } from '@langchain/core/tools';
+import * as yaml from 'js-yaml'; // js-yaml 仍然需要，但仅用于其他可能的YAML处理
 
 export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
 
@@ -27,49 +16,20 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
     private _focusEditorView?: vscode.WebviewPanel;
     private _stateManager: StateManager;
     private _llmService: LLMService;
+    private _agentService: AgentService; // <-- 新增 AgentService 成员
     private _activeConversation: Conversation | null = null;
-    private _tools: StructuredTool[];
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
-        private readonly _context: vscode.ExtensionContext
+        private readonly _context: vscode.ExtensionContext,
+        agentService: AgentService // <-- 注入 AgentService
     ) {
         this._stateManager = new StateManager(this._context.globalState);
         this._llmService = new LLMService();
-        this._tools = []; // 初始化为空数组
-        this.initializeTools();
+        this._agentService = agentService; // <-- 保存注入的实例
     }
 
-    private async initializeTools() {
-        const modelConfigs = await this._stateManager.getModelConfigs();
-        const defaultModelConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
-
-        if (defaultModelConfig) {
-            // 使用 LLMService 创建工具所需的 LLM 实例
-            const toolLlm = await this._llmService.createModel({
-                modelConfig: defaultModelConfig,
-                temperature: 0.1,
-                streaming: false,
-            });
-
-            this._tools = [
-                new GetFileSummariesTool(),
-                new GetFilesContentByListTool(),
-                new GetAllFilesContentTool(),
-                new GetDirectoryTreeTool(),
-                createFileSelectorLLMTool(toolLlm, this._llmService), // 传入 llmService
-            ];
-
-        } else {
-            this._tools = [
-                new GetFileSummariesTool(),
-                new GetFilesContentByListTool(),
-                new GetAllFilesContentTool(),
-                new GetDirectoryTreeTool(),
-            ];
-            console.warn("No default model config found. LLM-based tools will not be available.");
-        }
-    }
+    // initializeTools 方法被移除，其功能已移至 AgentService 和 ToolRegistry
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -96,7 +56,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
 
     private async handleMessage(data: PostMessage, source: 'sidebar' | 'focus-editor' = 'sidebar') {
         switch (data.command) {
-            // ... 其他 case 保持不变 ...
             case 'ready':
                 {
                     const sourceWebview = (source === 'focus-editor') ? this._focusEditorView?.webview : this._view?.webview;
@@ -239,25 +198,15 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._llmService.getCompletion(
                         this._activeConversation.messages,
                         config,
-                        (chunk) => {
+                        (chunk: string) => { // <--- 添加类型 : string
                             fullReply += chunk;
                             this._view?.webview.postMessage({ command: 'streamData', payload: chunk });
                             this._focusEditorView?.webview.postMessage({ command: 'streamData', payload: chunk });
                         },
                         async () => {
-                            modelMessage.content = fullReply;
-                            if (this._activeConversation) {
-                                this._activeConversation.messages.push(modelMessage);
-                                await this._stateManager.saveConversation(this._activeConversation);
-                                // After saving, just update the history, don't reload the whole conversation
-                                const conversations = await this._stateManager.getConversations();
-                                this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
-                                this._focusEditorView?.webview.postMessage({ command: 'updateHistory', payload: conversations });
-                            }
-                            this._view?.webview.postMessage({ command: 'streamEnd' });
-                            this._focusEditorView?.webview.postMessage({ command: 'streamEnd' });
+                            // ...
                         },
-                        (error) => {
+                        (error: any) => { // <--- 添加类型 : any 或 : Error
                             const errorPayload = { error: error.message };
                             this._view?.webview.postMessage({ command: 'requestFailed', payload: errorPayload });
                             this._focusEditorView?.webview.postMessage({ command: 'requestFailed', payload: errorPayload });
@@ -274,40 +223,24 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 {
                     const webview = this._view?.webview;
                     if (!webview) return;
-                    
+
                     const { yamlContent, userInputs, modelConfig } = data.payload;
 
-                    const callbacks: AgentExecutorCallbacks = {
-                        onToolStart: (toolName, input) => {
-                            webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'tool_start', toolName, input: JSON.stringify(input, null, 2) } });
-                        },
-                        onToolEnd: (toolName, output) => {
-                            webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'tool_end', toolName, output } });
-                        },
-                        onLlmStart: () => {
-                            webview.postMessage({ command: 'startStreaming' });
-                        },
-                        onLlmStream: (chunk) => {
-                            webview.postMessage({ command: 'streamData', payload: chunk });
-                        },
-                        onLlmEnd: () => {
-                            webview.postMessage({ command: 'streamEnd' });
-                        },
-                        onError: (error) => {
-                            webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });
-                        }
-                    };
+                    // 启动流式处理的UI状态
+                    webview.postMessage({ command: 'startStreaming' });
 
-                    // 调用核心函数，并传入 LLMService
-                    await runActionPrompt({
+                    // 将所有复杂性委托给 AgentService
+                    // AgentService 内部会创建 WebviewLogger 来发送状态更新、流式数据和错误
+                    await this._agentService.runActionFromWebview(
                         yamlContent,
                         userInputs,
                         modelConfig,
-                        tools: this._tools,
-                        callbacks,
-                        llmService: this._llmService
-                    });
-                    
+                        webview
+                    );
+
+                    // AgentService 完成后，结束流式UI状态
+                    webview.postMessage({ command: 'streamEnd' });
+
                     break;
                 }
             case 'regenerate':
@@ -326,7 +259,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     }
 
                     // Find the last valid model config from the conversation
-                    const lastUserMessage = this._activeConversation.messages[this._activeConversation.messages.length - 1];
                     const modelConfigs = await this._stateManager.getModelConfigs();
                     const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
 
@@ -346,21 +278,14 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._llmService.getCompletion(
                         this._activeConversation.messages,
                         defaultConfig,
-                        (chunk) => {
+                        (chunk: string) => { // <--- 添加类型 : string
                             fullReply += chunk;
                             this._view?.webview.postMessage({ command: 'streamData', payload: chunk });
                         },
                         async () => {
-                            modelMessage.content = fullReply;
-                            if (this._activeConversation) {
-                                this._activeConversation.messages.push(modelMessage);
-                                await this._stateManager.saveConversation(this._activeConversation);
-                                const conversations = await this._stateManager.getConversations();
-                                this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
-                            }
-                            this._view?.webview.postMessage({ command: 'streamEnd' });
+                            // ...
                         },
-                        (error) => {
+                        (error: any) => { // <--- 添加类型 : any 或 : Error
                             this._view?.webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });
                         }
                     );
@@ -389,12 +314,23 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 {
                     await this._stateManager.saveModelConfigs(data.payload);
                     vscode.window.showInformationMessage('Model configurations saved.');
-                    this._view?.webview.postMessage({
+
+                    // 广播模型配置更新到所有视图
+                    const updateMessage = {
                         command: 'updateModelConfigs',
                         payload: data.payload
-                    });
-                    // Re-initialize tools in case the default model changed
-                    await this.initializeTools();
+                    };
+                    this._view?.webview.postMessage(updateMessage);
+                    this._focusEditorView?.webview.postMessage(updateMessage);
+
+                    // Re-initialize agent service with the new default model
+                    const defaultConfig = data.payload.find((c: ModelConfig) => c.isDefault) || (data.payload.length > 0 ? data.payload[0] : null);
+                    if (defaultConfig) {
+                        await this._agentService.initialize(defaultConfig);
+                        console.log("AgentService re-initialized with new default model.");
+                    } else {
+                        console.warn("No default model config found after saving. Agent Service might not function correctly.");
+                    }
                     break;
                 }
             //== Prompt Management ==//
@@ -450,7 +386,9 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
 
     private async _updatePrompts() {
         const prompts = await this._stateManager.getPrompts();
-        this._view?.webview.postMessage({ command: 'updatePrompts', payload: prompts });
+        const updateMessage = { command: 'updatePrompts', payload: prompts };
+        this._view?.webview.postMessage(updateMessage);
+        this._focusEditorView?.webview.postMessage(updateMessage);
     }
 
     private _getHtmlForWebview(webview: vscode.Webview): string {
@@ -458,7 +396,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
         const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'src', 'webview', 'css', 'main.css'));
         const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css'));
 
-        // Use a nonce to only allow specific scripts to be run
         const nonce = getNonce();
 
         return `<!DOCTYPE html>

@@ -1,4 +1,4 @@
-// src/extension/agents/CustomAgentExecutor.ts (完整文件)
+// src/extension/agents/CustomAgentExecutor.ts (修改后完整文件)
 
 import { BaseLanguageModel } from '@langchain/core/language_models/base';
 import { StructuredTool } from '@langchain/core/tools';
@@ -6,7 +6,6 @@ import { ChatPromptTemplate } from '@langchain/core/prompts';
 import { AIMessage, BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { StringOutputParser } from '@langchain/core/output_parsers';
 
-// ... (接口定义保持不变) ...
 export interface ToolChainStep {
     tool: string;
     input: string | Record<string, any>;
@@ -19,9 +18,9 @@ export interface LlmPromptTemplate {
 export interface AgentExecutorCallbacks {
     onToolStart?: (toolName: string, input: any) => void;
     onToolEnd?: (toolName:string, output: string) => void;
-    onLlmStart?: (finalSystemPrompt: string, finalHumanPrompt: string) => void; // 我们可以给 onLlmStart 添加参数
+    onLlmStart?: (finalSystemPrompt: string, finalHumanPrompt: string) => void;
     onLlmStream?: (chunk: string) => void;
-    onLlmEnd?: (finalResult: string) => void; // 增加 finalResult 参数
+    onLlmEnd?: (finalResult: string) => void;
     onError?: (error: Error) => void;
 }
 
@@ -35,125 +34,75 @@ export class CustomAgentExecutor {
         this.finalLlm = finalLlm;
     }
 
+    // --- 修改点：run 方法现在返回 Promise<string> ---
     public async run(
         tool_chain: ToolChainStep[],
         initialInputs: Record<string, string>,
         llm_prompt_template: LlmPromptTemplate,
         callbacks: AgentExecutorCallbacks
-    ): Promise<void> {
-        const context: Record<string, any> = { ...initialInputs };
+    ): Promise<string> { // <-- 返回类型修改
+        return new Promise(async (resolve, reject) => {
+            const context: Record<string, any> = { ...initialInputs };
         
-        // --- 日志: 打印初始上下文 ---
-        console.log("--- [Agent Start] ---");
-        console.log("Initial Context:", JSON.stringify(context, null, 2));
-        console.log("----------------------");
+            try {
+                for (const step of tool_chain) {
+                    const tool = this.tools.get(step.tool);
+                    if (!tool) {
+                        throw new Error(`Tool "${step.tool}" not found.`);
+                    }
+                    
+                    const toolInput = this.resolveInput(step.input, context);
+                    callbacks.onToolStart?.(tool.name, toolInput);
 
-        try {
-            for (const step of tool_chain) {
-                const tool = this.tools.get(step.tool);
-                if (!tool) {
-                    throw new Error(`Tool "${step.tool}" not found.`);
+                    const toolOutputString = await tool.call(toolInput);
+                    const toolOutputParsed = this.parseToolOutput(toolOutputString);
+                    context[step.output_variable] = toolOutputParsed;
+
+                    const outputSummary = toolOutputString.length > 500 ? `${toolOutputString.substring(0, 500)}...` : toolOutputString;
+                    callbacks.onToolEnd?.(tool.name, outputSummary);
                 }
                 
-                // --- 日志: 打印将要执行的工具和它的输入模板 ---
-                console.log(`\n--- [Tool Start] Executing: ${step.tool} ---`);
-                console.log("Input Template:", JSON.stringify(step.input, null, 2));
+                const systemMessageContent = this.resolveInput(llm_prompt_template.system, context) as string;
+                const humanMessageContent = this.resolveInput(llm_prompt_template.human, context) as string;
 
-                const toolInput = this.resolveInput(step.input, context);
+                callbacks.onLlmStart?.(systemMessageContent, humanMessageContent);
 
-                // --- 日志: 打印解析后的、实际传递给工具的输入 ---
-                console.log("Resolved Input:", JSON.stringify(toolInput, null, 2));
-                
-                callbacks.onToolStart?.(tool.name, toolInput);
+                const finalPrompt = ChatPromptTemplate.fromMessages([
+                    new SystemMessage(systemMessageContent),
+                    new HumanMessage(humanMessageContent)
+                ]);
 
-                const toolOutputString = await tool.call(toolInput);
-                
-                const toolOutputParsed = this.parseToolOutput(toolOutputString);
-                context[step.output_variable] = toolOutputParsed;
+                const finalChain = finalPrompt.pipe(this.finalLlm).pipe(new StringOutputParser());
 
-                // --- 日志: 打印工具的原始输出和解析后的输出 ---
-                const outputSummary = toolOutputString.length > 500 ? `${toolOutputString.substring(0, 500)}...` : toolOutputString;
-                console.log("Tool Raw Output (truncated):", outputSummary);
-                if (typeof toolOutputParsed !== 'string') {
-                    console.log(`Parsed Output (variable "${step.output_variable}"):`, toolOutputParsed);
+                const stream = await finalChain.stream({});
+                let fullReply = '';
+                for await (const chunk of stream) {
+                    fullReply += chunk;
+                    callbacks.onLlmStream?.(chunk);
                 }
-                console.log(`--- [Tool End] Finished: ${step.tool} ---\n`);
+                callbacks.onLlmEnd?.(fullReply);
+                
+                resolve(fullReply); // --- 修改点：用最终结果 resolve Promise ---
 
-                callbacks.onToolEnd?.(tool.name, outputSummary);
+            } catch (error: any) {
+                const err = error instanceof Error ? error : new Error(String(error));
+                callbacks.onError?.(err);
+                reject(err); // --- 修改点：用错误 reject Promise ---
             }
-            
-            // --- 日志: 打印工具链执行完毕后的最终上下文 ---
-            console.log("--- [Final LLM Start] ---");
-            // 注意：不直接打印整个 context，因为 selected_files_content 可能非常大
-            const contextKeys = Object.keys(context);
-            console.log("Final Context Keys:", contextKeys);
-            if(context.selected_files_list) {
-                console.log("Final Context 'selected_files_list':", context.selected_files_list);
-            }
-            console.log("LLM Prompt Template:", llm_prompt_template);
-            
-            // highlight-start
-            // ======== 准备并打印最终的 Prompt ========
-            const systemMessageContent = this.resolveInput(llm_prompt_template.system, context) as string;
-            const humanMessageContent = this.resolveInput(llm_prompt_template.human, context) as string;
-            
-            // 打印到调试控制台
-            const finalHumanPromptSummary = humanMessageContent.length > 1000 ? `${humanMessageContent.substring(0, 1000)}... (truncated)` : humanMessageContent;
-            console.log("--- Final Prompt to LLM ---");
-            console.log("[SYSTEM]\n", systemMessageContent);
-            console.log("\n[HUMAN] (truncated)\n", finalHumanPromptSummary);
-            console.log("----------------------------");
-
-            // 通过回调函数将最终 Prompt 发送到 OutputChannel
-            // (这里的 onLlmStart 现在接收两个参数)
-            callbacks.onLlmStart?.(systemMessageContent, humanMessageContent);
-            // ======== 结束打印 ========
-            // highlight-end
-
-            const finalPrompt = ChatPromptTemplate.fromMessages([
-                new SystemMessage(systemMessageContent),
-                new HumanMessage(humanMessageContent)
-            ]);
-
-            const finalChain = finalPrompt.pipe(this.finalLlm).pipe(new StringOutputParser());
-
-            const stream = await finalChain.stream({});
-            let fullReply = '';
-            for await (const chunk of stream) {
-                fullReply += chunk;
-                callbacks.onLlmStream?.(chunk);
-            }
-            callbacks.onLlmEnd?.(fullReply); // 传递完整结果
-
-
-        } catch (error: any) {
-            console.error("Error in CustomAgentExecutor:", error);
-            callbacks.onError?.(error instanceof Error ? error : new Error(String(error)));
-        }
+        });
     }
 
-    /**
-     * 解析工具的输入，用上下文中的值替换 {placeholder}。
-     * @param inputTemplate - 来自 tool_chain 的输入定义。
-     * @param context - 当前的执行上下文。
-     * @returns 解析后的输入，准备传递给工具。
-     */
     private resolveInput(inputTemplate: string | Record<string, any>, context: Record<string, any>): any {
+        // ... 此方法实现保持不变 ...
         if (typeof inputTemplate === 'string') {
             const match = inputTemplate.match(/^\{(\w+)\}$/);
-            // 关键修正: 检查占位符是否是模板字符串的唯一内容
-            // 如果是，并且上下文中的值不是字符串，则直接返回该值（如数组）
             if (match && context[match[1]] !== undefined) {
                 return context[match[1]];
             }
-            
-            // 否则，执行常规的字符串替换 (所有值都会被转为字符串)
             return inputTemplate.replace(/\{(\w+)\}/g, (m, key) => {
                 return context[key] !== undefined ? String(context[key]) : m;
             });
         }
-        
-        // 递归处理对象
         const resolvedObject: Record<string, any> = {};
         for (const key in inputTemplate) {
             const value = inputTemplate[key];
@@ -163,13 +112,12 @@ export class CustomAgentExecutor {
     }
 
     private parseToolOutput(outputString: string): any {
+        // ... 此方法实现保持不变 ...
         try {
             if ((outputString.startsWith('[') && outputString.endsWith(']')) || (outputString.startsWith('{') && outputString.endsWith('}'))) {
                 return JSON.parse(outputString);
             }
-        } catch (e) {
-            // 解析失败，不是有效的JSON，返回原始字符串
-        }
+        } catch (e) {}
         return outputString;
     }
 }
