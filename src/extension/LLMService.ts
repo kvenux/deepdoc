@@ -11,7 +11,7 @@ import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
  * 标志位：设置为 true 以使用 Gemini，设置为 false 则使用 settings.json 中的模型配置。
  * 使用 Gemini 前，请确保已安装 `@langchain/google-genai` 并在 `.codewiki/.env` 文件中配置了 GOOGLE_API_KEY。
  */
-const USE_GEMINI = true;
+const USE_GEMINI = false;
 
 /**
  * 创建模型实例时使用的选项。

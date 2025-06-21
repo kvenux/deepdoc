@@ -602,7 +602,7 @@ import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
  * 标志位：设置为 true 以使用 Gemini，设置为 false 则使用 settings.json 中的模型配置。
  * 使用 Gemini 前，请确保已安装 `@langchain/google-genai` 并在 `.codewiki/.env` 文件中配置了 GOOGLE_API_KEY。
  */
-const USE_GEMINI = true;
+const USE_GEMINI = false;
 
 /**
  * 创建模型实例时使用的选项。
@@ -2109,7 +2109,6 @@ export class GetFilesContentByListTool extends StructuredTool {
     }
 }
 
-// highlight-start
 /**
  * 一个LangChain工具，用于递归获取指定目录下所有文件的完整内容。
  */
@@ -2200,30 +2199,54 @@ export class GetDirectoryTreeTool extends StructuredTool {
     }
 
     name = "get_directory_tree";
-    description = "生成给定路径的目录和文件树状结构图。用于快速了解项目的整体文件布局。";
+    // 更新描述，告知 AI 此工具输出紧凑的树状结构以节省 Token
+    description = "生成给定路径的目录和文件树状结构图，并以紧凑的、节省 Token 的格式展示。会自动过滤掉常见的非源码目录（如 .git, .vscode, build, target 等）。用于快速了解项目的整体文件布局。";
 
     schema = z.object({
         path: z.string().describe("从工作区根目录出发的相对路径。"),
     });
 
+    private readonly ignoreDirs: Set<string> = new Set([
+        '.git',
+        '.vscode',
+        '.idea',
+        'node_modules',
+        'build',
+        'dist',
+        'target',
+        'out',
+        'bin',
+        '.codewiki',
+        '__pycache__',
+    ]);
+
     /**
-     * 递归生成目录树。
+     * 递归生成格式化的目录树。
      * @param dirUri 要生成树的目录的 URI。
-     * @param displayRootPath 用于显示路径的根，例如 "." 或 "project"。
-     * @returns 一个包含所有路径的字符串数组。
+     * @param prefix 用于排版的树状前缀字符串 (例如 "│   " 或 "    ")。
+     * @returns 一个包含格式化后树形结构行的字符串数组。
      */
-    private async _generateTree(dirUri: vscode.Uri, displayRootPath: string): Promise<string[]> {
+    private async _generateTree(dirUri: vscode.Uri, prefix: string): Promise<string[]> {
         let treeLines: string[] = [];
         const entries = await vscode.workspace.fs.readDirectory(dirUri);
 
-        for (const [name, type] of entries) {
-            const entryUri = vscode.Uri.joinPath(dirUri, name);
-            const entryDisplayPath = path.join(displayRootPath, name).replace(/\\/g, '/');
+        // 先过滤掉需要忽略的目录/文件
+        const filteredEntries = entries.filter(([name, _]) => !this.ignoreDirs.has(name));
+        const count = filteredEntries.length;
 
-            treeLines.push(entryDisplayPath);
+        for (let i = 0; i < count; i++) {
+            const [name, type] = filteredEntries[i];
+            const isLast = i === count - 1; // 判断是否是当前目录的最后一个条目
+
+            // 根据是否为最后一个条目，选择不同的连接符
+            const connector = isLast ? '└── ' : '├── ';
+            treeLines.push(`${prefix}${connector}${name}`);
 
             if (type === vscode.FileType.Directory) {
-                const subTreeLines = await this._generateTree(entryUri, entryDisplayPath);
+                // 为下一层递归计算新的前缀
+                // 如果当前是最后一个，下一层的前缀使用空格；否则使用竖线连接
+                const newPrefix = prefix + (isLast ? '    ' : '│   ');
+                const subTreeLines = await this._generateTree(vscode.Uri.joinPath(dirUri, name), newPrefix);
                 treeLines = treeLines.concat(subTreeLines);
             }
         }
@@ -2233,15 +2256,31 @@ export class GetDirectoryTreeTool extends StructuredTool {
     protected async _call({ path: relativePath }: z.infer<typeof this.schema>): Promise<string> {
         try {
             const workspaceRoot = getWorkspaceRoot();
+            if (!relativePath || relativePath === '/' || relativePath === '\\') {
+                relativePath = '.';
+            }
             const absolutePath = path.join(workspaceRoot, relativePath);
             const dirUri = vscode.Uri.file(absolutePath);
 
-            // 确定显示的根路径
-            const displayRoot = relativePath === '.' || relativePath === '' ? '.' : `./${relativePath}`;
-            
+            try {
+                const stat = await vscode.workspace.fs.stat(dirUri);
+                if (stat.type !== vscode.FileType.Directory) {
+                    return `错误：路径 "${relativePath}" 不是一个目录。`;
+                }
+            } catch (e) {
+                return `错误：路径 "${relativePath}" 不存在或无法访问。`;
+            }
+
+            const displayRoot = relativePath === '.' ? '.' : `./${relativePath.replace(/\\/g, '/')}`;
+
             let treeLines = [displayRoot];
-            const subTree = await this._generateTree(dirUri, displayRoot);
+            // 初始调用时，前缀为空字符串 ""
+            const subTree = await this._generateTree(dirUri, "");
             treeLines = treeLines.concat(subTree);
+
+            if (treeLines.length === 1) {
+                return `${displayRoot} (目录为空或所有内容均被过滤)`;
+            }
 
             return treeLines.join('\n');
         } catch (error: any) {
@@ -2249,7 +2288,7 @@ export class GetDirectoryTreeTool extends StructuredTool {
         }
     }
 }
-// highlight-end
+
 
 --------------------------------------------------------------------------------
 
