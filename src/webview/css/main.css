@@ -1126,3 +1126,105 @@ button:hover {
 .sub-step.waiting .status-icon .codicon-more {
   animation: pulse-waiting 2s infinite ease-in-out;
 }
+
+.llm-waiting-placeholder {
+    border-style: dashed !important; /* 覆盖默认边框样式 */
+}
+.llm-waiting-placeholder .log-header {
+    background: transparent !important;
+    border-bottom: none !important;
+    color: var(--vscode-descriptionForeground) !important;
+    font-style: italic;
+}
+.llm-waiting-placeholder .log-header .codicon-loading {
+    color: var(--vscode-testing-iconRunning-foreground);
+}
+
+/* Loading dots animation */
+@keyframes-loading-dots {
+  0%   { content: '.'; }
+  33%  { content: '..'; }
+  66%  { content: '...'; }
+  100% { content: '.'; }
+}
+
+.loading-dots::after {
+  content: '.';
+  animation: keyframes-loading-dots 1.5s infinite;
+  display: inline-block;
+  width: 20px; /* Give it some space */
+  text-align: left;
+}
+
+/* 新增淡入动画 */
+@keyframes-fade-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.fade-in {
+  animation: keyframes-fade-in 0.4s ease-out;
+}
+
+/* 为步骤状态变化添加平滑过渡 */
+.execution-step, .sub-step {
+    transition: border-color 0.4s ease-in-out, background-color 0.4s ease-in-out;
+}
+
+.executing-view-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 0;
+    margin-top: 15px;
+    border-top: 1px solid var(--vscode-editorGroup-border);
+}
+.executing-view-header h4 {
+    margin: 0;
+}
+
+@keyframes card-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 将动画应用到主步骤卡片上 */
+.execution-step {
+    border-left: 3px solid;
+    margin-bottom: 10px;
+    transition: all 0.2s ease-in-out;
+    border-radius: 0 5px 5px 0;
+    animation: card-fade-in 0.4s ease-out forwards;
+}
+
+/* 将动画也应用到最终结果卡片上 */
+.agent-final-result {
+    margin-top: 20px;
+    border: 1px solid var(--vscode-editorGroup-border);
+    border-left-width: 4px;
+    border-radius: 5px;
+    animation: card-fade-in 0.4s ease-out forwards;
+}
+
+.execution-step.needs-animation,
+.sub-step.needs-animation, /* Added for sub-steps */
+.agent-final-result.needs-animation {
+    animation: card-fade-in 0.4s ease-out forwards;
+}
+
+@keyframes codicon-spin-animation { /* 使用一个不冲突的动画名 */
+    100% {
+        transform: rotate(360deg);
+    }
+}
+
+.codicon-spin:before { /* 直接针对 :before 伪元素应用动画 */
+    animation: codicon-spin-animation 0.6s linear infinite; /* 时长可以调整 */
+    display: inline-block; /* 有时需要确保伪元素是块级或行内块级才能应用 transform */
+}

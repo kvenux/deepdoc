@@ -36,7 +36,7 @@
 // in common/types.ts
 
 /**
- * [FE -> BE] 用户请求启动 Agent
+ * [前端 -> 后端] 用户请求启动 Agent
  */
 export interface AgentStartPayload {
     agentId: string;
@@ -44,14 +44,14 @@ export interface AgentStartPayload {
 }
 
 /**
- * [FE -> BE] 用户请求取消 Agent
+ * [前端 -> 后端] 用户请求取消 Agent
  */
 export interface AgentCancelPayload {
     runId: string;
 }
 
 /**
- * [FE -> BE] 用户请求查看文件
+ * [前端 -> 后端] 用户请求查看文件
  */
 export interface ViewFilePayload {
     path: string; // 文件的临时路径
@@ -94,7 +94,7 @@ export interface AgentPlanStep {
 }
 
 /**
- * [BE -> FE] 一个正在执行的步骤或子任务
+ * [后端 -> 前端] 一个正在执行的步骤或子任务
  */
 export interface StepExecution {
     runId: string;
@@ -104,7 +104,7 @@ export interface StepExecution {
 }
 
 /**
- * [BE -> FE] 用于更新一个正在执行的步骤的信息
+ * [后端 -> 前端] 用于更新一个正在执行的步骤的信息
  */
 export interface StepUpdate {
     runId: string;
@@ -115,15 +115,15 @@ export interface StepUpdate {
         type?: 'file' | 'markdown';
         path?: string; // 如果是文件，其临时路径
         tokens?: {
-            input?: number;
-            output?: number;
-            total?: number;
+            input?: num后端r;
+            output?: num后端r;
+            total?: num后端r;
         };
     };
 }
 
 /**
- * [BE -> FE] 一个 LLM 流式响应的数据块
+ * [后端 -> 前端] 一个 LLM 流式响应的数据块
  */
 export interface StreamChunk {
     runId: string;
@@ -131,12 +131,12 @@ export interface StreamChunk {
     content: string;
     metadata?: {
         isFinal?: boolean; // 标记是否为最后一块
-        tokens?: { output: number; total: number; }; // 在最后一块附上token统计
+        tokens?: { output: num后端r; total: num后端r; }; // 在最后一块附上token统计
     };
 }
 
 /**
- * [BE -> FE] 一个步骤或子任务的最终结果
+ * [后端 -> 前端] 一个步骤或子任务的最终结果
  */
 export interface StepResult {
     runId: string;
@@ -147,7 +147,7 @@ export interface StepResult {
 }
 
 /**
- * [BE -> FE] 整个Agent运行的最终结果
+ * [后端 -> 前端] 整个Agent运行的最终结果
  */
 export interface AgentResult {
     runId: string;
@@ -166,62 +166,62 @@ export interface AgentResult {
 #### **阶段 1: 启动与规划**
 
 1.  **用户操作**: 在 Webview 中选择 `@Project DocGen` 并回车。
-2.  **`[FE -> BE]` `agent:start`**:
+2.  **`[前端 -> 后端]` `agent:start`**:
     *   `payload`: `{ agentId: 'docgen-project', params: {} }`
 3.  **后端响应**: `AgentService` 接收请求，创建 `runId`，并为 `ProjectDocumentationOrchestrator` 生成执行计划。
-4.  **`[BE -> FE]` `agent:planGenerated`**:
+4.  **`[后端 -> 前端]` `agent:planGenerated`**:
     *   `payload`: 一个 `AgentPlan` 对象，包含“规划”、“并行分析”、“综合”三个步骤及其提示词。
     *   **UI 响应**: 渲染规划视图，显示步骤卡片和可点击的提示词文件卡片。由于无参数，直接显示“开始执行”按钮。
 
 #### **阶段 2: 规划步骤执行**
 
 1.  **用户操作**: 点击“开始执行”按钮。
-2.  **`[BE -> FE]` `agent:stepStart`**:
+2.  **`[后端 -> 前端]` `agent:stepStart`**:
     *   `payload`: `{ runId, taskId: 'plan_step', stepName: '规划...', status: 'running' }`
     *   **UI 响应**: 规划视图变为只读，下方出现执行视图，并渲染第一个步骤卡片，状态为 `running`。
-3.  **`[BE -> FE]` `agent:stepUpdate`**: (LLM 请求)
+3.  **`[后端 -> 前端]` `agent:stepUpdate`**: (LLM 请求)
     *   `payload`: `{ runId, taskId: 'plan_step', type: 'llm-request', data: { name: '规划请求' }, metadata: { path: '...', tokens: { input: 4520 } } }`
     *   **UI 响应**: 在步骤内渲染一个可点击的“规划请求”文件卡片，并显示输入Token。
-4.  **`[BE -> FE]` `agent:stepUpdate`**: (LLM 响应)
+4.  **`[后端 -> 前端]` `agent:stepUpdate`**: (LLM 响应)
     *   `payload`: `{ runId, taskId: 'plan_step', type: 'output', data: { name: '规划响应' }, metadata: { path: '...', tokens: { output: 890, total: 5410 } } }`
     *   **UI 响应**: 渲染一个可点击的“规划响应”文件卡片，并显示输出Token。
-5.  **`[BE -> FE]` `agent:stepUpdate`**: (Agent 决策)
+5.  **`[后端 -> 前端]` `agent:stepUpdate`**: (Agent 决策)
     *   `payload`: `{ runId, taskId: 'plan_step', type: 'output', data: { name: 'Agent 决策...', content: '[{...}, {...}]' } }`
     *   **UI 响应**: 渲染一个日志卡片，显示 Agent 决策要分析的模块列表。
-6.  **`[BE -> FE]` `agent:stepEnd`**:
+6.  **`[后端 -> 前端]` `agent:stepEnd`**:
     *   `payload`: `{ runId, taskId: 'plan_step', status: 'completed' }`
     *   **UI 响应**: “规划”步骤卡片状态变为 `completed`。
 
 #### **阶段 3: 并行分析**
 
-1.  **`[BE -> FE]` `agent:stepStart`**: (父任务)
+1.  **`[后端 -> 前端]` `agent:stepStart`**: (父任务)
     *   `payload`: `{ runId, taskId: 'parallel_step', stepName: '执行: 并行分析...', status: 'running' }`
     *   **UI 响应**: 渲染“并行分析”主步骤卡片。
-2.  **`[BE -> FE]` 一系列 `agent:stepStart`**: (子任务)
+2.  **`[后端 -> 前端]` 一系列 `agent:stepStart`**: (子任务)
     *   后端根据规划结果，为每个模块（共6个）创建并发送一个 `stepStart` 事件。
     *   `payload`: `{ runId, taskId: 'mod_1', stepName: "分析模块: '核心业务'", status: 'running' }`, `{ runId, taskId: 'mod_2', ... }`
     *   **UI 响应**: 在“并行分析”卡片内部，同时渲染出6个子步骤卡片，状态均为 `running`。
-3.  **`[BE -> FE]` 一系列 `toolStart`/`toolEnd`/`stepUpdate`**:
+3.  **`[后端 -> 前端]` 一系列 `toolStart`/`toolEnd`/`stepUpdate`**:
     *   每个子任务会独立地发送自己的工具调用和LLM交互事件，都带有各自的 `taskId` (`mod_1`, `mod_2`, ...)。
     *   **UI 响应**: 前端根据 `taskId`，将这些日志卡片精确地渲染到对应的子步骤卡片内部。
-4.  **`[BE -> FE]` 一系列 `agent:stepEnd`**:
+4.  **`[后端 -> 前端]` 一系列 `agent:stepEnd`**:
     *   当某个模块分析完成，后端发送对应的 `stepEnd` 事件。
     *   `payload`: `{ runId, taskId: 'mod_1', status: 'completed' }`
     *   **UI 响应**: “核心业务”子步骤卡片状态变为 `completed`。其他卡片状态可能不同。
-5.  **`[BE -> FE]` `agent:stepEnd`**: (父任务)
+5.  **`[后端 -> 前端]` `agent:stepEnd`**: (父任务)
     *   当所有子任务都结束后，后端发送父任务的 `stepEnd` 事件。
     *   `payload`: `{ runId, taskId: 'parallel_step', status: 'completed' }`
     *   **UI 响应**: “并行分析”主步骤卡片状态变为 `completed`。
 
 #### **阶段 4 & 5: 综合与结束**
 
-1.  **`[BE -> FE]` `agent:stepStart`**: (综合步骤)
+1.  **`[后端 -> 前端]` `agent:stepStart`**: (综合步骤)
     *   `payload`: `{ runId, taskId: 'synthesis_step', ... }`
-2.  **`[BE -> FE]` `agent:streamChunk` (多次)**:
+2.  **`[后端 -> 前端]` `agent:streamChunk` (多次)**:
     *   `payload`: `{ runId, taskId: 'synthesis_step', content: '...' }`
     *   **UI 响应**: 在“综合”步骤卡片内流式渲染最终文档。
-3.  **`[BE -> FE]` `agent:stepEnd`**: (综合步骤完成)
-4.  **`[BE -> FE]` `agent:agentEnd`**:
+3.  **`[后端 -> 前端]` `agent:stepEnd`**: (综合步骤完成)
+4.  **`[后端 -> 前端]` `agent:agentEnd`**:
     *   `payload`: `{ runId, status: 'completed', finalOutput: '项目总体设计文档.md 已生成。' }`
     *   **UI 响应**: 渲染最终的成功结果卡片。
 
@@ -244,47 +244,47 @@ export interface AgentResult {
 @startuml
 title Agent Execution Protocol Flow
 
-actor "Frontend (Webview)" as FE
-participant "Backend (Extension)" as BE
+actor "Frontend (Webview)" as 前端
+participant "Backend (Extension)" as 后端
 
-FE -> BE: agent:start (agentId: 'docgen-project')
-BE --> FE: agent:planGenerated (plan)
+前端 -> 后端: agent:start (agentId: 'docgen-project')
+后端 --> 前端: agent:planGenerated (plan)
 
 group Planning Phase (User clicks "Start")
-    BE --> FE: agent:stepStart (taskId: 'plan_step', status: 'running')
-    BE --> FE: agent:stepUpdate (type: 'llm-request', metadata: {tokens: ...})
-    BE --> FE: agent:stepUpdate (type: 'output', metadata: {tokens: ...})
-    BE --> FE: agent:stepUpdate (type: 'output', data: {content: 'planned modules...'})
-    BE --> FE: agent:stepEnd (taskId: 'plan_step', status: 'completed')
+    后端 --> 前端: agent:stepStart (taskId: 'plan_step', status: 'running')
+    后端 --> 前端: agent:stepUpdate (type: 'llm-request', metadata: {tokens: ...})
+    后端 --> 前端: agent:stepUpdate (type: 'output', metadata: {tokens: ...})
+    后端 --> 前端: agent:stepUpdate (type: 'output', data: {content: 'planned modules...'})
+    后端 --> 前端: agent:stepEnd (taskId: 'plan_step', status: 'completed')
 end
 
 group Parallel Analysis Phase
-    BE --> FE: agent:stepStart (taskId: 'parallel_step', status: 'running')
+    后端 --> 前端: agent:stepStart (taskId: 'parallel_step', status: 'running')
     
     par
-        BE --> FE: agent:stepStart (taskId: 'mod_1', status: 'running')
-        BE --> FE: agent:toolStart (taskId: 'mod_1', tool: '...')
-        BE --> FE: agent:toolEnd (taskId: 'mod_1', output: '...')
-        BE --> FE: agent:stepUpdate (taskId: 'mod_1', type: 'llm-request', ...)
-        BE --> FE: agent:stepEnd (taskId: 'mod_1', status: 'completed')
+        后端 --> 前端: agent:stepStart (taskId: 'mod_1', status: 'running')
+        后端 --> 前端: agent:toolStart (taskId: 'mod_1', tool: '...')
+        后端 --> 前端: agent:toolEnd (taskId: 'mod_1', output: '...')
+        后端 --> 前端: agent:stepUpdate (taskId: 'mod_1', type: 'llm-request', ...)
+        后端 --> 前端: agent:stepEnd (taskId: 'mod_1', status: 'completed')
     and
-        BE --> FE: agent:stepStart (taskId: 'mod_2', status: 'running')
+        后端 --> 前端: agent:stepStart (taskId: 'mod_2', status: 'running')
         ...
-        BE --> FE: agent:stepEnd (taskId: 'mod_2', status: 'completed')
+        后端 --> 前端: agent:stepEnd (taskId: 'mod_2', status: 'completed')
     end
     
-    BE --> FE: agent:stepEnd (taskId: 'parallel_step', status: 'completed')
+    后端 --> 前端: agent:stepEnd (taskId: 'parallel_step', status: 'completed')
 end
 
 group Synthesis Phase
-    BE --> FE: agent:stepStart (taskId: 'synthesis_step', status: 'running')
+    后端 --> 前端: agent:stepStart (taskId: 'synthesis_step', status: 'running')
     loop Streaming LLM Response
-        BE --> FE: agent:streamChunk (content)
+        后端 --> 前端: agent:streamChunk (content)
     end
-    BE --> FE: agent:stepEnd (taskId: 'synthesis_step', status: 'completed')
+    后端 --> 前端: agent:stepEnd (taskId: 'synthesis_step', status: 'completed')
 end
 
-BE --> FE: agent:agentEnd (status: 'completed')
+后端 --> 前端: agent:agentEnd (status: 'completed')
 
 @enduml
 ```

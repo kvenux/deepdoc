@@ -621,39 +621,45 @@ export class ChatView {
             { runId, taskId: 'task_plan', stepName: "规划: 分析项目结构", status: 'running' } as StepExecution,
             { runId, taskId: 'task_plan', type: 'llm-request', data: { name: '规划请求' }, metadata: { type: 'file', path: '.codewiki/runs/.../01_planning_request.txt' } } as StepUpdate,
             { runId, taskId: 'task_plan', type: 'output', data: { name: '规划响应' }, metadata: { type: 'file', path: '.codewiki/runs/.../01_planning_response.txt' } } as StepUpdate,
-            // Agent "思考" 的关键步骤：展示 plan.json 的内容
-            { runId, taskId: 'task_plan', type: 'output', data: { name: 'Agent 决策：已规划以下模块进行分析', content: JSON.stringify(plannedModules, null, 2) } } as StepUpdate,
             { runId, taskId: 'task_plan', stepName: "规划: 分析项目结构", status: 'completed' } as StepExecution,
 
             // === 阶段 2: 并行分析 (父任务启动) ===
             { runId, taskId: 'task_parallel_parent', stepName: "执行: 并行分析所有模块", status: 'running' } as StepExecution,
             
-            // --- 模拟所有子任务的创建和执行 ---
-            // 模块 1
+            // --- 模拟所有子任务的创建 ---
             { runId, taskId: 'task_mod_1', stepName: "分析模块: '核心业务模块'", status: 'running' } as StepExecution,
+            { runId, taskId: 'task_mod_2', stepName: "分析模块: '前端控制台工具'", status: 'running' } as StepExecution,
+            { runId, taskId: 'task_mod_3', stepName: "分析模块: '后台管理服务'", status: 'running' } as StepExecution,
+            // ... 其他模块也在这里启动
+
+            // --- 模块 1 的完整生命周期 ---
+            { runId, taskId: 'task_mod_1', type: 'llm-request', data: { name: '核心业务模块分析请求' }, metadata: { type: 'file', path: '.codewiki/runs/.../module_agile-spring-boot-starter/llm_request.txt' } } as StepUpdate,
+            // (此时UI应显示等待动画)
+            { runId, taskId: 'task_mod_1', content: '### 核心业务模块\n\n该模块是系统的核心...' } as StreamChunk,
+            { runId, taskId: 'task_mod_1', content: '它包含了主要的业务逻辑和实体定义。' } as StreamChunk,
             { runId, taskId: 'task_mod_1', type: 'output', data: { name: '模块文档' }, metadata: { type: 'file', path: '.codewiki/runs/.../module_核心业务模块.md' } } as StepUpdate,
             { runId, taskId: 'task_mod_1', stepName: "分析模块: '核心业务模块'", status: 'completed' } as StepExecution,
-            
-            // 模块 2
-            { runId, taskId: 'task_mod_2', stepName: "分析模块: '前端控制台工具'", status: 'running' } as StepExecution,
+
+            // --- 模块 2 的完整生命周期 ---
+            { runId, taskId: 'task_mod_2', type: 'llm-request', data: { name: '前端控制台工具分析请求' }, metadata: { type: 'file', path: '.codewiki/runs/.../module_agile-console/llm_request.txt' } } as StepUpdate,
+            // (UI显示等待)
+            { runId, taskId: 'task_mod_2', content: '### 前端控制台工具\n\n提供了命令行工具...' } as StreamChunk,
             { runId, taskId: 'task_mod_2', type: 'output', data: { name: '模块文档' }, metadata: { type: 'file', path: '.codewiki/runs/.../module_前端控制台工具.md' } } as StepUpdate,
             { runId, taskId: 'task_mod_2', stepName: "分析模块: '前端控制台工具'", status: 'completed' } as StepExecution,
 
-             // 模块 3 (模拟延迟完成)
-            { runId, taskId: 'task_mod_3', stepName: "分析模块: '后台管理服务'", status: 'running' } as StepExecution,
-
-            // ... 其他模块可以类似地添加
-
-            // 模块 3 完成
+            // ... (模块3 及以后同理)
+            { runId, taskId: 'task_mod_3', type: 'llm-request', data: { name: '后台管理服务分析请求' }, metadata: { type: 'file', path: '.codewiki/runs/.../module_agile-serve-admin/llm_request.txt' } } as StepUpdate,
             { runId, taskId: 'task_mod_3', type: 'output', data: { name: '模块文档' }, metadata: { type: 'file', path: '.codewiki/runs/.../module_后台管理服务.md' } } as StepUpdate,
             { runId, taskId: 'task_mod_3', stepName: "分析模块: '后台管理服务'", status: 'completed' } as StepExecution,
+
 
             // === 阶段 2: 并行分析 (父任务完成) ===
             { runId, taskId: 'task_parallel_parent', stepName: "执行: 并行分析所有模块", status: 'completed' } as StepExecution,
             
-            // === 阶段 3: 综合 ===
+            // === 阶段 3: 综合 (也遵循完整周期) ===
             { runId, taskId: 'task_synthesis', stepName: "综合: 生成最终文档", status: 'running' } as StepExecution,
             { runId, taskId: 'task_synthesis', type: 'llm-request', data: { name: '综合请求' }, metadata: { type: 'file', path: '.codewiki/runs/.../03_synthesis_request.txt' } } as StepUpdate,
+            // (UI显示等待)
             { runId, taskId: 'task_synthesis', content: '# Agile-Boot 项目总体设计文档\n\n' } as StreamChunk,
             { runId, taskId: 'task_synthesis', content: '本文档旨在提供Agile-Boot项目的整体架构...' } as StreamChunk,
             { runId, taskId: 'task_synthesis', stepName: "综合: 生成最终文档", status: 'completed' } as StepExecution,
@@ -671,19 +677,23 @@ export class ChatView {
 
             const event = mockEventStream[eventIndex++];
             
-            // 更稳健的类型检查
+            // highlight-start
+            // 更稳健的类型检查和派发，修复了原有逻辑错误
             if ('stepName' in event && 'status' in event && 'runId' in event) {
-                 if('taskId' in event) {
-                    agentBlock.updateStep(event as StepExecution);
-                 }
+                // 这是 StepExecution 事件
+                agentBlock.updateStep(event as StepExecution);
             } else if ('status' in event && 'runId' in event && !('stepName' in event)) {
+                // 这是 AgentResult 事件
                  agentBlock.setAgentResult(event as AgentResult);
             } else if ('type' in event && 'data' in event) {
+                // 这是 StepUpdate 事件
                 agentBlock.addStepLog(event as StepUpdate);
             } else if ('content' in event && !('role' in event)) {
+                // 这是 StreamChunk 事件
                  agentBlock.appendStreamChunk(event as StreamChunk);
             }
+            // highlight-end
 
-        }, 400); // 每 800 毫秒发送一个事件
+        }, 3000); // 每 800 毫秒发送一个事件
     }
 }
