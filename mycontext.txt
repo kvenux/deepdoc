@@ -2788,57 +2788,288 @@ export function createFileSelectorLLMTool(llm: BaseLanguageModel, llmService: LL
 --------------------------------------------------------------------------------
 
 --- file_path: webview/components/AtCommandMenu.ts ---
-// webview/components/AtCommandMenu.ts
+// --- file_path: webview/components/AtCommandMenu.ts ---
+
+// 定义命令节点的接口
+interface CommandNode {
+    id: string;
+    name: string;
+    children: (CommandNode | CommandLeaf)[];
+}
+
+// 定义命令叶子节点（可执行的Agent）的接口
+interface CommandLeaf {
+    id: string;
+    name: string;
+    agentId: string; // 对应 AgentService 中的 ID
+    description: string;
+}
+
+// 类型守卫，用于判断一个节点是否是叶子节点
+function isLeaf(node: CommandNode | CommandLeaf): node is CommandLeaf {
+    return !('children' in node);
+}
+
+// 所有可用命令的树状结构定义
+const COMMAND_TREE: (CommandNode | CommandLeaf)[] = [
+    {
+        id: 'docgen',
+        name: 'DocGen',
+        children: [
+            {
+                id: 'docgen-project',
+                name: 'Project',
+                agentId: 'docgen-project',
+                description: '为整个项目生成高级设计文档'
+            },
+            {
+                id: 'docgen-module-direct',
+                name: 'Module (Direct)',
+                agentId: 'docgen-module-direct',
+                description: '对小模块进行直接、全面的分析'
+            },
+            {
+                id: 'docgen-module-mapreduce',
+                name: 'Module (MapReduce)',
+                agentId: 'docgen-module-mapreduce',
+                description: '对大模块进行分批摘要总结分析'
+            }
+        ]
+    },
+    // 未来可以添加更多一级命令, e.g., CodeRefactor, TestGen etc.
+];
+
+
 export class AtCommandMenu {
     private element: HTMLElement;
-    private commands = [
-        { id: 'project-documentation', name: '项目级文档生成' },
-        { id: 'module-direct', name: '模块级文档(直接分析)' },
-        { id: 'module-map-reduce', name: '模块级文档(摘要总结)' },
-    ];
+    private onSelect: (command: CommandLeaf) => void = () => {};
+    
+    // 状态管理
+    private commands: (CommandNode | CommandLeaf)[] = COMMAND_TREE;
+    private currentPath: CommandNode[] = []; // 导航路径
+    private visibleItems: (CommandNode | CommandLeaf)[] = []; // 当前显示的列表
+    private activeIndex: number = -1; // 当前高亮的索引
+    private isSearchMode: boolean = false; // 是否为搜索模式
+    private filterText: string = ''; // 搜索文本
 
-    constructor(private parent: HTMLElement) {
-        this.element = document.createElement('div');
-        this.element.className = 'at-command-menu';
-        this.element.style.display = 'none';
-        this.parent.appendChild(this.element);
+    constructor(private container: HTMLElement) {
+        // 直接使用传入的容器作为菜单的根元素
+        this.element = container;
+        this.element.className = 'at-command-menu'; // 确保 class 正确
+        this.element.style.display = 'none'; // 默认隐藏
+
+        // 事件监听器直接绑定到容器上
+        this.element.addEventListener('click', (e) => {
+            const li = (e.target as HTMLElement).closest('li');
+            if (li) {
+                const index = parseInt(li.dataset.index || '-1', 10);
+                if (index !== -1) {
+                    this.activeIndex = index;
+                    this.handleSelection();
+                }
+            }
+        });
     }
 
-    show(x: number, y: number, filter: string, onSelect: (command: any) => void) {
-        const filtered = this.commands.filter(c => c.name.toLowerCase().includes(filter.toLowerCase()));
-        if(filtered.length === 0) {
+    /**
+     * 显示并初始化菜单。
+     * @param filter 用户输入的 @ 后面的文本
+     * @param onSelect 选择命令后的回调
+     */
+    public show(filter: string, onSelect: (command: CommandLeaf) => void) {
+        this.onSelect = onSelect;
+        this.filterText = filter.trim().toLowerCase();
+        
+        this.isSearchMode = this.filterText.length > 0;
+
+        this.currentPath = [];
+        this.activeIndex = 0;
+        
+        // 逻辑大幅简化：只需显示并渲染
+        this.element.style.display = 'block';
+        this.render(); 
+    }
+
+
+    public hide() {
+        this.element.style.display = 'none';
+        this.currentPath = [];
+        this.activeIndex = -1;
+    }
+
+    public isVisible(): boolean {
+        return this.element.style.display !== 'none';
+    }
+
+    /**
+     * 处理键盘事件，由 ChatView 委托
+     */
+    public handleKeyDown(e: KeyboardEvent) {
+        if (!this.isVisible()) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        switch (e.key) {
+            case 'ArrowDown':
+                this.activeIndex = (this.activeIndex + 1) % this.visibleItems.length;
+                this.render();
+                break;
+            case 'ArrowUp':
+                this.activeIndex = (this.activeIndex - 1 + this.visibleItems.length) % this.visibleItems.length;
+                this.render();
+                break;
+            case 'Tab':
+            case 'Enter':
+                this.handleSelection();
+                break;
+            case 'Escape':
+                if (this.currentPath.length > 0) {
+                    this.currentPath.pop();
+                    this.activeIndex = 0;
+                    this.render();
+                } else {
+                    this.hide();
+                }
+                break;
+        }
+    }
+
+    /**
+     * 处理用户通过 Enter/Tab/Click 进行的选择
+     */
+    private handleSelection() {
+        if (this.activeIndex < 0 || this.activeIndex >= this.visibleItems.length) return;
+
+        const selectedItem = this.visibleItems[this.activeIndex];
+        if (isLeaf(selectedItem)) {
+            this.onSelect(selectedItem);
             this.hide();
+        } else {
+            // 进入下一级
+            this.currentPath.push(selectedItem);
+            this.activeIndex = 0;
+            this.render();
+        }
+    }
+
+    /**
+     * 渲染菜单的当前视图
+     */
+    private render() {
+        if (this.isSearchMode) {
+            this.renderSearchResults();
+        } else {
+            this.renderHierarchicalView();
+        }
+    }
+
+    private renderHierarchicalView() {
+        let itemsToShow: (CommandNode | CommandLeaf)[];
+        let parent: CommandNode | undefined = this.currentPath[this.currentPath.length - 1];
+        
+        if (parent) {
+            itemsToShow = parent.children;
+        } else {
+            itemsToShow = this.commands;
+        }
+
+        this.visibleItems = itemsToShow;
+        if (this.activeIndex >= this.visibleItems.length) {
+            this.activeIndex = 0;
+        }
+
+        const breadcrumbs = ['@', ...this.currentPath.map(p => p.name)].join(' > ');
+        
+        this.element.innerHTML = `
+            <div class="menu-header">${breadcrumbs}</div>
+            <ul>
+                ${this.visibleItems.map((item, index) => this.renderItem(item, index)).join('')}
+            </ul>
+        `;
+        this.scrollIntoView();
+    }
+
+    private renderSearchResults() {
+        const allLeaves = this.flattenCommands(this.commands);
+        const searchTerms = this.filterText.split(' ').filter(Boolean);
+
+        this.visibleItems = allLeaves.filter(leaf => 
+            searchTerms.every(term => 
+                leaf.name.toLowerCase().includes(term) ||
+                leaf.agentId.toLowerCase().includes(term) ||
+                (this.findPath(leaf.id)?.map(p => p.name.toLowerCase()).join(' ') || '').includes(term)
+            )
+        );
+
+        if (this.activeIndex >= this.visibleItems.length) {
+            this.activeIndex = 0;
+        }
+        
+        if (this.visibleItems.length === 0) {
+            this.element.innerHTML = `<div class="menu-header">No results for "${this.filterText}"</div>`;
             return;
         }
 
         this.element.innerHTML = `
+            <div class="menu-header">Search results for "${this.filterText}"</div>
             <ul>
-                ${filtered.map(c => `<li data-id="${c.id}">${c.name}</li>`).join('')}
+                ${this.visibleItems.map((item, index) => this.renderItem(item, index)).join('')}
             </ul>
         `;
-        
-        this.element.style.left = `${x}px`;
-        this.element.style.top = `${y}px`;
-        this.element.style.transform = 'translateY(-100%)';
-        this.element.style.display = 'block';
-
-        this.element.querySelectorAll('li').forEach(li => {
-            li.addEventListener('click', () => {
-                const command = this.commands.find(c => c.id === li.dataset.id);
-                if(command) onSelect(command);
-            });
-        });
+        this.scrollIntoView();
     }
 
-    hide() {
-        this.element.style.display = 'none';
+    private renderItem(item: CommandNode | CommandLeaf, index: number): string {
+        const isActive = index === this.activeIndex ? 'active' : '';
+        const hasChildren = !isLeaf(item);
+
+        return `
+            <li class="${isActive}" data-index="${index}">
+                <div class="menu-item-name" style="display: flex; align-items: center;">
+                    <span>${item.name}</span>
+                    ${hasChildren ? '<i class="codicon codicon-chevron-right"></i>' : ''}
+                </div>
+                ${isLeaf(item) ? `<div class="menu-item-description">${item.description}</div>` : ''}
+            </li>
+        `;
     }
 
-    // highlight-start
-    public isVisible(): boolean {
-        return this.element.style.display !== 'none';
+    private scrollIntoView() {
+        const activeItem = this.element.querySelector('li.active');
+        if (activeItem) {
+            activeItem.scrollIntoView({ block: 'nearest' });
+        }
     }
-    // highlight-end
+
+    // --- 辅助函数 ---
+    private flattenCommands(nodes: (CommandNode | CommandLeaf)[]): CommandLeaf[] {
+        let leaves: CommandLeaf[] = [];
+        for (const node of nodes) {
+            if (isLeaf(node)) {
+                leaves.push(node);
+            } else {
+                leaves = leaves.concat(this.flattenCommands(node.children));
+            }
+        }
+        return leaves;
+    }
+    
+    private findPath(id: string, nodes: (CommandNode | CommandLeaf)[] = this.commands, path: CommandNode[] = []): CommandNode[] | null {
+        for (const node of nodes) {
+            if (node.id === id) {
+                return path;
+            }
+            if (!isLeaf(node)) {
+                const newPath = [...path, node];
+                const found = this.findPath(id, node.children, newPath);
+                if (found) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
 }
 
 --------------------------------------------------------------------------------
@@ -2974,6 +3205,7 @@ html {
     display: flex;
     flex-direction: column;
     flex: 1;
+    position: relative; 
     /* Ensure it takes full available space within its flex parent */
 }
 
@@ -3623,6 +3855,121 @@ button:hover {
     margin: 0;
 }
 
+/*=================================*/
+/*====== @ Command Menu ===========*/
+/*=================================*/
+.at-command-menu {
+    /* 移除 position: absolute，让它成为正常的块级元素 */
+    width: 100%;
+    box-sizing: border-box;
+    background-color: var(--vscode-editorWidget-background);
+    border: 1px solid var(--vscode-editorWidget-border);
+    border-radius: 5px;
+    z-index: 100;
+    max-height: 220px; /* 增加一点最大高度 */
+    overflow-y: auto;
+    margin-bottom: 8px; /* 与下方的输入框区域产生间距 */
+    display: none; /* 默认隐藏，由 JS 控制 */
+}
+
+.at-command-menu ul {
+    list-style: none;
+    padding: 5px;
+    margin: 0;
+}
+
+.at-command-menu li {
+    padding: 8px 12px;
+    cursor: pointer;
+    border-radius: 3px;
+}
+
+.at-command-menu li:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.at-command-menu li.active {
+    background-color: var(--vscode-list-hoverBackground);
+    color: var(--vscode-list-activeSelectionForeground);
+}
+
+.at-command-menu .menu-header {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.9em;
+}
+
+.at-command-menu .menu-item-name {
+    display: flex;
+    align-items: center;
+    justify-content: space-between; /* 让图标能靠右 */
+    width: 100%;
+}
+
+.at-command-menu .menu-item-name .codicon {
+    color: var(--vscode-descriptionForeground);
+}
+
+.at-command-menu .menu-item-description {
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+    margin-top: 4px; /* 与名称拉开一点距离 */
+}
+
+/*=================================*/
+/*========= Prompt Manager ========*/
+/*=================================*/
+
+
+.prompt-editor-form textarea:focus {
+    outline: none;
+}
+
+/*=================================*/
+/*====== Rich Input & Pills =======*/
+/*=================================*/
+
+/* 将原来的输入框容器升级为富文本样式 */
+.chat-input-box {
+    flex-grow: 1;
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 8px;
+    resize: none; /* 虽然不是 textarea，但保留这个概念 */
+    border-radius: 5px;
+    min-height: 22px; /* 约等于单行 textarea 的高度 */
+    max-height: 250px;
+    overflow-y: auto;
+    white-space: pre-wrap; /* 保证空格和换行被保留 */
+    word-wrap: break-word;
+    line-height: 1.5; /* 改善可读性 */
+}
+
+.chat-input-box:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+}
+
+/* 胶囊 (Pill) 的样式 */
+.content-pill {
+    display: inline-block;
+    background-color: var(--vscode-button-background); /* 使用按钮背景色，更醒目 */
+    color: var(--vscode-button-foreground); /* 使用按钮前景色 */
+    border-radius: 12px;
+    padding: 2px 10px;
+    margin: 0 2px;
+    font-size: 0.9em;
+    cursor: default; /* Pill 本身不可交互 */
+    color: var(--vscode-button-background); /* 使用主题强调色 */
+    font-weight: 500;
+}
+
+/* 确保 contenteditable div 中的 p 标签没有多余的 margin */
+.chat-input-box p, .chat-input-box div {
+    margin: 0;
+}
+
 --------------------------------------------------------------------------------
 
 --- file_path: webview/main.ts ---
@@ -3950,6 +4297,7 @@ export class ChatHistoryView {
 import { Conversation, ChatMessage, ModelConfig, Prompt } from "../../common/types";
 import { vscode } from "../vscode";
 import { MessageBlock } from "../components/MessageBlock";
+import { AtCommandMenu } from "../components/AtCommandMenu";
 
 export class ChatView {
     private messages: ChatMessage[] = [];
@@ -3962,6 +4310,9 @@ export class ChatView {
     private isStreaming: boolean = false;
     private editingMessageIndex: number | null = null;
     private originalMessageContent: string | null = null;
+    private atCommandMenu: AtCommandMenu;
+    private inputBox: HTMLElement; // 从 HTMLTextAreaElement 改为 HTMLElement
+
 
     constructor(private readonly parent: HTMLElement) {
         this.parent.innerHTML = this.renderInitialLayout();
@@ -3969,7 +4320,15 @@ export class ChatView {
         this.bottomPanel = this.parent.querySelector('.chat-sticky-bottom') as HTMLElement;
         this.modelSelector = this.parent.querySelector('#model-selector') as HTMLSelectElement;
         this.promptSelector = this.parent.querySelector('#prompt-selector') as HTMLSelectElement;
-        this.renderBottomInput();
+
+        // 渲染输入框并获取其引用
+        this.renderBottomInput(); 
+        this.inputBox = this.bottomPanel.querySelector('.chat-input-box') as HTMLElement;
+        
+        // 将菜单附加到 chat-container, 以便使用相对定位
+        const commandMenuContainer = this.parent.querySelector('.at-command-menu-container') as HTMLElement;
+        this.atCommandMenu = new AtCommandMenu(commandMenuContainer);
+
         this.setupEventListeners();
     }
 
@@ -4009,6 +4368,11 @@ export class ChatView {
         this.parent.addEventListener('click', (event) => {
             const target = event.target as HTMLElement;
             const button = target.closest('button');
+
+            // 如果点击了输入框外部，且@菜单是可见的，则隐藏它
+            if (!this.inputBox.contains(target) && !this.atCommandMenu['element'].contains(target)) {
+                this.atCommandMenu.hide();
+            }
 
             if (this.editingMessageIndex !== null) {
                 const editingBlock = this.parent.querySelector('.message-block.editing');
@@ -4071,14 +4435,13 @@ export class ChatView {
             if (selectedPromptId) {
                 const selectedPrompt = this.prompts.find(p => p.id === selectedPromptId);
                 if (selectedPrompt) {
-                    const inputBox = this.bottomPanel.querySelector('textarea');
-                    if (inputBox) {
-                        inputBox.value = selectedPrompt.content;
-                        this.autoResizeInput(inputBox);
-                        inputBox.focus();
+                    // 更新为操作 contenteditable div
+                    if (this.inputBox) {
+                        this.inputBox.innerText = selectedPrompt.content;
+                        this.inputBox.focus();
                         vscode.postMessage({
                             command: 'updateWebviewContent',
-                            payload: { content: inputBox.value }
+                            payload: { content: this.inputBox.innerText }
                         });
                     }
                 }
@@ -4095,18 +4458,14 @@ export class ChatView {
                 case 'setActiveConversation': this.loadConversation(message.payload); break;
                 case 'updatePrompts': this.setPrompts(message.payload); break;
                 case 'updateContent': {
-                    const inputBox = this.bottomPanel.querySelector('textarea');
-                    if (inputBox && inputBox.value !== message.payload.content) {
-                        inputBox.value = message.payload.content;
-                        this.autoResizeInput(inputBox);
+                    if (this.inputBox && this.inputBox.innerText !== message.payload.content) {
+                        this.inputBox.innerText = message.payload.content;
                     }
                     break;
                 }
                 case 'clearInput': {
-                    const inputBox = this.bottomPanel.querySelector('textarea');
-                    if (inputBox) {
-                        inputBox.value = '';
-                        this.autoResizeInput(inputBox);
+                    if (this.inputBox) {
+                       this.inputBox.innerHTML = '';
                     }
                     break;
                 }
@@ -4136,79 +4495,24 @@ export class ChatView {
             vscode.postMessage({ command: 'stopMessage' });
             return;
         }
-
-        const inputBox = this.bottomPanel.querySelector('textarea');
-        if (!inputBox) return;
-
-        const prompt = inputBox.value.trim();
-        if (!prompt) return;
-
-        // --- 临时的 Agent 触发器 ---
-        if (prompt.startsWith('/agent')) {
-            const selectedModelId = this.modelSelector.value;
-            const selectedConfig = this.modelConfigs.find(c => c.id === selectedModelId);
-            if (!selectedConfig) {
-                 vscode.postMessage({ command: 'error', payload: 'Please select a valid model from settings.' });
-                return;
-            }
-
-            const testYaml = `
-title: "生成核心模块设计文档 (智能筛选版)"
-description: "智能分析模块内的所有文件，找出核心文件，并基于它们生成技术文档。"
-input_variables:
-  - name: module_path
-    description: "请输入或选择要分析的模块/文件夹路径。"
-    type: "path"
-    default: "src/extension"
-  - name: task_description
-    description: "简要描述你想分析的核心任务是什么？"
-    type: "text"
-    default: "这个模块的核心功能是处理大模型请求和管理插件状态。"
-tool_chain:
-  - tool: "get_file_summaries"
-    # 修正: 将 input 从字符串改为对象格式，以匹配工具的 schema
-    input: 
-      path: "{module_path}"
-    output_variable: all_file_summaries
-  - tool: "file_selector_llm_tool"
-    input: 
-      file_summaries: "{all_file_summaries}"
-      task_description: "{task_description}"
-    output_variable: selected_files_list
-  - tool: "get_files_content_by_list"
-    # 修正: 将 input 从字符串改为对象格式
-    input:
-      file_paths: "{selected_files_list}"
-    output_variable: selected_files_content
-llm_prompt_template:
-  system: |
-    你是一个经验丰富的软件架构师，你的任务是基于提供的核心文件内容，为模块生成一份详细、专业的技术设计文档。文档需要包含以下部分：1. 模块概述 2. 核心职责 3. 主要组件分析（逐一分析每个文件） 4. 数据流和交互 5. 潜在改进点。请使用 Markdown 格式化你的回答。
-  human: |
-    请根据以下精心筛选出的核心文件，为模块生成一份详细设计文档。
-
-    **核心文件内容如下：**
-    {selected_files_content}
-`;
+        
+        // highlight-start
+        // 检查输入框中是否已有 Pill
+        const pill = this.inputBox.querySelector('.content-pill');
+        if (pill) {
+            const agentId = pill.getAttribute('data-agent-id');
+            vscode.postMessage({command: 'info', payload: `触发 Agent: ${agentId} (模拟)`});
             
-            const userInputs = {
-                module_path: "src/extension", // 可以硬编码或从 prompt 中解析
-                task_description: "这个模块的核心功能是处理大模型请求、状态管理和视图提供。"
-            };
-
-            vscode.postMessage({ 
-                command: 'executeActionPrompt', 
-                payload: {
-                    yamlContent: testYaml,
-                    userInputs: userInputs,
-                    modelConfig: selectedConfig
-                }
-            });
-            inputBox.value = '';
-            this.autoResizeInput(inputBox);
+            // 在阶段二，我们只是清空输入框，为未来的 AgentRunBlock 留出空间
+            // 实际的后端调用和 UI 渲染将在任务 2 和 3 中实现
+            this.inputBox.innerHTML = '';
+            
             return; // 结束执行
         }
-        // --- 结束 Agent 触发器 ---
 
+        const prompt = this.inputBox.innerText.trim();
+        if (!prompt) return;
+        // highlight-end
 
         const selectedModelId = this.modelSelector.value;
         const selectedConfig = this.modelConfigs.find(c => c.id === selectedModelId);
@@ -4222,8 +4526,9 @@ llm_prompt_template:
         this.messages.push(message);
         this.renderMessages();
 
-        inputBox.value = '';
-        this.autoResizeInput(inputBox);
+        // highlight-start
+        this.inputBox.innerHTML = '';
+        // highlight-end
         vscode.postMessage({ command: 'sendMessage', payload: { prompt, config: selectedConfig } });
     }
 
@@ -4246,11 +4551,9 @@ llm_prompt_template:
         this.editingMessageIndex = index;
         this.originalMessageContent = this.messages[index].content;
 
-        const mainTextarea = this.bottomPanel.querySelector('textarea');
-        if (mainTextarea) {
-            mainTextarea.value = this.originalMessageContent;
-            this.autoResizeInput(mainTextarea);
-            mainTextarea.focus();
+        if (this.inputBox) {
+            this.inputBox.innerText = this.originalMessageContent;
+            this.inputBox.focus();
         }
 
         this.renderMessages();
@@ -4267,10 +4570,8 @@ llm_prompt_template:
         this.editingMessageIndex = null;
         this.originalMessageContent = null;
 
-        const mainTextarea = this.bottomPanel.querySelector('textarea');
-        if (mainTextarea) {
-            mainTextarea.value = '';
-            this.autoResizeInput(mainTextarea);
+        if (this.inputBox) {
+            this.inputBox.innerHTML = '';
         }
 
         this.renderMessages();
@@ -4278,10 +4579,8 @@ llm_prompt_template:
     }
 
     private handleSaveEdit(index: number) {
-        const mainTextarea = this.bottomPanel.querySelector('textarea');
-        if (!mainTextarea) return;
-
-        const newContent = mainTextarea.value.trim();
+        if (!this.inputBox) return;
+        const newContent = this.inputBox.innerText.trim();
         if (newContent) {
             this.messages[index].content = newContent;
             vscode.postMessage({ command: 'editMessage', payload: { messageIndex: index, content: newContent } });
@@ -4290,8 +4589,7 @@ llm_prompt_template:
         this.editingMessageIndex = null;
         this.originalMessageContent = null;
 
-        mainTextarea.value = '';
-        this.autoResizeInput(mainTextarea);
+        this.inputBox.innerHTML = '';
 
         this.renderMessages();
         this.updateSendButtonState();
@@ -4331,8 +4629,7 @@ llm_prompt_template:
         this.renderMessages();
 
         if (lastUserMessage) {
-            const inputBox = this.bottomPanel.querySelector('textarea');
-            if (inputBox) inputBox.value = lastUserMessage.content;
+            if (this.inputBox) this.inputBox.innerText = lastUserMessage.content;
         }
 
         const errorElement = document.createElement('div');
@@ -4343,12 +4640,11 @@ llm_prompt_template:
     }
 
     private handleMaximizeEditor() {
-        const inputBox = this.bottomPanel.querySelector('textarea');
-        if (inputBox) {
+        if (this.inputBox) {
             vscode.postMessage({
                 command: 'openFocusEditor',
                 payload: {
-                    content: inputBox.value,
+                    content: this.inputBox.innerText,
                     modelId: this.modelSelector.value,
                     promptId: this.promptSelector.value
                 }
@@ -4386,25 +4682,120 @@ llm_prompt_template:
         const container = this.bottomPanel.querySelector('.chat-input-box-container');
         if (!container) return;
 
-        container.innerHTML = `<textarea placeholder="输入消息，或从下拉菜单选择提示词..."></textarea>`;
-        const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+        // 关键改动：使用 contenteditable div 替换 textarea
+        container.innerHTML = `<div class="chat-input-box" contenteditable="true" placeholder="输入消息，或用'@'触发命令..."></div>`;
+        const inputBox = container.querySelector('.chat-input-box') as HTMLElement;
 
-        textarea.addEventListener('keydown', (e) => {
+        inputBox.addEventListener('keydown', (e) => {
+            if (this.atCommandMenu.isVisible()) {
+                this.atCommandMenu.handleKeyDown(e);
+                return; // 阻止后续的 Enter 发送等行为
+            }
+
+            // 新增 Backspace 处理逻辑
+            if (e.key === 'Backspace') {
+                const selection = window.getSelection();
+                if (selection && selection.isCollapsed && selection.anchorOffset === 0) {
+                    const firstNode = inputBox.childNodes[0];
+                    if (firstNode && firstNode.nodeName === 'SPAN' && (firstNode as HTMLElement).classList.contains('content-pill')) {
+                        e.preventDefault();
+                        firstNode.remove();
+                        // 清理可能留下的  
+                        if (inputBox.innerHTML.startsWith(' ')) {
+                            inputBox.innerHTML = inputBox.innerHTML.substring(6);
+                        }
+                        this.handleInputForAtCommand(inputBox); // 重新检查是否触发@
+                        return;
+                    }
+                }
+            }
+
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 this.handleSendOrSave();
             }
         });
 
-        textarea.addEventListener('input', () => {
-            this.autoResizeInput(textarea);
+        inputBox.addEventListener('input', () => {
+            this.handleInputForAtCommand(inputBox);
             vscode.postMessage({
                 command: 'updateWebviewContent',
-                payload: { content: textarea.value }
+                payload: { content: inputBox.innerText }
             });
         });
 
+        // 如果输入框为空，显示 placeholder
+        inputBox.addEventListener('focus', () => {
+             if (inputBox.getAttribute('placeholder')) {
+                inputBox.removeAttribute('placeholder');
+             }
+        });
+        inputBox.addEventListener('blur', () => {
+            if (!inputBox.textContent) {
+                 inputBox.setAttribute('placeholder', "输入消息，或用'@'触发命令...");
+            }
+        });
+
         this.updateSendButtonState();
+    }
+
+    /**
+     * 处理输入事件，用于触发 @ 命令菜单
+     */
+    private handleInputForAtCommand(inputBox: HTMLElement) {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) return;
+
+        const range = selection.getRangeAt(0);
+        // 修正的定位逻辑
+        const tempSpan = document.createElement('span');
+        range.insertNode(tempSpan);
+        const cursorRect = tempSpan.getBoundingClientRect();
+        // 获取父容器的位置，以计算相对坐标
+        const containerRect = (this.atCommandMenu['element'].parentNode as HTMLElement).getBoundingClientRect();
+        tempSpan.remove();
+
+        // 计算光标相对于父容器的坐标
+        const relativeTop = cursorRect.top - containerRect.top;
+        const relativeLeft = cursorRect.left - containerRect.left;
+        
+        const textUpToCursor = (range.startContainer.textContent || '').substring(0, range.startOffset);
+        const atMatch = textUpToCursor.match(/^@(.*)/);
+
+        if (atMatch) {
+            // 调用方式大幅简化，不再需要传递位置
+            this.atCommandMenu.show(
+                atMatch[1],
+                (command) => { this.insertAgentPill(command); }
+            );
+        } else {
+            this.atCommandMenu.hide();
+        }
+    }
+
+    /**
+     * 将选中的 Agent 命令作为 "Pill" 插入到输入框中
+     */
+    // 更新方法签名以接收完整的 CommandLeaf 对象
+    private insertAgentPill(command: { agentId: string, name: string }) {
+        // 使用更具描述性的 Pill 内容
+        const pillHtml = `<span class="content-pill" contenteditable="false" data-agent-id="${command.agentId}">@${command.name}</span> `;
+        
+        // 清空输入框并插入 Pill
+        this.inputBox.innerHTML = pillHtml;
+        this.inputBox.focus();
+
+        // 移动光标到最后
+        const selection = window.getSelection();
+        if (selection) {
+            const range = document.createRange();
+            range.selectNodeContents(this.inputBox);
+            range.collapse(false); // false 表示折叠到末尾
+            selection.removeAllRanges();
+            selection.addRange(range);
+        }
+
+        this.atCommandMenu.hide();
     }
 
     private updateSendButtonState() {
@@ -4428,6 +4819,7 @@ llm_prompt_template:
             <div class="chat-container">
                 <div class="messages-list"></div>
                 <div class="chat-sticky-bottom">
+                    <div class="at-command-menu-container"></div>
                     <div class="chat-quick-actions">
                         <label for="model-selector">Model:</label>
                         <select id="model-selector"></select>

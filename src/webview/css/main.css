@@ -1,3 +1,4 @@
+/* --- file_path: webview/css/main.css --- */
 body,
 html {
     height: 100%;
@@ -77,6 +78,7 @@ html {
     display: flex;
     flex-direction: column;
     flex: 1;
+    position: relative; 
     /* Ensure it takes full available space within its flex parent */
 }
 
@@ -641,103 +643,65 @@ button:hover {
     font-family: var(--vscode-editor-font-family);
 }
 
+/* highlight-start */
 /*=================================*/
 /*====== Rich Input & Pills =======*/
 /*=================================*/
 
-/* 将原来的输入框容器升级为富文本样式 */
+/* Rich text input box style */
 .chat-input-box {
     flex-grow: 1;
     background-color: var(--vscode-input-background);
     color: var(--vscode-input-foreground);
     border: 1px solid var(--vscode-input-border);
     padding: 8px;
-    resize: none;
-    /* 虽然不是 textarea，但保留这个概念 */
     border-radius: 5px;
     min-height: 22px;
-    /* 约等于单行 textarea 的高度 */
     max-height: 250px;
     overflow-y: auto;
     white-space: pre-wrap;
-    /* 保证空格和换行被保留 */
     word-wrap: break-word;
+    line-height: 1.5;
 }
 
 .chat-input-box:focus {
     outline: 1px solid var(--vscode-focusBorder);
 }
 
-/* 胶囊 (Pill) 的样式 */
+/* Pill style */
 .content-pill {
     display: inline-block;
-    background-color: var(--vscode-toolbar-hoverBackground);
+    background-color: var(--vscode-button-background); /* Use a prominent background color */
+    color: var(--vscode-button-foreground); /* Use a contrasting foreground color for visibility */
     border-radius: 12px;
     padding: 2px 10px;
     margin: 0 2px;
-    cursor: pointer;
     font-size: 0.9em;
-    transition: background-color 0.2s ease;
+    font-weight: 500;
+    cursor: default; /* Pill is not interactive */
 }
 
-.content-pill:hover {
-    background-color: var(--vscode-list-hoverBackground);
-}
-
-.content-pill .pill-tag {
-    font-weight: bold;
-    color: var(--vscode-button-background);
-    /* 使用主题色突出标签名 */
-}
-
-/* 展开后的编辑器容器 */
-.pill-editor {
-    display: block;
-    border: 1px solid var(--vscode-focusBorder);
-    border-radius: 5px;
-    margin: 8px 0;
-    padding: 8px;
-    background-color: var(--vscode-input-background);
-}
-
-.pill-editor textarea {
-    width: 100%;
-    height: 150px;
-    /* 初始高度 */
-    background: transparent;
-    border: none;
-    color: var(--vscode-input-foreground);
-    resize: vertical;
-    /* 允许用户调整高度 */
-    font-family: var(--vscode-editor-font-family);
-}
-
-.pill-editor textarea:focus {
-    outline: none;
-}
-
-.pill-editor-actions {
-    text-align: right;
-    margin-top: 5px;
-}
-
-/* 确保 contenteditable div 中的 p 标签没有多余的 margin */
-.chat-input-box p {
+/* Ensure no extra margin on paragraphs inside contenteditable */
+.chat-input-box p, .chat-input-box div {
     margin: 0;
 }
+/* highlight-end */
 
 /*=================================*/
 /*====== @ Command Menu ===========*/
 /*=================================*/
 .at-command-menu {
-    position: absolute;
+    /* 移除 position: absolute，让它成为正常的块级元素 */
+    width: 100%;
+    box-sizing: border-box;
     background-color: var(--vscode-editorWidget-background);
     border: 1px solid var(--vscode-editorWidget-border);
     border-radius: 5px;
-    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
     z-index: 100;
-    max-height: 200px;
+    max-height: 220px; /* 增加一点最大高度 */
     overflow-y: auto;
+    margin-bottom: 8px; /* 与下方的输入框区域产生间距 */
+    display: none; /* 默认隐藏，由 JS 控制 */
 }
 
 .at-command-menu ul {
@@ -756,55 +720,31 @@ button:hover {
     background-color: var(--vscode-list-hoverBackground);
 }
 
-
-/*=================================*/
-/*========= Prompt Manager ========*/
-/*=================================*/
-
-
-.prompt-editor-form textarea:focus {
-    outline: none;
+.at-command-menu li.active {
+    background-color: var(--vscode-list-hoverBackground);
+    color: var(--vscode-list-activeSelectionForeground);
 }
 
-/*=================================*/
-/*====== Rich Input & Pills =======*/
-/*=================================*/
-
-/* 将原来的输入框容器升级为富文本样式 */
-.chat-input-box {
-    flex-grow: 1;
-    background-color: var(--vscode-input-background);
-    color: var(--vscode-input-foreground);
-    border: 1px solid var(--vscode-input-border);
-    padding: 8px;
-    resize: none; /* 虽然不是 textarea，但保留这个概念 */
-    border-radius: 5px;
-    min-height: 22px; /* 约等于单行 textarea 的高度 */
-    max-height: 250px;
-    overflow-y: auto;
-    white-space: pre-wrap; /* 保证空格和换行被保留 */
-    word-wrap: break-word;
-    line-height: 1.5; /* 改善可读性 */
-}
-
-.chat-input-box:focus {
-    outline: 1px solid var(--vscode-focusBorder);
-}
-
-/* 胶囊 (Pill) 的样式 */
-.content-pill {
-    display: inline-block;
-    background-color: var(--vscode-toolbar-hoverBackground);
-    border-radius: 12px;
-    padding: 2px 10px;
-    margin: 0 2px;
+.at-command-menu .menu-header {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
+    color: var(--vscode-descriptionForeground);
     font-size: 0.9em;
-    cursor: default; /* Pill 本身不可交互 */
-    color: var(--vscode-button-background); /* 使用主题强调色 */
-    font-weight: 500;
 }
 
-/* 确保 contenteditable div 中的 p 标签没有多余的 margin */
-.chat-input-box p, .chat-input-box div {
-    margin: 0;
+.at-command-menu .menu-item-name {
+    display: flex;
+    align-items: center;
+    justify-content: space-between; /* 让图标能靠右 */
+    width: 100%;
+}
+
+.at-command-menu .menu-item-name .codicon {
+    color: var(--vscode-descriptionForeground);
+}
+
+.at-command-menu .menu-item-description {
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+    margin-top: 4px; /* 与名称拉开一点距离 */
 }

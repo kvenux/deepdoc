@@ -29,8 +29,9 @@ export class ChatView {
         this.renderBottomInput(); 
         this.inputBox = this.bottomPanel.querySelector('.chat-input-box') as HTMLElement;
         
-        // 将菜单附加到父级容器，以便绝对定位
-        this.atCommandMenu = new AtCommandMenu(this.parent);
+        // 将菜单附加到 chat-container, 以便使用相对定位
+        const commandMenuContainer = this.parent.querySelector('.at-command-menu-container') as HTMLElement;
+        this.atCommandMenu = new AtCommandMenu(commandMenuContainer);
 
         this.setupEventListeners();
     }
@@ -390,9 +391,27 @@ export class ChatView {
         const inputBox = container.querySelector('.chat-input-box') as HTMLElement;
 
         inputBox.addEventListener('keydown', (e) => {
-            // 如果 @ 菜单可见，则优先处理菜单导航（未来实现）
             if (this.atCommandMenu.isVisible()) {
-                // TODO: Handle Up/Down/Enter keys to navigate the menu
+                this.atCommandMenu.handleKeyDown(e);
+                return; // 阻止后续的 Enter 发送等行为
+            }
+
+            // 新增 Backspace 处理逻辑
+            if (e.key === 'Backspace') {
+                const sel = window.getSelection();
+                if (sel && sel.isCollapsed) {
+                    const range = sel.getRangeAt(0);
+                    // 此条件适用于光标位于输入框容器内，且其前方有节点（例如，在Pill之后）
+                    if (range.startContainer === inputBox && range.startOffset > 0) {
+                        const nodeToDelete = inputBox.childNodes[range.startOffset - 1];
+                        // 检查待删除的节点是否是Pill
+                        if (nodeToDelete && nodeToDelete.nodeName === 'SPAN' && (nodeToDelete as HTMLElement).classList.contains('content-pill')) {
+                            e.preventDefault();
+                            nodeToDelete.remove();
+                            return; // 阻止默认的Backspace行为
+                        }
+                    }
+                }
             }
 
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -428,20 +447,23 @@ export class ChatView {
      * 处理输入事件，用于触发 @ 命令菜单
      */
     private handleInputForAtCommand(inputBox: HTMLElement) {
-        const selection = window.getSelection();
-        if (!selection || selection.rangeCount === 0) return;
+         if (inputBox.querySelector('.content-pill')) {
+            this.atCommandMenu.hide();
+            return;
+        }
 
-        const range = selection.getRangeAt(0);
-        const textUpToCursor = range.startContainer.textContent?.substring(0, range.startOffset) || '';
+        // 2. 获取整个输入框的纯文本内容。
+        const text = inputBox.innerText;
 
-        // 正则表达式匹配以 @ 开头，后面跟0或多个非空格字符，且位于字符串末尾的模式
-        const atMatch = textUpToCursor.match(/@(\S*)$/);
-
-        if (atMatch) {
-            const rect = inputBox.getBoundingClientRect();
-            this.atCommandMenu.show(rect.left, rect.top, atMatch[1], (command) => {
-                this.insertAgentPill(command, atMatch);
-            });
+        // 3. 仅当文本以 '@' 字符开头时才显示菜单。
+        //    这避免了在文本中间输入'@'时触发菜单。
+        if (text.startsWith('@')) {
+            // 传递@后面的部分，供菜单内部使用（即使当前过滤已禁用）
+            const filter = text.substring(1);
+            this.atCommandMenu.show(
+                filter,
+                (command) => { this.insertAgentPill(command); }
+            );
         } else {
             this.atCommandMenu.hide();
         }
@@ -450,37 +472,23 @@ export class ChatView {
     /**
      * 将选中的 Agent 命令作为 "Pill" 插入到输入框中
      */
-    private insertAgentPill(command: {id: string, name: string}, atMatch: RegExpMatchArray) {
-        const pillHtml = `<span class="content-pill" contenteditable="false" data-agent-id="${command.id}">@${command.name}</span> `;
-
-        this.inputBox.focus(); // 确保输入框有焦点
+    // 更新方法签名以接收完整的 CommandLeaf 对象
+    private insertAgentPill(command: { agentId: string, name: string }) {
+        // 使用更具描述性的 Pill 内容
+        const pillHtml = `<span class="content-pill" contenteditable="false" data-agent-id="${command.agentId}">@${command.name}</span> `;
         
-        // 替换掉 @触发词
+        // 清空输入框并插入 Pill
+        this.inputBox.innerHTML = pillHtml;
+        this.inputBox.focus();
+
+        // 移动光标到最后
         const selection = window.getSelection();
-        if (selection && selection.rangeCount > 0) {
-            const range = selection.getRangeAt(0);
-            
-            // 定位到 @ 的起始位置
-            const startOffset = atMatch.index!;
-            range.setStart(range.startContainer, startOffset);
-            range.setEnd(range.startContainer, startOffset + atMatch[0].length);
-
-            // 删除范围内的文本（即 @keyword）
-            range.deleteContents();
-
-            // 插入 Pill
-            const pillNode = document.createRange().createContextualFragment(pillHtml);
-            range.insertNode(pillNode);
-            
-            // 将光标移动到 Pill 之后
-            range.collapse(false);
+        if (selection) {
+            const range = document.createRange();
+            range.selectNodeContents(this.inputBox);
+            range.collapse(false); // false 表示折叠到末尾
             selection.removeAllRanges();
             selection.addRange(range);
-        } else {
-            // Fallback: 如果没有选区，直接替换内容
-            const currentText = this.inputBox.innerText;
-            const newText = currentText.replace(/@(\S*)$/, '');
-            this.inputBox.innerHTML = newText + pillHtml;
         }
 
         this.atCommandMenu.hide();
@@ -507,6 +515,7 @@ export class ChatView {
             <div class="chat-container">
                 <div class="messages-list"></div>
                 <div class="chat-sticky-bottom">
+                    <div class="at-command-menu-container"></div>
                     <div class="chat-quick-actions">
                         <label for="model-selector">Model:</label>
                         <select id="model-selector"></select>
