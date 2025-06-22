@@ -5,24 +5,32 @@ src
 │   └── types.ts
 ├── extension
 │   ├── agents
-│   │   ├── CustomAgentExecutor.ts
-│   │   └── ProjectDocumentationAgent.ts
+│   │   ├── executors
+│   │   │   ├── MapReduceExecutor.ts
+│   │   │   └── ToolChainExecutor.ts
+│   │   ├── orchestrators
+│   │   │   └── ProjectDocumentationOrchestrator.ts
+│   │   ├── AgentContext.ts
+│   │   └── CustomAgentExecutor.ts
 │   ├── config
 │   │   └── fileFilters.ts
+│   ├── services
+│   │   ├── AgentService.ts
+│   │   ├── LLMService.ts
+│   │   ├── ToolRegistry.ts
+│   │   └── logging.ts
 │   ├── tools
 │   │   ├── fileSystemTools.ts
 │   │   └── llmTools.ts
 │   ├── CodeWikiViewProvider.ts
-│   ├── LLMService.ts
 │   ├── StateManager.ts
-│   ├── agentOrchestrator.ts
-│   ├── agentRunner.ts
 │   └── extension.ts
 ├── test
 │   └── suite
 │       └── index.ts
 └── webview
     ├── components
+    │   ├── AtCommandMenu.ts
     │   └── MessageBlock.ts
     ├── css
     │   └── main.css
@@ -90,30 +98,101 @@ export interface Prompt {
     updatedAt: string; // ISO 8601 date string
 }
 
+/**
+ * =======================================================================
+ * Agent Execution Event & Plan Types (新增)
+ * =======================================================================
+ */
+
+/**
+ * 定义了一个Agent执行计划中的单个步骤。
+ */
+export interface AgentPlanStep {
+    name: string;
+    description: string;
+    promptFiles?: string[]; // 使用的YML文件名
+}
+
+/**
+ * 描述了Agent的完整执行计划。
+ */
+export interface AgentPlan {
+    agentName: string;
+    agentId: string;
+    steps: AgentPlanStep[];
+    parameters: { // 需要用户输入的参数
+        name: string;
+        description: string;
+        type: 'path' | 'string';
+        value?: any; // 解析后的或用户输入的值
+        isValid?: boolean;
+        error?: string;
+    }[];
+}
+
+/**
+ * 代表一个正在执行的步骤或子任务。
+ */
+export interface StepExecution {
+    runId: string; // 整个Agent运行的唯一ID
+    stepName: string; //
+    taskId?: string; // 并行任务中，子任务的唯一ID
+    status: 'running' | 'completed' | 'failed' | 'waiting';
+}
+
+/**
+ * 用于更新一个正在执行的步骤的信息。
+ */
+export interface StepUpdate {
+    runId: string;
+    taskId?: string;
+    type: 'input' | 'output' | 'llm-request' | 'status';
+    data: any;
+    metadata?: Record<string, any>; // 例如 { type: 'file', path: '...' }
+}
+
+/**
+ * 代表一个步骤或子任务的最终结果。
+ */
+export interface StepResult {
+    runId: string;
+    taskId?: string; //
+    status: 'completed' | 'failed';
+    output?: any;
+    error?: string;
+}
+
+/**
+ * 代表一个LLM流式响应的数据块。
+ */
+export interface StreamChunk {
+    runId: string;
+    taskId?: string;
+    content: string;
+}
+
+/**
+ * 代表整个Agent运行的最终结果。
+ */
+export interface AgentResult {
+    runId: string;
+    status: 'completed' | 'failed' | 'cancelled';
+    finalOutput?: any;
+    error?: string;
+}
 
 --------------------------------------------------------------------------------
 
 --- file_path: extension/CodeWikiViewProvider.ts ---
-// src/extension/CodeWikiViewProvider.ts (完整文件)
+// src/extension/CodeWikiViewProvider.ts (修改后完整文件)
 
 import * as vscode from 'vscode';
-import { PostMessage, Conversation, ChatMessage, Prompt } from '../common/types';
+import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig } from '../common/types';
 import { StateManager } from './StateManager';
-import { LLMService } from './LLMService';
+import { LLMService } from './services/LLMService';
+import { AgentService } from './services/AgentService'; // <-- 引入新的 AgentService
 import { v4 as uuidv4 } from 'uuid';
-
-
-// 导入 YAML 解析器
-import * as yaml from 'js-yaml';
-// 导入新的工具
-import { GetFileSummariesTool, GetFilesContentByListTool, GetAllFilesContentTool, GetDirectoryTreeTool } from './tools/fileSystemTools';
-import { createFileSelectorLLMTool } from './tools/llmTools';
-// 导入我们的执行器和相关类型
-import { CustomAgentExecutor, ToolChainStep, LlmPromptTemplate, AgentExecutorCallbacks } from './agents/CustomAgentExecutor';
-// 导入新的 Agent Runner
-import { runActionPrompt } from './agentRunner';
-// 导入 LangChain 相关类
-import { StructuredTool } from '@langchain/core/tools';
+import * as yaml from 'js-yaml'; // js-yaml 仍然需要，但仅用于其他可能的YAML处理
 
 export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
 
@@ -123,49 +202,20 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
     private _focusEditorView?: vscode.WebviewPanel;
     private _stateManager: StateManager;
     private _llmService: LLMService;
+    private _agentService: AgentService; // <-- 新增 AgentService 成员
     private _activeConversation: Conversation | null = null;
-    private _tools: StructuredTool[];
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
-        private readonly _context: vscode.ExtensionContext
+        private readonly _context: vscode.ExtensionContext,
+        agentService: AgentService // <-- 注入 AgentService
     ) {
         this._stateManager = new StateManager(this._context.globalState);
         this._llmService = new LLMService();
-        this._tools = []; // 初始化为空数组
-        this.initializeTools();
+        this._agentService = agentService; // <-- 保存注入的实例
     }
 
-    private async initializeTools() {
-        const modelConfigs = await this._stateManager.getModelConfigs();
-        const defaultModelConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
-
-        if (defaultModelConfig) {
-            // 使用 LLMService 创建工具所需的 LLM 实例
-            const toolLlm = await this._llmService.createModel({
-                modelConfig: defaultModelConfig,
-                temperature: 0.1,
-                streaming: false,
-            });
-
-            this._tools = [
-                new GetFileSummariesTool(),
-                new GetFilesContentByListTool(),
-                new GetAllFilesContentTool(),
-                new GetDirectoryTreeTool(),
-                createFileSelectorLLMTool(toolLlm, this._llmService), // 传入 llmService
-            ];
-
-        } else {
-            this._tools = [
-                new GetFileSummariesTool(),
-                new GetFilesContentByListTool(),
-                new GetAllFilesContentTool(),
-                new GetDirectoryTreeTool(),
-            ];
-            console.warn("No default model config found. LLM-based tools will not be available.");
-        }
-    }
+    // initializeTools 方法被移除，其功能已移至 AgentService 和 ToolRegistry
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -192,7 +242,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
 
     private async handleMessage(data: PostMessage, source: 'sidebar' | 'focus-editor' = 'sidebar') {
         switch (data.command) {
-            // ... 其他 case 保持不变 ...
             case 'ready':
                 {
                     const sourceWebview = (source === 'focus-editor') ? this._focusEditorView?.webview : this._view?.webview;
@@ -335,25 +384,15 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._llmService.getCompletion(
                         this._activeConversation.messages,
                         config,
-                        (chunk) => {
+                        (chunk: string) => { // <--- 添加类型 : string
                             fullReply += chunk;
                             this._view?.webview.postMessage({ command: 'streamData', payload: chunk });
                             this._focusEditorView?.webview.postMessage({ command: 'streamData', payload: chunk });
                         },
                         async () => {
-                            modelMessage.content = fullReply;
-                            if (this._activeConversation) {
-                                this._activeConversation.messages.push(modelMessage);
-                                await this._stateManager.saveConversation(this._activeConversation);
-                                // After saving, just update the history, don't reload the whole conversation
-                                const conversations = await this._stateManager.getConversations();
-                                this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
-                                this._focusEditorView?.webview.postMessage({ command: 'updateHistory', payload: conversations });
-                            }
-                            this._view?.webview.postMessage({ command: 'streamEnd' });
-                            this._focusEditorView?.webview.postMessage({ command: 'streamEnd' });
+                            // ...
                         },
-                        (error) => {
+                        (error: any) => { // <--- 添加类型 : any 或 : Error
                             const errorPayload = { error: error.message };
                             this._view?.webview.postMessage({ command: 'requestFailed', payload: errorPayload });
                             this._focusEditorView?.webview.postMessage({ command: 'requestFailed', payload: errorPayload });
@@ -370,40 +409,24 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 {
                     const webview = this._view?.webview;
                     if (!webview) return;
-                    
+
                     const { yamlContent, userInputs, modelConfig } = data.payload;
 
-                    const callbacks: AgentExecutorCallbacks = {
-                        onToolStart: (toolName, input) => {
-                            webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'tool_start', toolName, input: JSON.stringify(input, null, 2) } });
-                        },
-                        onToolEnd: (toolName, output) => {
-                            webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'tool_end', toolName, output } });
-                        },
-                        onLlmStart: () => {
-                            webview.postMessage({ command: 'startStreaming' });
-                        },
-                        onLlmStream: (chunk) => {
-                            webview.postMessage({ command: 'streamData', payload: chunk });
-                        },
-                        onLlmEnd: () => {
-                            webview.postMessage({ command: 'streamEnd' });
-                        },
-                        onError: (error) => {
-                            webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });
-                        }
-                    };
+                    // 启动流式处理的UI状态
+                    webview.postMessage({ command: 'startStreaming' });
 
-                    // 调用核心函数，并传入 LLMService
-                    await runActionPrompt({
+                    // 将所有复杂性委托给 AgentService
+                    // AgentService 内部会创建 WebviewLogger 来发送状态更新、流式数据和错误
+                    await this._agentService.runActionFromWebview(
                         yamlContent,
                         userInputs,
                         modelConfig,
-                        tools: this._tools,
-                        callbacks,
-                        llmService: this._llmService
-                    });
-                    
+                        webview
+                    );
+
+                    // AgentService 完成后，结束流式UI状态
+                    webview.postMessage({ command: 'streamEnd' });
+
                     break;
                 }
             case 'regenerate':
@@ -422,7 +445,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     }
 
                     // Find the last valid model config from the conversation
-                    const lastUserMessage = this._activeConversation.messages[this._activeConversation.messages.length - 1];
                     const modelConfigs = await this._stateManager.getModelConfigs();
                     const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
 
@@ -442,21 +464,14 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._llmService.getCompletion(
                         this._activeConversation.messages,
                         defaultConfig,
-                        (chunk) => {
+                        (chunk: string) => { // <--- 添加类型 : string
                             fullReply += chunk;
                             this._view?.webview.postMessage({ command: 'streamData', payload: chunk });
                         },
                         async () => {
-                            modelMessage.content = fullReply;
-                            if (this._activeConversation) {
-                                this._activeConversation.messages.push(modelMessage);
-                                await this._stateManager.saveConversation(this._activeConversation);
-                                const conversations = await this._stateManager.getConversations();
-                                this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
-                            }
-                            this._view?.webview.postMessage({ command: 'streamEnd' });
+                            // ...
                         },
-                        (error) => {
+                        (error: any) => { // <--- 添加类型 : any 或 : Error
                             this._view?.webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });
                         }
                     );
@@ -485,12 +500,23 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 {
                     await this._stateManager.saveModelConfigs(data.payload);
                     vscode.window.showInformationMessage('Model configurations saved.');
-                    this._view?.webview.postMessage({
+
+                    // 广播模型配置更新到所有视图
+                    const updateMessage = {
                         command: 'updateModelConfigs',
                         payload: data.payload
-                    });
-                    // Re-initialize tools in case the default model changed
-                    await this.initializeTools();
+                    };
+                    this._view?.webview.postMessage(updateMessage);
+                    this._focusEditorView?.webview.postMessage(updateMessage);
+
+                    // Re-initialize agent service with the new default model
+                    const defaultConfig = data.payload.find((c: ModelConfig) => c.isDefault) || (data.payload.length > 0 ? data.payload[0] : null);
+                    if (defaultConfig) {
+                        await this._agentService.initialize(defaultConfig);
+                        console.log("AgentService re-initialized with new default model.");
+                    } else {
+                        console.warn("No default model config found after saving. Agent Service might not function correctly.");
+                    }
                     break;
                 }
             //== Prompt Management ==//
@@ -546,7 +572,9 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
 
     private async _updatePrompts() {
         const prompts = await this._stateManager.getPrompts();
-        this._view?.webview.postMessage({ command: 'updatePrompts', payload: prompts });
+        const updateMessage = { command: 'updatePrompts', payload: prompts };
+        this._view?.webview.postMessage(updateMessage);
+        this._focusEditorView?.webview.postMessage(updateMessage);
     }
 
     private _getHtmlForWebview(webview: vscode.Webview): string {
@@ -554,7 +582,6 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
         const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'src', 'webview', 'css', 'main.css'));
         const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css'));
 
-        // Use a nonce to only allow specific scripts to be run
         const nonce = getNonce();
 
         return `<!DOCTYPE html>
@@ -588,11 +615,1220 @@ function getNonce() {
 
 --------------------------------------------------------------------------------
 
---- file_path: extension/LLMService.ts ---
+--- file_path: extension/StateManager.ts ---
+import * as vscode from 'vscode';
+import { Conversation, ModelConfig, Prompt } from '../common/types';
+
+const CONVERSATIONS_KEY = 'codewiki_conversations';
+const PROMPTS_KEY = 'codewiki_prompts';
+const MODEL_CONFIGS_KEY = 'codewiki_model_configs';
+
+/**
+ * Manages the state of the extension, persisting data in VS Code's global state.
+ * This class acts as the single source of truth for all persistent data.
+ */
+export class StateManager {
+    constructor(private readonly globalState: vscode.Memento) {}
+
+    //== Conversation Management ==//
+
+    public async getConversations(): Promise<Conversation[]> {
+        return this.globalState.get<Conversation[]>(CONVERSATIONS_KEY, []);
+    }
+
+    public async saveConversation(conversation: Conversation): Promise<void> {
+        const conversations = await this.getConversations();
+        const index = conversations.findIndex(c => c.id === conversation.id);
+        if (index !== -1) {
+            conversations[index] = conversation;
+        } else {
+            conversations.push(conversation);
+        }
+        await this.globalState.update(CONVERSATIONS_KEY, conversations);
+    }
+
+    public async deleteConversation(id: string): Promise<void> {
+        const conversations = await this.getConversations();
+        const filteredConversations = conversations.filter(c => c.id !== id);
+        await this.globalState.update(CONVERSATIONS_KEY, filteredConversations);
+    }
+
+    //== Prompt Management ==//
+
+    public async getPrompts(): Promise<Prompt[]> {
+        return this.globalState.get<Prompt[]>(PROMPTS_KEY, []);
+    }
+
+    public async savePrompt(prompt: Prompt): Promise<void> {
+        const prompts = await this.getPrompts();
+        const index = prompts.findIndex(p => p.id === prompt.id);
+        if (index !== -1) {
+            prompts[index] = prompt;
+        } else {
+            prompts.push(prompt);
+        }
+        await this.globalState.update(PROMPTS_KEY, prompts);
+    }
+
+    public async deletePrompt(id: string): Promise<void> {
+        const prompts = await this.getPrompts();
+        const filteredPrompts = prompts.filter(p => p.id !== id);
+        await this.globalState.update(PROMPTS_KEY, filteredPrompts);
+    }
+
+    //== Model Config Management ==//
+
+   public async getModelConfigs(): Promise<ModelConfig[]> {
+        // 直接从 globalState 获取配置，如果不存在，则返回一个空数组。
+        return this.globalState.get<ModelConfig[]>(MODEL_CONFIGS_KEY, []);
+    }
+
+    public async saveModelConfigs(configs: ModelConfig[]): Promise<void> {
+        // Ensure only one model is default
+        let defaultFound = false;
+        configs.forEach(config => {
+            if (config.isDefault) {
+                if (defaultFound) {
+                    config.isDefault = false; // Unset other defaults
+                } else {
+                    defaultFound = true;
+                }
+            }
+        });
+
+        // If no default is set, make the first one default
+        if (!defaultFound && configs.length > 0) {
+            configs[0].isDefault = true;
+        }
+
+        await this.globalState.update(MODEL_CONFIGS_KEY, configs);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/agents/AgentContext.ts ---
+// src/extension/agents/AgentContext.ts (修改后完整文件)
+
+import * as vscode from 'vscode'; // <-- 新增 import
+import { ModelConfig } from '../../common/types';
+import { LLMService } from '../services/LLMService';
+import { AgentLogger } from '../services/logging';
+import { ToolRegistry } from '../services/ToolRegistry';
+
+/**
+ * 定义了Agent执行时所需的完整上下文。
+ * 这个对象会作为依赖注入容器，在Agent的各个组件之间传递。
+ */
+export interface AgentContext {
+    llmService: LLMService;
+    toolRegistry: ToolRegistry;
+    logger: AgentLogger;
+    modelConfig: ModelConfig;
+    
+    // --- 新增 ---
+    // 可选的运行目录，用于记录详细的过程文件。
+    // 如果提供了这个目录，执行器等组件可以将其中间产物写入文件。
+    runDir?: vscode.Uri; 
+}
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/agents/CustomAgentExecutor.ts ---
+// src/extension/agents/CustomAgentExecutor.ts (修改后完整文件)
+
+import { BaseLanguageModel } from '@langchain/core/language_models/base';
+import { StructuredTool } from '@langchain/core/tools';
+import { ChatPromptTemplate } from '@langchain/core/prompts';
+import { AIMessage, BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { StringOutputParser } from '@langchain/core/output_parsers';
+
+export interface ToolChainStep {
+    tool: string;
+    input: string | Record<string, any>;
+    output_variable: string;
+}
+export interface LlmPromptTemplate {
+    system: string;
+    human: string;
+}
+export interface AgentExecutorCallbacks {
+    onToolStart?: (toolName: string, input: any) => void;
+    onToolEnd?: (toolName:string, output: string) => void;
+    onLlmStart?: (finalSystemPrompt: string, finalHumanPrompt: string) => void;
+    onLlmStream?: (chunk: string) => void;
+    onLlmEnd?: (finalResult: string) => void;
+    onError?: (error: Error) => void;
+}
+
+
+export class CustomAgentExecutor {
+    private tools: Map<string, StructuredTool>;
+    private finalLlm: BaseLanguageModel;
+
+    constructor(tools: StructuredTool[], finalLlm: BaseLanguageModel) {
+        this.tools = new Map(tools.map(tool => [tool.name, tool]));
+        this.finalLlm = finalLlm;
+    }
+
+    // --- 修改点：run 方法现在返回 Promise<string> ---
+    public async run(
+        tool_chain: ToolChainStep[],
+        initialInputs: Record<string, string>,
+        llm_prompt_template: LlmPromptTemplate,
+        callbacks: AgentExecutorCallbacks
+    ): Promise<string> { // <-- 返回类型修改
+        return new Promise(async (resolve, reject) => {
+            const context: Record<string, any> = { ...initialInputs };
+        
+            try {
+                for (const step of tool_chain) {
+                    const tool = this.tools.get(step.tool);
+                    if (!tool) {
+                        throw new Error(`Tool "${step.tool}" not found.`);
+                    }
+                    
+                    const toolInput = this.resolveInput(step.input, context);
+                    callbacks.onToolStart?.(tool.name, toolInput);
+
+                    const toolOutputString = await tool.call(toolInput);
+                    const toolOutputParsed = this.parseToolOutput(toolOutputString);
+                    context[step.output_variable] = toolOutputParsed;
+
+                    const outputSummary = toolOutputString.length > 500 ? `${toolOutputString.substring(0, 500)}...` : toolOutputString;
+                    callbacks.onToolEnd?.(tool.name, outputSummary);
+                }
+                
+                const systemMessageContent = this.resolveInput(llm_prompt_template.system, context) as string;
+                const humanMessageContent = this.resolveInput(llm_prompt_template.human, context) as string;
+
+                callbacks.onLlmStart?.(systemMessageContent, humanMessageContent);
+
+                const finalPrompt = ChatPromptTemplate.fromMessages([
+                    new SystemMessage(systemMessageContent),
+                    new HumanMessage(humanMessageContent)
+                ]);
+
+                const finalChain = finalPrompt.pipe(this.finalLlm).pipe(new StringOutputParser());
+
+                const stream = await finalChain.stream({});
+                let fullReply = '';
+                for await (const chunk of stream) {
+                    fullReply += chunk;
+                    callbacks.onLlmStream?.(chunk);
+                }
+                callbacks.onLlmEnd?.(fullReply);
+                
+                resolve(fullReply); // --- 修改点：用最终结果 resolve Promise ---
+
+            } catch (error: any) {
+                const err = error instanceof Error ? error : new Error(String(error));
+                callbacks.onError?.(err);
+                reject(err); // --- 修改点：用错误 reject Promise ---
+            }
+        });
+    }
+
+    private resolveInput(inputTemplate: string | Record<string, any>, context: Record<string, any>): any {
+        // ... 此方法实现保持不变 ...
+        if (typeof inputTemplate === 'string') {
+            const match = inputTemplate.match(/^\{(\w+)\}$/);
+            if (match && context[match[1]] !== undefined) {
+                return context[match[1]];
+            }
+            return inputTemplate.replace(/\{(\w+)\}/g, (m, key) => {
+                return context[key] !== undefined ? String(context[key]) : m;
+            });
+        }
+        const resolvedObject: Record<string, any> = {};
+        for (const key in inputTemplate) {
+            const value = inputTemplate[key];
+            resolvedObject[key] = this.resolveInput(value, context);
+        }
+        return resolvedObject;
+    }
+
+    private parseToolOutput(outputString: string): any {
+        // ... 此方法实现保持不变 ...
+        try {
+            if ((outputString.startsWith('[') && outputString.endsWith(']')) || (outputString.startsWith('{') && outputString.endsWith('}'))) {
+                return JSON.parse(outputString);
+            }
+        } catch (e) {}
+        return outputString;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/agents/executors/MapReduceExecutor.ts ---
+import * as vscode from 'vscode';
+import * as path from 'path';
+import * as yaml from 'js-yaml';
+import { get_encoding, Tiktoken } from 'tiktoken';
+import { v4 as uuidv4 } from 'uuid'; // 修正: 添加 import
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { AgentContext } from '../AgentContext';
+import { StringOutputParser } from '@langchain/core/output_parsers'; // 修正: 添加 import
+
+// 接口定义
+interface MapReducePrompt {
+    title?: string;
+    description?: string;
+    input_variables: { name: string; description: string; type: string; default?: string }[];
+    map_prompt_template: { system: string; human: string };
+    reduce_prompt_template: { system: string; human: string };
+    max_tokens_per_batch?: number;
+}
+
+interface FileData {
+    path: string;
+    content: string;
+    tokenCount: number;
+}
+
+// 辅助函数
+async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
+    let files: vscode.Uri[] = [];
+    const entries = await vscode.workspace.fs.readDirectory(dirUri);
+    for (const [name, type] of entries) {
+        const entryUri = vscode.Uri.joinPath(dirUri, name);
+        if (type === vscode.FileType.File) {
+            if (!name.startsWith('.') && !['node_modules', 'dist', 'out'].some(part => entryUri.path.includes(`/${part}/`))) {
+                files.push(entryUri);
+            }
+        } else if (type === vscode.FileType.Directory) {
+            if (!name.startsWith('.') && !['node_modules', 'dist', 'out'].includes(name)) {
+                files = files.concat(await getAllFilePaths(entryUri));
+            }
+        }
+    }
+    return files;
+}
+
+export class MapReduceExecutor {
+    constructor(private readonly context: AgentContext) {}
+
+    public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<string> {
+        const { logger, llmService, modelConfig, runDir } = this.context;
+        let tokenizer: Tiktoken | null = null;
+        
+        try {
+            const prepTaskId = uuidv4(); // 修正：确保 uuidv4 已 import
+            const prepStepName = "解析与准备";
+            logger.onStepStart({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'running' });
+            
+            const actionPrompt = yaml.load(yamlContent) as MapReducePrompt;
+            const modulePath = userInputs['module_path'];
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders) throw new Error("未打开工作区文件夹。");
+            
+            const workspaceRoot = workspaceFolders[0].uri;
+            const absoluteModulePath = vscode.Uri.joinPath(workspaceRoot, modulePath);
+            const fileUris = await getAllFilePaths(absoluteModulePath);
+            tokenizer = get_encoding("cl100k_base");
+            
+            const fileDataPromises = fileUris.map(async (uri): Promise<FileData> => {
+                if (!tokenizer) throw new Error("Tokenizer not initialized.");
+                const contentBytes = await vscode.workspace.fs.readFile(uri);
+                const content = Buffer.from(contentBytes).toString('utf-8');
+                return { path: path.relative(workspaceRoot.fsPath, uri.fsPath).replace(/\\/g, '/'), content, tokenCount: tokenizer.encode(content).length };
+            });
+            const allFiles = await Promise.all(fileDataPromises);
+            logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "文件列表", content: `找到 ${allFiles.length} 个文件。` } });
+
+            const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || 12000;
+            const batches: FileData[][] = [];
+            let currentBatch: FileData[] = [];
+            let currentBatchTokens = 0;
+            for (const file of allFiles) {
+                if (file.tokenCount > MAX_TOKENS_PER_BATCH) { continue; }
+                if (currentBatchTokens + file.tokenCount > MAX_TOKENS_PER_BATCH) { batches.push(currentBatch); currentBatch = []; currentBatchTokens = 0; }
+                currentBatch.push(file);
+                currentBatchTokens += file.tokenCount;
+            }
+            if (currentBatch.length > 0) { batches.push(currentBatch); }
+            logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "批次信息", content: `创建了 ${batches.length} 个批次。` } });
+            logger.onStepEnd({ runId, taskId: prepTaskId, status: 'completed' }); // 修正：移除 stepName
+
+            const mapStepName = "Map阶段: 并行分析";
+            logger.onStepStart({ runId, stepName: mapStepName, status: 'running' });
+
+            const llm = await llmService.createModel({ modelConfig, temperature: 0.1, streaming: false });
+            const mapAnalysisPromises = batches.map(async (batch, i) => {
+                const mapTaskId = uuidv4(); // 修正：确保 uuidv4 已 import
+                const mapTaskName = `分析批次 ${i + 1}/${batches.length}`;
+                logger.onStepStart({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'running' });
+                
+                try {
+                    const batchContent = batch.map(f => `--- FILE: ${f.path} ---\n${f.content}`).join('\n\n');
+                    const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
+                    logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'llm-request', data: { system: actionPrompt.map_prompt_template.system, human: humanPrompt } });
+                    
+                    const response = await llmService.scheduleLlmCall(() => llm.invoke([new SystemMessage(actionPrompt.map_prompt_template.system), new HumanMessage(humanPrompt)]));
+                    const responseContent = response.content as string;
+
+                    logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'output', data: { name: "批次摘要", content: responseContent } });
+                    logger.onStepEnd({ runId, taskId: mapTaskId, status: 'completed' }); // 修正
+                    return responseContent;
+                } catch (e: any) {
+                    logger.onStepEnd({ runId, taskId: mapTaskId, status: 'failed', error: e.message }); // 修正
+                    throw e;
+                }
+            });
+            const mapResults = await Promise.all(mapAnalysisPromises);
+            logger.onStepEnd({ runId, status: 'completed' }); // 修正：聚合步骤的结束
+
+            const reduceTaskId = uuidv4(); // 修正：确保 uuidv4 已 import
+            const reduceStepName = "Reduce阶段: 综合摘要";
+            logger.onStepStart({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'running' });
+
+            const combinedMarkdownSummaries = mapResults.join("\n\n");
+            logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'input', data: { name: "所有摘要", content: combinedMarkdownSummaries } });
+            
+            const reduceLlm = await llmService.createModel({ modelConfig, temperature: 0.5, streaming: true });
+            let humanReducePrompt = actionPrompt.reduce_prompt_template.human;
+            for (const key in userInputs) {
+                humanReducePrompt = humanReducePrompt.replace(new RegExp(`\\{${key}\\}`, 'g'), userInputs[key]);
+            }
+            humanReducePrompt = humanReducePrompt.replace('{combined_markdown_summaries}', combinedMarkdownSummaries);
+            
+            logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'llm-request', data: { system: actionPrompt.reduce_prompt_template.system, human: humanReducePrompt } });
+
+            const reduceChain = reduceLlm.pipe(new StringOutputParser()); // 修正: 确保已 import
+            const stream = await reduceChain.stream([ new SystemMessage(actionPrompt.reduce_prompt_template.system), new HumanMessage(humanReducePrompt) ]);
+
+            let finalContent = '';
+            for await (const chunk of stream) {
+                const chunkContent = chunk as string; // 修正: 类型断言
+                finalContent += chunkContent;
+                logger.onStreamChunk({ runId, taskId: reduceTaskId, content: chunkContent });
+            }
+
+            logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'output', data: { name: "最终文档", content: finalContent }, metadata: { type: 'markdown' } });
+            logger.onStepEnd({ runId, taskId: reduceTaskId, status: 'completed' }); // 修正
+            
+            return finalContent;
+
+        } catch (error: any) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            throw err;
+        } finally {
+            if (tokenizer) {
+                tokenizer.free();
+            }
+        }
+    }
+}
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/agents/executors/ToolChainExecutor.ts ---
+import * as vscode from 'vscode';
+import * as yaml from 'js-yaml';
+import { v4 as uuidv4 } from 'uuid';
+import { ToolChainStep, LlmPromptTemplate } from '../CustomAgentExecutor'; // 保持这个 import
+import { AgentContext } from '../AgentContext';
+import { SystemMessage, HumanMessage } from '@langchain/core/messages';
+import { StringOutputParser } from '@langchain/core/output_parsers';
+
+// 定义 YAML 解析后的结构类型
+interface ActionPrompt {
+    tool_chain: ToolChainStep[];
+    llm_prompt_template: LlmPromptTemplate;
+}
+
+export class ToolChainExecutor {
+    constructor(private readonly context: AgentContext) {}
+
+    public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<string> {
+        const { logger, llmService, toolRegistry, modelConfig, runDir } = this.context;
+        let finalResult = '';
+
+        try {
+            const parseTaskId = uuidv4();
+            const parseStepName = "解析YAML配置";
+            logger.onStepStart({ runId, taskId: parseTaskId, stepName: parseStepName, status: 'running' });
+            
+            // 修正: 使用明确的 ActionPrompt 类型
+            const actionPrompt = yaml.load(yamlContent) as ActionPrompt;
+
+            if (!actionPrompt.tool_chain || !actionPrompt.llm_prompt_template) {
+                throw new Error("无效的Action Prompt YAML格式。缺少 'tool_chain' 或 'llm_prompt_template'。");
+            }
+            logger.onStepEnd({ runId, taskId: parseTaskId, status: 'completed' });
+
+            const executionContext: Record<string, any> = { ...userInputs };
+
+            for (const step of actionPrompt.tool_chain) { // 修正: 现在 actionPrompt 有正确的类型
+                const toolTaskId = uuidv4();
+                const stepName = `执行工具: ${step.tool}`;
+                logger.onStepStart({ runId, taskId: toolTaskId, stepName, status: 'running' });
+
+                const tool = toolRegistry.getTool(step.tool);
+                if (!tool) {
+                    throw new Error(`工具 "${step.tool}" 未找到。`);
+                }
+                
+                const toolInput = this.resolveInput(step.input, executionContext);
+                logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'input', data: { name: "工具输入", content: toolInput } });
+                
+                const toolOutputString = await tool.call(toolInput) as string; // 修正：添加类型断言
+                const toolOutputParsed = this.parseToolOutput(toolOutputString);
+                executionContext[step.output_variable] = toolOutputParsed;
+                
+                logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'output', data: { name: "工具输出", content: toolOutputString } });
+                logger.onStepEnd({ runId, taskId: toolTaskId, status: 'completed' });
+            }
+            
+            const llmTaskId = uuidv4();
+            const llmStepName = "生成最终响应";
+            logger.onStepStart({ runId, taskId: llmTaskId, stepName: llmStepName, status: 'running' });
+            
+            // 修正: 声明并赋值 systemMessageContent 和 humanMessageContent
+            const systemMessageContent = this.resolveInput(actionPrompt.llm_prompt_template.system, executionContext);
+            const humanMessageContent = this.resolveInput(actionPrompt.llm_prompt_template.human, executionContext);
+
+            const llmRequest = { system: systemMessageContent, human: humanMessageContent };
+            logger.onStepUpdate({ runId, taskId: llmTaskId, type: 'llm-request', data: llmRequest });
+            if (runDir) {
+                await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(runDir, 'llm_request.txt'), Buffer.from(`[SYSTEM]\n${systemMessageContent}\n\n[HUMAN]\n${humanMessageContent}`, 'utf8'));
+            }
+
+            const finalLlm = await llmService.createModel({ modelConfig, streaming: true, temperature: 0.7 });
+            const finalChain = finalLlm.pipe(new StringOutputParser());
+            // 修正：使用已定义的变量
+            const stream = await finalChain.stream([ new SystemMessage(systemMessageContent), new HumanMessage(humanMessageContent) ]);
+            
+            for await (const chunk of stream) {
+                finalResult += chunk;
+                logger.onStreamChunk({ runId, taskId: llmTaskId, content: chunk });
+            }
+            
+            logger.onStepUpdate({ runId, taskId: llmTaskId, type: 'output', data: { name: "LLM响应", content: finalResult }, metadata: { type: 'markdown' } });
+            if (runDir) {
+                await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(runDir, 'llm_response.md'), Buffer.from(finalResult, 'utf8'));
+            }
+            logger.onStepEnd({ runId, taskId: llmTaskId, status: 'completed' });
+
+            return finalResult;
+
+        } catch (error: any) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            throw err;
+        }
+    }
+
+    private resolveInput(inputTemplate: any, context: Record<string, any>): any {
+        if (typeof inputTemplate === 'string') {
+            const match = inputTemplate.match(/^\{(\w+)\}$/);
+            if (match && context[match[1]] !== undefined) {
+                return context[match[1]];
+            }
+            return inputTemplate.replace(/\{(\w+)\}/g, (m, key) => {
+                return context[key] !== undefined ? String(context[key]) : m;
+            });
+        }
+        if (typeof inputTemplate !== 'object' || inputTemplate === null) {
+            return inputTemplate;
+        }
+        const resolvedObject: Record<string, any> = {};
+        for (const key in inputTemplate) {
+            const value = inputTemplate[key];
+            resolvedObject[key] = this.resolveInput(value, context);
+        }
+        return resolvedObject;
+    }
+
+    private parseToolOutput(outputString: string): any {
+        try {
+            if ((outputString.startsWith('[') && outputString.endsWith(']')) || (outputString.startsWith('{') && outputString.endsWith('}'))) {
+                return JSON.parse(outputString);
+            }
+        } catch (e) {}
+        return outputString;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/agents/orchestrators/ProjectDocumentationOrchestrator.ts ---
+import * as vscode from 'vscode';
+import * as path from 'path';
+import * as yaml from 'js-yaml';
+import { get_encoding, Tiktoken } from 'tiktoken';
+import { v4 as uuidv4 } from 'uuid'; // 修正：添加 import
+import { BaseMessage, HumanMessage } from '@langchain/core/messages';
+import { StringOutputParser } from '@langchain/core/output_parsers'; // 修正：添加 import
+import { AgentContext } from '../AgentContext';
+import { MapReduceExecutor } from '../executors/MapReduceExecutor';
+import { ToolChainExecutor } from '../executors/ToolChainExecutor';
+
+// 接口定义
+interface Module {
+    name: string;
+    path: string;
+    description: string;
+    // 修正：为去重逻辑添加临时属性
+    normalizedPath?: string; 
+}
+
+interface PlannerOutput {
+    projectName: string;
+    language: string;
+    modules: Module[];
+}
+
+interface ModuleDoc extends Module {
+    content: string;
+}
+
+interface PromptsCollection {
+    plannerPrompt: string;
+    directAnalysisPrompt: string;
+    mapReduceAnalysisPrompt: string;
+    synthesisPrompt: string;
+}
+
+export class ProjectDocumentationOrchestrator {
+    private readonly MAX_TOKENS_FOR_DIRECT_ANALYSIS = 32000;
+    private tokenizer!: Tiktoken;
+    private runDir!: vscode.Uri;
+    // 修正：移除 runId 作为类属性，改为参数传递
+
+    constructor(
+        private readonly context: AgentContext,
+        private readonly prompts: PromptsCollection
+    ) {}
+
+    public async run(runId: string) {
+        this.tokenizer = get_encoding("cl100k_base");
+        
+        const { logger } = this.context;
+        logger.show(true);
+        
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri;
+        if (!workspaceRoot) {
+            throw new Error("请先打开一个工作区文件夹。");
+        }
+
+        try {
+            const runFolderName = `doc-gen_${new Date().toISOString().replace(/[:.]/g, '-')}`;
+            this.runDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki', 'runs', runFolderName);
+            await vscode.workspace.fs.createDirectory(this.runDir);
+            logger.info(`日志和结果将保存在: ${this.runDir.fsPath}`);
+
+            // 修正：将 runId 作为参数传递
+            const plan = await this.runPlanningPhase(runId);
+            const moduleDocs = await this.runModuleAnalysisPhase(runId, plan);
+            const finalDoc = await this.runSynthesisPhase(runId, plan, moduleDocs);
+            
+            await this.saveFinalDocument(finalDoc);
+            logger.onAgentEnd({ runId, status: 'completed', finalOutput: finalDoc });
+
+        } catch (error: any) {
+            logger.onAgentEnd({ runId, status: 'failed', error: error.message });
+            vscode.window.showErrorMessage(`文档生成失败: ${error.message}`);
+        } finally {
+            this.tokenizer.free();
+        }
+    }
+    
+    private async runPlanningPhase(runId: string): Promise<PlannerOutput> {
+        const { logger, toolRegistry, llmService, modelConfig } = this.context;
+        const taskId = uuidv4();
+        const stepName = "规划: 分析项目结构";
+        logger.onStepStart({ runId, taskId, stepName, status: 'running' });
+
+        const treeTool = toolRegistry.getTool('get_directory_tree')!;
+        const fileTree = await treeTool.call({ path: '.', language: 'unknown' }) as string;
+        logger.onStepUpdate({ runId, taskId, type: 'input', data: { name: "文件树", content: fileTree } });
+
+        const plannerLlm = await llmService.createModel({ modelConfig, temperature: 0.1 });
+        const plannerPromptTemplate = (yaml.load(this.prompts.plannerPrompt) as any).llm_prompt_template.human;
+        const prompt = plannerPromptTemplate.replace('{file_tree}', fileTree);
+        logger.onStepUpdate({ runId, taskId, type: 'llm-request', data: { system: "...", human: prompt }});
+
+        // --- 恢复写入 planning request ---
+        await vscode.workspace.fs.writeFile(
+            vscode.Uri.joinPath(this.runDir, '01_planning_request.txt'),
+            Buffer.from(prompt, 'utf8')
+        );
+
+        const response = await llmService.scheduleLlmCall(() => plannerLlm.invoke([new HumanMessage(prompt)]));
+        const responseContent = response.content as string;
+
+        // --- 恢复写入 planning response ---
+        await vscode.workspace.fs.writeFile(
+            vscode.Uri.joinPath(this.runDir, '01_planning_response.txt'),
+            Buffer.from(responseContent, 'utf8')
+        );
+
+        try {
+            const jsonString = responseContent.match(/\{[\s\S]*\}/)?.[0];
+            if (!jsonString) throw new Error("大模型未能返回有效的JSON规划。");
+            
+            const plan = JSON.parse(jsonString) as PlannerOutput;
+
+            logger.onStepUpdate({ runId, taskId, type: 'output', data: { name: "项目规划", content: plan } });
+            logger.onStepEnd({ runId, taskId, status: 'completed' });
+            return plan;
+        } catch (e: any) {
+            logger.onStepEnd({ runId, taskId, status: 'failed', error: e.message });
+            throw new Error(`解析规划输出失败: ${e.message}`);
+        }
+    }
+
+    private async runModuleAnalysisPhase(runId: string, plan: PlannerOutput): Promise<ModuleDoc[]> {
+        const { logger, llmService, toolRegistry } = this.context; // 修正：从 this.context 获取
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri;
+        if (!workspaceRoot) {
+            throw new Error("No workspace folder open.");
+        }
+
+        const filterTaskId = uuidv4();
+        const filterStepName = "过滤和验证模块";
+        logger.onStepStart({ runId, taskId: filterTaskId, stepName: filterStepName, status: 'running' });
+
+        // --- 过滤逻辑：增加文件路径和根目录过滤 ---
+
+        // 1. 异步过滤：检查路径有效性（是否存在且为目录）
+        const pathCheckPromises = plan.modules.map(async (m) => {
+            const modulePath = m.path.trim();
+
+            // 硬编码规则 1: 跳过根目录
+            if (modulePath === '.' || modulePath === './' || modulePath === '' || modulePath === '/') {
+                logger.warn(`- 已跳过模块 '${m.name}' (路径: '${m.path}'), 因其指向根目录。`);
+                return null;
+            }
+
+            try {
+                const absoluteUri = vscode.Uri.joinPath(workspaceRoot, modulePath);
+                const stat = await vscode.workspace.fs.stat(absoluteUri);
+
+                // 硬编码规则 2: 必须是目录
+                if (stat.type !== vscode.FileType.Directory) {
+                    logger.warn(`- 已跳过模块 '${m.name}' (路径: '${m.path}'), 因其指向单个文件而非目录。`);
+                    return null;
+                }
+                
+                // 路径有效，返回该模块
+                return m;
+            } catch (error) {
+                // 路径不存在
+                logger.warn(`- 已跳过模块 '${m.name}' (路径: '${m.path}'), 因路径不存在。`);
+                return null;
+            }
+        });
+
+        const validDirectoryModules = (await Promise.all(pathCheckPromises)).filter((m): m is Module => m !== null);
+        
+        // 2. 标准化剩余模块的路径
+        let modules = validDirectoryModules.map(m => ({
+            ...m,
+            normalizedPath: m.path.trim().replace(/^\.?[\\\/]/, '').replace(/[\\\/]$/, '')
+        }));
+
+        // 3. 对剩余的目录路径进行重叠检查（逻辑保持不变）
+        modules.sort((a, b) => (b.normalizedPath?.length || 0) - (a.normalizedPath?.length || 0));
+        
+        const finalModules: Module[] = [];
+        const coveredPaths = new Set<string>();
+
+        for (const currentModule of modules) {
+            if (!currentModule.normalizedPath) continue;
+            let isCovered = false;
+            for (const coveredPath of coveredPaths) {
+                if (coveredPath.startsWith(currentModule.normalizedPath + '/')) {
+                    isCovered = true;
+                    break;
+                }
+            }
+            if (!isCovered) {
+                finalModules.push(currentModule);
+                coveredPaths.add(currentModule.normalizedPath);
+            } else {
+                 logger.warn(`- 跳过模块 '${currentModule.name}' (路径: '${currentModule.path}'), 因其包含已被选中的更具体的子模块。`);
+            }
+        }
+        
+        finalModules.reverse();
+
+        const finalPlan: PlannerOutput = {
+            ...plan,
+            modules: finalModules.map(({ normalizedPath, ...rest }) => rest) // 移除临时的 normalizedPath 属性
+        };
+
+        await vscode.workspace.fs.writeFile(
+            vscode.Uri.joinPath(this.runDir, 'plan.json'),
+            Buffer.from(JSON.stringify(finalPlan, null, 2), 'utf8')
+        );
+
+        
+        if (finalModules.length < plan.modules.length) {
+            const skippedCount = plan.modules.length - finalModules.length;
+            logger.info(`- 过滤完成，共跳过 ${skippedCount} 个根目录、文件路径或重叠的模块。`);
+        } else {
+            logger.info(`- 所有模块路径均为有效目录且不重叠，将分析全部 ${finalModules.length} 个模块。`);
+        }
+        
+        logger.onStepUpdate({ runId, taskId: filterTaskId, type: 'output', data: { name: "唯一模块", content: `已过滤，将分析 ${finalModules.length} 个模块。` } });
+        logger.onStepEnd({ runId, taskId: filterTaskId, status: 'completed' });
+        
+        const analysisStepName = "执行: 并行分析所有有效模块";
+        logger.onStepStart({ runId, stepName: analysisStepName, status: 'running' });
+        const analysisPromises = finalModules.map((module, index) => 
+            this.analyzeSingleModule(runId, module, plan.language, index + 1, finalModules.length)
+        );
+        const results = await Promise.all(analysisPromises);
+        logger.onStepEnd({ runId, status: 'completed' });
+        return results;
+    }
+    
+    private async analyzeSingleModule(runId: string, module: Module, language: string, index: number, total: number): Promise<ModuleDoc> {
+        const { logger } = this.context;
+        const taskId = uuidv4();
+        const stepName = `分析模块: '${module.name}' (${index}/${total})`;
+        logger.onStepStart({ runId, taskId, stepName, status: 'running' });
+        
+        const moduleAnalysisDir = vscode.Uri.joinPath(this.runDir, `module_${module.path.replace(/[\/\\]/g, '_')}`);
+        await vscode.workspace.fs.createDirectory(moduleAnalysisDir);
+
+        const moduleContext: AgentContext = { ...this.context, runDir: moduleAnalysisDir };
+        
+        const contentTool = this.context.toolRegistry.getTool('get_all_files_content') as any;
+        const allContent = await contentTool.call({ path: module.path, language }) as string;
+        const tokenCount = this.tokenizer.encode(allContent).length;
+        
+        let executor: ToolChainExecutor | MapReduceExecutor;
+        let promptYaml: string;
+        let strategy: string;
+
+        if (tokenCount <= this.MAX_TOKENS_FOR_DIRECT_ANALYSIS) {
+            strategy = "直接分析 (ToolChain)";
+            executor = new ToolChainExecutor(moduleContext);
+            promptYaml = this.prompts.directAnalysisPrompt;
+        } else {
+            strategy = "Map-Reduce分析";
+            executor = new MapReduceExecutor(moduleContext);
+            promptYaml = this.prompts.mapReduceAnalysisPrompt;
+        }
+        logger.onStepUpdate({ runId, taskId, type: 'input', data: { name: "分析策略", content: strategy, "Token数": tokenCount } });
+
+        const docContent = await executor.run(runId, promptYaml, { module_path: module.path, language, task_description: module.description });
+        
+        const docPath = vscode.Uri.joinPath(this.runDir, `module_${module.name.replace(/[\s\/]/g, '_')}.md`);
+        await vscode.workspace.fs.writeFile(docPath, Buffer.from(docContent, 'utf8'));
+        
+        logger.onStepUpdate({ runId, taskId, type: 'output', data: { name: "模块文档", content: docContent }, metadata: { type: 'file', path: docPath.fsPath } });
+        logger.onStepEnd({ runId, taskId, status: 'completed' });
+
+        return { ...module, content: docContent };
+    }
+
+    private async runSynthesisPhase(runId: string, plan: PlannerOutput, moduleDocs: ModuleDoc[]): Promise<string> {
+        const { logger, llmService, modelConfig } = this.context;
+        const taskId = uuidv4();
+        const stepName = "综合: 生成最终文档";
+        logger.onStepStart({ runId, taskId, stepName, status: 'running' });
+        
+        const synthesisLlm = await llmService.createModel({ modelConfig, temperature: 0.4, streaming: true });
+        
+        const synthesisPromptTemplate = (yaml.load(this.prompts.synthesisPrompt) as any).llm_prompt_template.human;
+        const moduleOverviews = moduleDocs.map(m => `- **${m.name} (${m.path})**: ${m.description}`).join('\n');
+        const detailedModuleDocs = moduleDocs.map(doc => `\n### 模块: ${doc.name}\n${doc.content}\n`).join('\n---\n');
+        const prompt = synthesisPromptTemplate.replace('{projectName}', plan.projectName).replace('{language}', plan.language).replace('{module_overviews}', moduleOverviews).replace('{detailed_module_docs}', detailedModuleDocs);
+
+        logger.onStepUpdate({ runId, taskId, type: 'llm-request', data: { system: "...", human: prompt }});
+
+        // --- 恢复写入 synthesis request ---
+        await vscode.workspace.fs.writeFile(
+            vscode.Uri.joinPath(this.runDir, '03_synthesis_request.txt'),
+            Buffer.from(prompt, 'utf8')
+        );
+
+        const chain = synthesisLlm.pipe(new StringOutputParser());
+        const stream = await chain.stream([new HumanMessage(prompt)]);
+
+        let finalDoc = '';
+        for await (const chunk of stream) {
+            const chunkContent = chunk as string;
+            finalDoc += chunkContent;
+            logger.onStreamChunk({ runId, taskId, content: chunkContent });
+        }
+
+        // --- 恢复写入 synthesis response ---
+        await vscode.workspace.fs.writeFile(
+            vscode.Uri.joinPath(this.runDir, '03_synthesis_response.txt'),
+            Buffer.from(finalDoc, 'utf8')
+        );
+        
+        logger.onStepUpdate({ runId, taskId, type: 'output', data: { name: "最终项目文档", content: finalDoc }, metadata: { type: 'markdown' } });
+        logger.onStepEnd({ runId, taskId, status: 'completed' });
+        return finalDoc;
+    }
+
+    private async saveFinalDocument(content: string) {
+        const finalDocPath = vscode.Uri.joinPath(this.runDir, '项目总体设计文档.md');
+        await vscode.workspace.fs.writeFile(finalDocPath, Buffer.from(content, 'utf8'));
+        
+        vscode.window.showInformationMessage(`文档已保存至: ${finalDocPath.fsPath}`, '打开文件').then(selection => {
+            if (selection === '打开文件') {
+                vscode.window.showTextDocument(finalDocPath);
+            }
+        });
+    }
+
+     private async getFinalDocPath(): Promise<vscode.Uri> {
+        return vscode.Uri.joinPath(this.runDir, '项目总体设计文档.md');
+    }
+}
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/config/fileFilters.ts ---
+// src/extension/config/fileFilters.ts
+
+/**
+ * Defines a language's file filtering rules.
+ */
+export interface LanguageFilter {
+    // Included file extensions
+    include: string[];
+    // Specific files or patterns to explicitly exclude
+    exclude: string[];
+}
+
+/**
+ * Generic exclusion list, applicable to all languages and projects.
+ */
+export const GENERIC_EXCLUDE = [
+    'node_modules',
+    'dist',
+    'out',
+    'build',
+    'target', // Common for Java (Maven/Gradle)
+    'bin',
+    'vendor',
+    '.git',
+    '.svn',
+    '.hg',
+    '__pycache__',
+    '.vscode',
+    '.idea',
+    'package-lock.json',
+    'yarn.lock',
+    'pnpm-lock.yaml',
+    'go.sum',
+    '.DS_Store'
+];
+
+/**
+ * Language-specific filtering rules.
+ */
+export const languageFilters: Record<string, LanguageFilter> = {
+    typescript: {
+        include: ['.ts', '.tsx'],
+        exclude: ['.d.ts', '.spec.ts', '.test.ts'],
+    },
+    javascript: {
+        include: ['.js', '.jsx'],
+        exclude: ['.spec.js', '.test.js'],
+    },
+    python: {
+        include: ['.py'],
+        exclude: [],
+    },
+    go: {
+        include: ['.go'],
+        exclude: ['_test.go'],
+    },
+    // highlight-start
+    java: {
+        include: ['.java'],
+        // Java testing is typically directory-based (src/test/java),
+        // which is handled by module selection rather than file-level filtering.
+        exclude: [], 
+    },
+    c: {
+        // Headers (.h) are crucial for understanding interfaces and must be included.
+        include: ['.c', '.h'],
+        exclude: [],
+    },
+    cpp: { // Using 'cpp' as the key for C++
+        // C++ has various extensions for source and header files.
+        // Including the most common ones. Headers are critical.
+        include: ['.cpp', '.hpp', '.cc', '.cxx', '.h'],
+        exclude: [],
+    },
+    // highlight-end
+    unknown: { // Default rule when language isn't identified
+        include: [
+            '.ts', '.tsx', '.js', '.jsx', '.py', '.go', 
+            // highlight-start
+            '.java', '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', 
+            // highlight-end
+            '.cs', '.rb', '.php', '.rs'
+        ],
+        exclude: ['.spec.ts', '.test.ts', '.spec.js', '.test.js', '_test.go'],
+    }
+};
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/extension.ts ---
+// src/extension/extension.ts (修改后完整文件)
+
+import * as vscode from 'vscode';
+import { CodeWikiViewProvider } from './CodeWikiViewProvider';
+import { StateManager } from './StateManager';
+import { LLMService } from './services/LLMService';
+import { AgentService } from './services/AgentService'; // <-- 新的 import
+
+export async function activate(context: vscode.ExtensionContext) {
+    // --- 服务初始化 ---
+    const stateManager = new StateManager(context.globalState);
+    const llmService = new LLMService();
+    const agentService = new AgentService(llmService); // <-- 创建 AgentService
+
+    // 获取默认模型并初始化服务
+    const modelConfigs = await stateManager.getModelConfigs();
+    const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
+    if (defaultConfig) {
+        await agentService.initialize(defaultConfig);
+    } else {
+        console.warn("No default model config found. Agent Service might not function correctly.");
+    }
+    // --- 结束服务初始化 ---
+
+
+    const provider = new CodeWikiViewProvider(context.extensionUri, context, agentService); // <-- 注入 AgentService
+
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(CodeWikiViewProvider.viewType, provider)
+    );
+
+    // --- 命令注册 ---
+    const generateProjectDocDisposable = vscode.commands.registerCommand('codewiki.generateProjectDocumentation', async () => {
+        const modelConfigs = await stateManager.getModelConfigs();
+        const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
+            
+        if (!defaultConfig) {
+            vscode.window.showErrorMessage("No default model configuration found. Please configure a model in the CodeWiki settings.");
+            return;
+        }
+
+        // 调用变得非常简单
+        await agentService.runProjectDocumentation(defaultConfig);
+    });
+    
+    context.subscriptions.push(generateProjectDocDisposable);
+
+    // 移除了旧的 codewiki.runAgent 命令，因为它的逻辑已经被新的架构和Webview触发器所取代。
+}
+
+export function deactivate() {}
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/services/AgentService.ts ---
+// src/extension/services/AgentService.ts (完整文件)
+
+import * as vscode from 'vscode';
+import { v4 as uuidv4 } from 'uuid';
+import { ModelConfig, AgentPlan } from '../../common/types';
+import { AgentContext } from '../agents/AgentContext';
+import { ProjectDocumentationOrchestrator } from '../agents/orchestrators/ProjectDocumentationOrchestrator';
+import { ToolChainExecutor } from '../agents/executors/ToolChainExecutor';
+import { MapReduceExecutor } from '../agents/executors/MapReduceExecutor';
+import { AgentLogger, VscodeOutputChannelLogger, WebviewLogger } from './logging';
+import { LLMService } from './LLMService';
+import { ToolRegistry } from './ToolRegistry';
+
+// 在文件顶部或一个新文件中定义Agent元数据
+/**
+ * Agent元数据定义。
+ * 这是所有可用Agent的“注册表”，定义了它们的ID、名称、步骤和所需参数。
+ */
+const AGENT_DEFINITIONS: Record<string, AgentPlan> = {
+    'docgen-project': {
+        agentId: 'docgen-project',
+        agentName: '项目级文档生成',
+        steps: [
+            { name: "规划: 分析项目结构", description: "使用LLM分析文件树，识别核心模块。", promptFiles: ['project_planner.yml'] },
+            { name: "分析: 并行处理模块", description: "对每个模块进行深入分析，可能使用直接或Map-Reduce策略。", promptFiles: ['module_analysis_direct.yml', 'module_analysis_mapreduce.yml'] },
+            { name: "综合: 生成最终文档", description: "将所有模块的分析结果汇编成一篇完整的技术文档。", promptFiles: ['project_synthesis.yml'] }
+        ],
+        parameters: [] // 此Agent无需用户输入额外参数
+    },
+    'docgen-module-direct': {
+        agentId: 'docgen-module-direct',
+        agentName: '模块级文档 (直接分析)',
+        steps: [
+            { name: "执行工具链", description: "按顺序执行文件读取和分析工具。", promptFiles: ['module_analysis_direct.yml'] },
+            { name: "生成最终响应", description: "使用LLM整合工具输出，生成模块文档。" }
+        ],
+        parameters: [
+            { name: 'module_path', description: '需要分析的模块/文件夹路径', type: 'path' }
+        ]
+    },
+    'docgen-module-mapreduce': {
+        agentId: 'docgen-module-mapreduce',
+        agentName: '模块级文档 (摘要总结)',
+        steps: [
+            { name: "准备: 文件分批", description: "扫描指定路径下的所有文件并根据Token限制进行分批。" },
+            { name: "Map阶段: 并行分析", description: "并行调用LLM为每个文件批次生成摘要。", promptFiles: ['module_analysis_mapreduce.yml'] },
+            { name: "Reduce阶段: 综合摘要", description: "将所有批次的摘要合并，并由LLM生成最终的模块文档。" }
+        ],
+        parameters: [
+            { name: 'module_path', description: '需要分析的模块/文件夹路径', type: 'path' }
+        ]
+    }
+};
+
+// 辅助函数：用于加载外部YAML文件
+async function loadPromptFile(workspaceRoot: vscode.Uri, fileName: string): Promise<string> {
+    const promptUri = vscode.Uri.joinPath(workspaceRoot, '.codewiki', fileName);
+    try {
+        const fileContent = await vscode.workspace.fs.readFile(promptUri);
+        return Buffer.from(fileContent).toString('utf-8');
+    } catch (e) {
+        throw new Error(`无法加载提示词文件: ${fileName}。请确保它存在于 '.codewiki' 目录中。`);
+    }
+}
+
+
+/**
+ * AgentService 是UI层（如Commands, Webviews）与后台Agent执行逻辑之间的唯一接口。
+ * 它负责组装Agent运行所需的一切，并启动它们。
+ */
+export class AgentService {
+    private toolRegistry: ToolRegistry;
+    
+    constructor(private llmService: LLMService) {
+        this.toolRegistry = new ToolRegistry(this.llmService);
+    }
+    
+    public async initialize(defaultModelConfig: ModelConfig): Promise<void> {
+        await this.toolRegistry.initialize(defaultModelConfig);
+        console.log("AgentService initialized successfully.");
+    }
+
+    public async prepareAndRunAgent(
+        agentId: string,
+        userInput: string,
+        modelConfig: ModelConfig,
+        logger: AgentLogger
+    ) {
+        const runId = uuidv4();
+        const agentPlan = AGENT_DEFINITIONS[agentId];
+        if (!agentPlan) {
+            const errorMsg = `Agent with ID "${agentId}" not found.`;
+            logger.onAgentEnd({ runId, status: 'failed', error: errorMsg });
+            return;
+        }
+        
+        // TODO: 解析 userInput 并填充 agentPlan.parameters
+        
+        logger.onPlanGenerated(agentPlan);
+        
+        const context: AgentContext = {
+            logger,
+            llmService: this.llmService,
+            toolRegistry: this.toolRegistry,
+            modelConfig,
+        };
+        
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri;
+        if (!workspaceRoot) {
+            logger.onAgentEnd({ runId, status: 'failed', error: 'No workspace folder open.' });
+            return;
+        }
+
+        try {
+            switch (agentId) {
+                case 'docgen-project':
+                    const projPrompts = {
+                        plannerPrompt: await loadPromptFile(workspaceRoot, 'project_planner.yml'),
+                        directAnalysisPrompt: await loadPromptFile(workspaceRoot, 'module_analysis_direct.yml'),
+                        mapReduceAnalysisPrompt: await loadPromptFile(workspaceRoot, 'module_analysis_mapreduce.yml'),
+                        synthesisPrompt: await loadPromptFile(workspaceRoot, 'project_synthesis.yml'),
+                    };
+                    const orchestrator = new ProjectDocumentationOrchestrator(context, projPrompts);
+                    // 修正：传入 runId
+                    await orchestrator.run(runId);
+                    break;
+                
+                case 'docgen-module-direct':
+                    const directPromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_direct.yml');
+                    // 修正：准备 userInputs
+                    const directInputs = { module_path: agentPlan.parameters.find(p => p.name === 'module_path')?.value || '' };
+                    const toolchainExecutor = new ToolChainExecutor(context);
+                    // 修正：传入 runId, yaml, 和 userInputs
+                    const directResult = await toolchainExecutor.run(runId, directPromptYaml, directInputs);
+                    logger.onAgentEnd({ runId, status: 'completed', finalOutput: directResult });
+                    break;
+
+                case 'docgen-module-mapreduce':
+                    const mapreducePromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_mapreduce.yml');
+                    // 修正：准备 userInputs
+                    const mapreduceInputs = { module_path: agentPlan.parameters.find(p => p.name === 'module_path')?.value || '' };
+                    const mapReduceExecutor = new MapReduceExecutor(context);
+                    // 修正：传入 runId, yaml, 和 userInputs
+                    const mapreduceResult = await mapReduceExecutor.run(runId, mapreducePromptYaml, mapreduceInputs);
+                    logger.onAgentEnd({ runId, status: 'completed', finalOutput: mapreduceResult });
+                    break;
+
+                default:
+                    logger.onAgentEnd({ runId, status: 'failed', error: `Execution for agent "${agentId}" is not yet implemented.` });
+            }
+        } catch (error: any) {
+            logger.onAgentEnd({ runId, status: 'failed', error: error.message });
+        }
+    }
+
+    public async runProjectDocumentation(modelConfig: ModelConfig) {
+        const logger = new VscodeOutputChannelLogger("CodeWiki Project Documentation");
+        await this.prepareAndRunAgent('docgen-project', '', modelConfig, logger);
+    }
+    
+    public async runActionFromWebview(
+        yamlContent: string, 
+        userInputs: Record<string, any>, 
+        modelConfig: ModelConfig,
+        webview: vscode.Webview
+    ) {
+        const logger = new WebviewLogger(webview);
+        const context: AgentContext = {
+            logger,
+            llmService: this.llmService,
+            toolRegistry: this.toolRegistry,
+            modelConfig
+        };
+        const runId = uuidv4();
+
+        try {
+            const executor = new ToolChainExecutor(context);
+            // 修正：传入 runId, yaml, 和 userInputs
+            const result = await executor.run(runId, yamlContent, userInputs);
+            logger.onAgentEnd({ runId, status: 'completed', finalOutput: result });
+
+        } catch (error: any) {
+            if (!(error as any).__logged) {
+                logger.onAgentEnd({ runId, status: 'failed', error: error.message });
+            }
+        }
+    }
+}
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/services/LLMService.ts ---
 // src/extension/LLMService.ts
 
 import vscode from 'vscode';
-import { ChatMessage, ModelConfig } from '../common/types';
+import { ChatMessage, ModelConfig } from '../../common/types';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, AIMessage, BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -821,1131 +2057,270 @@ export class LLMService {
 
 --------------------------------------------------------------------------------
 
---- file_path: extension/StateManager.ts ---
-import * as vscode from 'vscode';
-import { Conversation, ModelConfig, Prompt } from '../common/types';
+--- file_path: extension/services/ToolRegistry.ts ---
+// src/extension/services/ToolRegistry.ts (完整文件)
 
-const CONVERSATIONS_KEY = 'codewiki_conversations';
-const PROMPTS_KEY = 'codewiki_prompts';
-const MODEL_CONFIGS_KEY = 'codewiki_model_configs';
-
-/**
- * Manages the state of the extension, persisting data in VS Code's global state.
- * This class acts as the single source of truth for all persistent data.
- */
-export class StateManager {
-    constructor(private readonly globalState: vscode.Memento) {}
-
-    //== Conversation Management ==//
-
-    public async getConversations(): Promise<Conversation[]> {
-        return this.globalState.get<Conversation[]>(CONVERSATIONS_KEY, []);
-    }
-
-    public async saveConversation(conversation: Conversation): Promise<void> {
-        const conversations = await this.getConversations();
-        const index = conversations.findIndex(c => c.id === conversation.id);
-        if (index !== -1) {
-            conversations[index] = conversation;
-        } else {
-            conversations.push(conversation);
-        }
-        await this.globalState.update(CONVERSATIONS_KEY, conversations);
-    }
-
-    public async deleteConversation(id: string): Promise<void> {
-        const conversations = await this.getConversations();
-        const filteredConversations = conversations.filter(c => c.id !== id);
-        await this.globalState.update(CONVERSATIONS_KEY, filteredConversations);
-    }
-
-    //== Prompt Management ==//
-
-    public async getPrompts(): Promise<Prompt[]> {
-        return this.globalState.get<Prompt[]>(PROMPTS_KEY, []);
-    }
-
-    public async savePrompt(prompt: Prompt): Promise<void> {
-        const prompts = await this.getPrompts();
-        const index = prompts.findIndex(p => p.id === prompt.id);
-        if (index !== -1) {
-            prompts[index] = prompt;
-        } else {
-            prompts.push(prompt);
-        }
-        await this.globalState.update(PROMPTS_KEY, prompts);
-    }
-
-    public async deletePrompt(id: string): Promise<void> {
-        const prompts = await this.getPrompts();
-        const filteredPrompts = prompts.filter(p => p.id !== id);
-        await this.globalState.update(PROMPTS_KEY, filteredPrompts);
-    }
-
-    //== Model Config Management ==//
-
-   public async getModelConfigs(): Promise<ModelConfig[]> {
-        // 直接从 globalState 获取配置，如果不存在，则返回一个空数组。
-        return this.globalState.get<ModelConfig[]>(MODEL_CONFIGS_KEY, []);
-    }
-
-    public async saveModelConfigs(configs: ModelConfig[]): Promise<void> {
-        // Ensure only one model is default
-        let defaultFound = false;
-        configs.forEach(config => {
-            if (config.isDefault) {
-                if (defaultFound) {
-                    config.isDefault = false; // Unset other defaults
-                } else {
-                    defaultFound = true;
-                }
-            }
-        });
-
-        // If no default is set, make the first one default
-        if (!defaultFound && configs.length > 0) {
-            configs[0].isDefault = true;
-        }
-
-        await this.globalState.update(MODEL_CONFIGS_KEY, configs);
-    }
-}
-
-
---------------------------------------------------------------------------------
-
---- file_path: extension/agentOrchestrator.ts ---
-// src/extension/agentOrchestrator.ts
-
-import * as vscode from 'vscode';
-import * as path from 'path';
-import * as yaml from 'js-yaml';
-import { get_encoding, Tiktoken } from 'tiktoken';
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { ModelConfig } from '../common/types';
-import { LLMService } from './LLMService'; // 导入 LLMService
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-
-// 定义我们新的YAML格式
-interface MapReducePrompt {
-    title?: string;
-    description?: string;
-    input_variables: { name: string; description: string; type: string; default?: string }[];
-    map_prompt_template: { system: string; human: string };
-    reduce_prompt_template: { system: string; human: string };
-    max_tokens_per_batch?: number;
-}
-
-// 定义一个临时数据结构来处理文件
-interface FileData {
-    path: string;
-    content: string;
-    tokenCount: number;
-}
-
-// 递归获取所有文件路径的辅助函数
-async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
-    let files: vscode.Uri[] = [];
-    const entries = await vscode.workspace.fs.readDirectory(dirUri);
-
-    for (const [name, type] of entries) {
-        const entryUri = vscode.Uri.joinPath(dirUri, name);
-        if (type === vscode.FileType.File) {
-            if (!name.startsWith('.') && !['node_modules', 'dist', 'out'].some(part => entryUri.path.includes(`/${part}/`))) {
-                files.push(entryUri);
-            }
-        } else if (type === vscode.FileType.Directory) {
-            if (!name.startsWith('.') && !['node_modules', 'dist', 'out'].includes(name)) {
-                files = files.concat(await getAllFilePaths(entryUri));
-            }
-        }
-    }
-    return files;
-}
-
-// 核心执行函数
-export async function runMapReduceAgent(
-    yamlContent: string,
-    userInputs: Record<string, string>,
-    modelConfig: ModelConfig,
-    outputChannel: vscode.OutputChannel,
-    llmService: LLMService // 接收 LLMService 实例
-): Promise<string> {
-    return new Promise(async (resolve, reject) => {
-        let tokenizer: Tiktoken | null = null;
-        try {
-            // 1. 解析和验证 YAML
-            outputChannel.appendLine("[STEP 1/6] Parsing Action Prompt YAML...");
-            const actionPrompt = yaml.load(yamlContent) as MapReducePrompt;
-            if (!actionPrompt.map_prompt_template || !actionPrompt.reduce_prompt_template) {
-                throw new Error("Invalid Map-Reduce YAML. Missing 'map_prompt_template' or 'reduce_prompt_template'.");
-            }
-
-            // 2. 收集和处理文件
-            outputChannel.appendLine("\n[STEP 2/6] Gathering and tokenizing files...");
-            const modulePath = userInputs['module_path'];
-            if (!modulePath) {
-                throw new Error("Missing required input 'module_path'.");
-            }
-
-            const workspaceFolders = vscode.workspace.workspaceFolders;
-            if (!workspaceFolders) throw new Error("No workspace folder open.");
-            const workspaceRoot = workspaceFolders[0].uri;
-            const absoluteModulePath = vscode.Uri.joinPath(workspaceRoot, modulePath);
-
-            const fileUris = await getAllFilePaths(absoluteModulePath);
-            tokenizer = get_encoding("cl100k_base"); // gpt-4, gpt-3.5
-
-            const fileDataPromises = fileUris.map(async (uri): Promise<FileData> => {
-                if (!tokenizer) {
-                    throw new Error("Tokenizer was not initialized correctly.");
-                }
-                const contentBytes = await vscode.workspace.fs.readFile(uri);
-                const content = Buffer.from(contentBytes).toString('utf-8');
-                return {
-                    path: path.relative(workspaceRoot.fsPath, uri.fsPath).replace(/\\/g, '/'),
-                    content,
-                    tokenCount: tokenizer.encode(content).length,
-                };
-            });
-
-            const allFiles = await Promise.all(fileDataPromises);
-            outputChannel.appendLine(` -> Found ${allFiles.length} files in '${modulePath}'.`);
-
-            // 3. 文件批处理
-            outputChannel.appendLine("\n[STEP 3/6] Creating file batches based on token limit...");
-            const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || 12000;
-            const batches: FileData[][] = [];
-            let currentBatch: FileData[] = [];
-            let currentBatchTokens = 0;
-
-            for (const file of allFiles) {
-                if (file.tokenCount > MAX_TOKENS_PER_BATCH) {
-                    outputChannel.appendLine(`[WARN] Skipping file '${file.path}' as its token count (${file.tokenCount}) exceeds the batch limit.`);
-                    continue;
-                }
-                if (currentBatchTokens + file.tokenCount > MAX_TOKENS_PER_BATCH) {
-                    batches.push(currentBatch);
-                    currentBatch = [];
-                    currentBatchTokens = 0;
-                }
-                currentBatch.push(file);
-                currentBatchTokens += file.tokenCount;
-            }
-            if (currentBatch.length > 0) {
-                batches.push(currentBatch);
-            }
-            outputChannel.appendLine(` -> Created ${batches.length} batches.`);
-
-            // 4. MAP 阶段：循环处理每个批次
-            outputChannel.appendLine("\n[STEP 4/6] Starting MAP phase: Scheduling all batches for analysis...");
-
-            // 使用 LLMService 创建模型实例
-            outputChannel.appendLine(`[INFO] Creating LLM instances...`);
-            const llm: BaseChatModel = await llmService.createModel({
-                modelConfig,
-                temperature: 0.1,
-                streaming: false,
-            });
-            const reduceLlm: BaseChatModel = await llmService.createModel({
-                modelConfig,
-                temperature: 0.5,
-                streaming: false,
-            });
-
-
-            const mapAnalysisPromises: Promise<string>[] = [];
-            for (let i = 0; i < batches.length; i++) {
-                const batch = batches[i];
-                
-                // 为每个批次创建一个异步处理函数
-                const processBatch = async (): Promise<string> => {
-                    outputChannel.appendLine(` -> [MAP] Starting analysis for Batch ${i + 1} of ${batches.length} (${batch.length} files)...`);
-
-                    const batchContent = batch
-                        .map(file => `--- START OF FILE: ${file.path} ---\n${file.content}\n--- END OF FILE ---`)
-                        .join('\n\n');
-
-                    const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
-                    const mapMessages = [
-                        new SystemMessage(actionPrompt.map_prompt_template.system),
-                        new HumanMessage(humanPrompt),
-                    ];
-
-                    const response = await llmService.scheduleLlmCall(() => llm.invoke(mapMessages));
-                    outputChannel.appendLine(` -> [MAP] Finished analysis for Batch ${i + 1}.`);
-                    return response.content as string;
-                };
-
-                // 启动任务并将其Promise添加到数组中
-                mapAnalysisPromises.push(processBatch());
-                
-            }
-
-            outputChannel.appendLine(" -> [MAP] All batch analysis requests sent. Waiting for all to complete...");
-            const mapResults = await Promise.all(mapAnalysisPromises);
-            const combinedMarkdownSummaries = mapResults.join("\n\n");
-            outputChannel.appendLine(" -> [MAP] All batches analyzed successfully.");
-
-
-            // 5. REDUCE 阶段：合成最终文档
-            outputChannel.appendLine("\n[STEP 5/6] Starting REDUCE phase: Synthesizing final document...");
-
-            // 注入变量到 Template
-            let humanReducePrompt = actionPrompt.reduce_prompt_template.human;
-            for (const key in userInputs) {
-                humanReducePrompt = humanReducePrompt.replace(new RegExp(`\\{${key}\\}`, 'g'), userInputs[key]);
-            }
-            humanReducePrompt = humanReducePrompt.replace('{combined_markdown_summaries}', combinedMarkdownSummaries);
-
-            const reduceMessages = [
-                new SystemMessage(actionPrompt.reduce_prompt_template.system),
-                new HumanMessage(humanReducePrompt),
-            ];
-
-            outputChannel.appendLine("\n--- [FINAL DOCUMENT] ---");
-            outputChannel.appendLine("\n--- NOT Steamming ---");
-
-            const finalResponse = await llmService.scheduleLlmCall(() => reduceLlm.invoke(reduceMessages));
-            const fullResponse = finalResponse.content as string;
-
-            outputChannel.appendLine("\n--- [END OF DOCUMENT] ---");
-
-            // 6. 保存结果
-            outputChannel.appendLine("\n[STEP 6/6] Saving result to output file...");
-            const outputDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki', 'output');
-            await vscode.workspace.fs.createDirectory(outputDir);
-
-            const promptTitle = actionPrompt.title?.replace(/[^a-z0-9]/gi, '_').toLowerCase() || 'map_reduce_agent';
-            const outputFileName = `${promptTitle}-result-${Date.now()}.md`;
-            const outputFilePath = vscode.Uri.joinPath(outputDir, outputFileName);
-
-            let res = combinedMarkdownSummaries;
-            res += "=================================="
-            res += fullResponse
-            await vscode.workspace.fs.writeFile(outputFilePath, Buffer.from(res, 'utf8'));
-            outputChannel.appendLine(`\n[SUCCESS] Agent run finished. Result saved to: ${outputFilePath.fsPath}`);
-            vscode.window.showInformationMessage(`Agent run successful. Output saved to .codewiki/output/`);
-            resolve(fullResponse);
-
-        } catch (error: any) {
-            const finalError = `[FATAL] Agent execution failed: ${error.message}\n${error.stack}`;
-            outputChannel.appendLine(`\n--- [ERROR] ---\n${finalError}`);
-            vscode.window.showErrorMessage(error.message);
-        } finally {
-            tokenizer?.free(); // 释放 wasm 内存
-        }
-    });
-}
-
---------------------------------------------------------------------------------
-
---- file_path: extension/agentRunner.ts ---
-// src/extension/agentRunner.ts
-
-import * as yaml from 'js-yaml';
 import { StructuredTool } from '@langchain/core/tools';
-import { CustomAgentExecutor, ToolChainStep, LlmPromptTemplate, AgentExecutorCallbacks } from './agents/CustomAgentExecutor';
-import { ModelConfig } from '../common/types';
+import { ModelConfig } from '../../common/types';
+import { GetFileSummariesTool, GetFilesContentByListTool, GetAllFilesContentTool, GetDirectoryTreeTool } from '../tools/fileSystemTools';
+import { createFileSelectorLLMTool } from '../tools/llmTools';
 import { LLMService } from './LLMService';
 
-interface RunActionPromptOptions {
-    yamlContent: string;
-    userInputs: Record<string, string>;
-    modelConfig: ModelConfig;
-    tools: StructuredTool[];
-    callbacks: AgentExecutorCallbacks;
-    llmService: LLMService; // 新增：传入 LLMService 实例
-}
-
 /**
- * 负责执行一个 Action Prompt 的核心逻辑。
- * 此函数被设计为可重用的，可以被 VS Code 命令或 Webview 消息处理器调用。
- * @param options - 包含执行所需所有参数的对象。
+ * 负责在扩展启动时初始化所有工具，并按需提供。
+ * 这是一个集中管理工具的单例服务。
  */
-export async function runActionPrompt(options: RunActionPromptOptions): Promise<string> {
-    return new Promise(async (resolve, reject) => {
-        const { yamlContent, userInputs, modelConfig, tools, callbacks, llmService } = options;
-        
-        try {
-            const actionPrompt = yaml.load(yamlContent) as {
-                tool_chain: ToolChainStep[];
-                llm_prompt_template: LlmPromptTemplate;
-            };
+export class ToolRegistry {
+    private tools = new Map<string, StructuredTool>();
 
-            if (!actionPrompt.tool_chain || !actionPrompt.llm_prompt_template) {
-                throw new Error("Invalid Action Prompt YAML format. Missing 'tool_chain' or 'llm_prompt_template'.");
-            }
+    constructor(private llmService: LLMService) {}
 
-            // 使用 LLMService 创建最终的 LLM 实例
-            const finalLlm = await llmService.createModel({
-                modelConfig,
-                streaming: true,
-                temperature: 0.7,
-            });
+    /**
+     * 初始化所有工具，特别是那些需要LLM实例的工具。
+     * @param defaultModelConfig 用于创建工具内部LLM的默认模型配置。
+     */
+    public async initialize(defaultModelConfig: ModelConfig): Promise<void> {
+        // 为工具创建一个专用的、非流式的LLM实例
+        const toolLlm = await this.llmService.createModel({
+            modelConfig: defaultModelConfig,
+            temperature: 0.1,
+            streaming: false,
+        });
 
-            // 增强 callbacks 以支持 Promise 解析
-            const enhancedCallbacks: AgentExecutorCallbacks = {
-                ...callbacks,
-                onLlmEnd: (result) => {
-                    callbacks.onLlmEnd?.(result);
-                    resolve(result); // 当LLM结束时，用最终结果解析Promise
-                },
-                onError: (err) => {
-                    callbacks.onError?.(err);
-                    reject(err); // 当出错时，拒绝Promise
-                }
-            };
+        const allTools: StructuredTool[] = [
+            new GetFileSummariesTool(),
+            new GetFilesContentByListTool(),
+            new GetAllFilesContentTool(),
+            new GetDirectoryTreeTool(),
+            createFileSelectorLLMTool(toolLlm, this.llmService),
+        ];
 
-            const agentExecutor = new CustomAgentExecutor(tools, finalLlm);
-
-            // 启动 Agent Executor，但不再需要 await 它，因为 Promise 会处理完成状态
-            agentExecutor.run(
-                actionPrompt.tool_chain,
-                userInputs,
-                actionPrompt.llm_prompt_template,
-                enhancedCallbacks
-            );
-
-        } catch (error: any) {
-            const err = error instanceof Error ? error : new Error(String(error));
-            callbacks.onError?.(err);
-            reject(err); // 捕获同步错误
+        for (const tool of allTools) {
+            this.tools.set(tool.name, tool);
         }
-    });
-}
-
---------------------------------------------------------------------------------
-
---- file_path: extension/agents/CustomAgentExecutor.ts ---
-// src/extension/agents/CustomAgentExecutor.ts (完整文件)
-
-import { BaseLanguageModel } from '@langchain/core/language_models/base';
-import { StructuredTool } from '@langchain/core/tools';
-import { ChatPromptTemplate } from '@langchain/core/prompts';
-import { AIMessage, BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { StringOutputParser } from '@langchain/core/output_parsers';
-
-// ... (接口定义保持不变) ...
-export interface ToolChainStep {
-    tool: string;
-    input: string | Record<string, any>;
-    output_variable: string;
-}
-export interface LlmPromptTemplate {
-    system: string;
-    human: string;
-}
-export interface AgentExecutorCallbacks {
-    onToolStart?: (toolName: string, input: any) => void;
-    onToolEnd?: (toolName:string, output: string) => void;
-    onLlmStart?: (finalSystemPrompt: string, finalHumanPrompt: string) => void; // 我们可以给 onLlmStart 添加参数
-    onLlmStream?: (chunk: string) => void;
-    onLlmEnd?: (finalResult: string) => void; // 增加 finalResult 参数
-    onError?: (error: Error) => void;
-}
-
-
-export class CustomAgentExecutor {
-    private tools: Map<string, StructuredTool>;
-    private finalLlm: BaseLanguageModel;
-
-    constructor(tools: StructuredTool[], finalLlm: BaseLanguageModel) {
-        this.tools = new Map(tools.map(tool => [tool.name, tool]));
-        this.finalLlm = finalLlm;
-    }
-
-    public async run(
-        tool_chain: ToolChainStep[],
-        initialInputs: Record<string, string>,
-        llm_prompt_template: LlmPromptTemplate,
-        callbacks: AgentExecutorCallbacks
-    ): Promise<void> {
-        const context: Record<string, any> = { ...initialInputs };
-        
-        // --- 日志: 打印初始上下文 ---
-        console.log("--- [Agent Start] ---");
-        console.log("Initial Context:", JSON.stringify(context, null, 2));
-        console.log("----------------------");
-
-        try {
-            for (const step of tool_chain) {
-                const tool = this.tools.get(step.tool);
-                if (!tool) {
-                    throw new Error(`Tool "${step.tool}" not found.`);
-                }
-                
-                // --- 日志: 打印将要执行的工具和它的输入模板 ---
-                console.log(`\n--- [Tool Start] Executing: ${step.tool} ---`);
-                console.log("Input Template:", JSON.stringify(step.input, null, 2));
-
-                const toolInput = this.resolveInput(step.input, context);
-
-                // --- 日志: 打印解析后的、实际传递给工具的输入 ---
-                console.log("Resolved Input:", JSON.stringify(toolInput, null, 2));
-                
-                callbacks.onToolStart?.(tool.name, toolInput);
-
-                const toolOutputString = await tool.call(toolInput);
-                
-                const toolOutputParsed = this.parseToolOutput(toolOutputString);
-                context[step.output_variable] = toolOutputParsed;
-
-                // --- 日志: 打印工具的原始输出和解析后的输出 ---
-                const outputSummary = toolOutputString.length > 500 ? `${toolOutputString.substring(0, 500)}...` : toolOutputString;
-                console.log("Tool Raw Output (truncated):", outputSummary);
-                if (typeof toolOutputParsed !== 'string') {
-                    console.log(`Parsed Output (variable "${step.output_variable}"):`, toolOutputParsed);
-                }
-                console.log(`--- [Tool End] Finished: ${step.tool} ---\n`);
-
-                callbacks.onToolEnd?.(tool.name, outputSummary);
-            }
-            
-            // --- 日志: 打印工具链执行完毕后的最终上下文 ---
-            console.log("--- [Final LLM Start] ---");
-            // 注意：不直接打印整个 context，因为 selected_files_content 可能非常大
-            const contextKeys = Object.keys(context);
-            console.log("Final Context Keys:", contextKeys);
-            if(context.selected_files_list) {
-                console.log("Final Context 'selected_files_list':", context.selected_files_list);
-            }
-            console.log("LLM Prompt Template:", llm_prompt_template);
-            
-            // highlight-start
-            // ======== 准备并打印最终的 Prompt ========
-            const systemMessageContent = this.resolveInput(llm_prompt_template.system, context) as string;
-            const humanMessageContent = this.resolveInput(llm_prompt_template.human, context) as string;
-            
-            // 打印到调试控制台
-            const finalHumanPromptSummary = humanMessageContent.length > 1000 ? `${humanMessageContent.substring(0, 1000)}... (truncated)` : humanMessageContent;
-            console.log("--- Final Prompt to LLM ---");
-            console.log("[SYSTEM]\n", systemMessageContent);
-            console.log("\n[HUMAN] (truncated)\n", finalHumanPromptSummary);
-            console.log("----------------------------");
-
-            // 通过回调函数将最终 Prompt 发送到 OutputChannel
-            // (这里的 onLlmStart 现在接收两个参数)
-            callbacks.onLlmStart?.(systemMessageContent, humanMessageContent);
-            // ======== 结束打印 ========
-            // highlight-end
-
-            const finalPrompt = ChatPromptTemplate.fromMessages([
-                new SystemMessage(systemMessageContent),
-                new HumanMessage(humanMessageContent)
-            ]);
-
-            const finalChain = finalPrompt.pipe(this.finalLlm).pipe(new StringOutputParser());
-
-            const stream = await finalChain.stream({});
-            let fullReply = '';
-            for await (const chunk of stream) {
-                fullReply += chunk;
-                callbacks.onLlmStream?.(chunk);
-            }
-            callbacks.onLlmEnd?.(fullReply); // 传递完整结果
-
-
-        } catch (error: any) {
-            console.error("Error in CustomAgentExecutor:", error);
-            callbacks.onError?.(error instanceof Error ? error : new Error(String(error)));
-        }
+        console.log("ToolRegistry initialized with tools:", Array.from(this.tools.keys()));
     }
 
     /**
-     * 解析工具的输入，用上下文中的值替换 {placeholder}。
-     * @param inputTemplate - 来自 tool_chain 的输入定义。
-     * @param context - 当前的执行上下文。
-     * @returns 解析后的输入，准备传递给工具。
+     * 根据名称获取单个工具。
+     * @param name 工具的名称。
+     * @returns 返回工具实例，如果找不到则返回undefined。
      */
-    private resolveInput(inputTemplate: string | Record<string, any>, context: Record<string, any>): any {
-        if (typeof inputTemplate === 'string') {
-            const match = inputTemplate.match(/^\{(\w+)\}$/);
-            // 关键修正: 检查占位符是否是模板字符串的唯一内容
-            // 如果是，并且上下文中的值不是字符串，则直接返回该值（如数组）
-            if (match && context[match[1]] !== undefined) {
-                return context[match[1]];
-            }
-            
-            // 否则，执行常规的字符串替换 (所有值都会被转为字符串)
-            return inputTemplate.replace(/\{(\w+)\}/g, (m, key) => {
-                return context[key] !== undefined ? String(context[key]) : m;
-            });
-        }
-        
-        // 递归处理对象
-        const resolvedObject: Record<string, any> = {};
-        for (const key in inputTemplate) {
-            const value = inputTemplate[key];
-            resolvedObject[key] = this.resolveInput(value, context);
-        }
-        return resolvedObject;
-    }
-
-    private parseToolOutput(outputString: string): any {
-        try {
-            if ((outputString.startsWith('[') && outputString.endsWith(']')) || (outputString.startsWith('{') && outputString.endsWith('}'))) {
-                return JSON.parse(outputString);
-            }
-        } catch (e) {
-            // 解析失败，不是有效的JSON，返回原始字符串
-        }
-        return outputString;
-    }
-}
-
---------------------------------------------------------------------------------
-
---- file_path: extension/agents/ProjectDocumentationAgent.ts ---
-// src/extension/agents/ProjectDocumentationAgent.ts
-
-import * as vscode from 'vscode';
-import * as path from 'path';
-import * as yaml from 'js-yaml';
-import { ModelConfig } from '../../common/types';
-import { BaseMessage, HumanMessage } from '@langchain/core/messages';
-import { get_encoding, Tiktoken } from 'tiktoken';
-import { GetDirectoryTreeTool, GetAllFilesContentTool } from '../tools/fileSystemTools';
-import { runMapReduceAgent } from '../agentOrchestrator';
-import { runActionPrompt } from '../agentRunner';
-import { createFileSelectorLLMTool } from '../tools/llmTools';
-import { StructuredTool } from '@langchain/core/tools';
-import { AgentExecutorCallbacks } from './CustomAgentExecutor';
-import { LLMService } from '../LLMService'; // 导入 LLMService
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-
-// 定义规划阶段的输出结构
-interface PlannerOutput {
-    projectName: string;
-    language: string; // e.g., 'typescript'
-    modules: { name: string; path: string; description: string; }[];
-}
-
-// 用于加载和解析外部YAML文件的辅助函数
-async function loadPromptFile(workspaceRoot: vscode.Uri, fileName: string): Promise<string> {
-    const promptUri = vscode.Uri.joinPath(workspaceRoot, '.codewiki', fileName);
-    try {
-        const fileContent = await vscode.workspace.fs.readFile(promptUri);
-        return Buffer.from(fileContent).toString('utf-8');
-    } catch (e) {
-        throw new Error(`无法加载提示词文件: ${fileName}。请确保它存在于 '.codewiki' 目录中。`);
-    }
-}
-
-
-export class ProjectDocumentationAgent {
-    private outputChannel: vscode.OutputChannel;
-    private modelConfig: ModelConfig;
-    private llmService: LLMService; // 使用 LLMService
-    private tokenizer: Tiktoken;
-    private readonly MAX_TOKENS_FOR_DIRECT_ANALYSIS = 32000;
-    private tools: StructuredTool[] = [];
-
-    constructor(outputChannel: vscode.OutputChannel, modelConfig: ModelConfig, llmService: LLMService) {
-        this.outputChannel = outputChannel;
-        this.modelConfig = modelConfig;
-        this.llmService = llmService; // 存储 LLMService 实例
-        this.tokenizer = get_encoding("cl100k_base");
-    }
-
-    private async initialize() {
-        // 如果工具已初始化，则跳过
-        if (this.tools.length > 0) return;
-
-        // 异步创建用于工具的 LLM
-        const toolLlm = await this.llmService.createModel({
-            modelConfig: this.modelConfig,
-            temperature: 0.1,
-            streaming: false
-        });
-        
-        this.tools = [
-            new GetDirectoryTreeTool(),
-            new GetAllFilesContentTool(),
-            createFileSelectorLLMTool(toolLlm, this.llmService)
-        ];
-    }
-
-    private log(message: string) {
-        this.outputChannel.appendLine(message);
+    public getTool(name: string): StructuredTool | undefined {
+        return this.tools.get(name);
     }
     
-    private async invokeLlmAndLog(
-        messages: BaseMessage[], 
-        logFileBaseName: string, 
-        runDirUri: vscode.Uri,
-        temperature: number = 0.1 // 允许指定温度
-    ): Promise<string> {
-        const requestContent = messages.map(m => `[${m._getType()}]\n${m.content}`).join('\n\n---\n\n');
-        const requestPath = vscode.Uri.joinPath(runDirUri, `${logFileBaseName}_request.txt`);
-        await vscode.workspace.fs.writeFile(requestPath, Buffer.from(requestContent, 'utf8'));
-
-        // 使用 LLMService 创建一个具有特定配置的、非流式的 LLM
-        const nonStreamingLlm = await this.llmService.createModel({
-            modelConfig: this.modelConfig,
-            streaming: false,
-            temperature,
-        });
-
-        const response = await this.llmService.scheduleLlmCall(() => nonStreamingLlm.invoke(messages));
-        const responseContent = response.content.toString();
-
-        const responsePath = vscode.Uri.joinPath(runDirUri, `${logFileBaseName}_response.txt`);
-        await vscode.workspace.fs.writeFile(responsePath, Buffer.from(responseContent, 'utf8'));
-        
-        return responseContent;
-    }
-    
-    public async run() {
-        this.log("--- [启动] 项目文档生成智能体 ---");
-        const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri;
-        if (!workspaceRoot) {
-            throw new Error("请先打开一个工作区文件夹。");
-        }
-        
-        // 在运行开始时进行异步初始化
-        await this.initialize();
-
-        const runId = `doc-gen_${this.modelConfig.modelId.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().replace(/[:.]/g, '-')}`;
-        const runDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki', 'runs', runId);
-        await vscode.workspace.fs.createDirectory(runDir);
-        this.log(`[信息] 本次运行的结果将保存在: ${runDir.fsPath}`);
-
-        try {
-            this.log("\n--- [阶段 0/4] 加载外部提示词... ---");
-            const plannerPromptContent = await loadPromptFile(workspaceRoot, 'project_planner.yml');
-            const plannerPromptTemplate = (yaml.load(plannerPromptContent) as any).llm_prompt_template.human;
-            this.log("[成功] 已加载规划器提示词。");
-
-            this.log("\n--- [阶段 1/4] 规划: 分析项目结构... ---");
-            const plan = await this.runPlanningPhase(workspaceRoot, runDir, plannerPromptTemplate);
-            const planPath = vscode.Uri.joinPath(runDir, 'plan.json');
-            await vscode.workspace.fs.writeFile(planPath, Buffer.from(JSON.stringify(plan, null, 2), 'utf8'));
-            this.log(`[成功] 规划完成。规划文件已保存至 plan.json。`);
-
-            this.log("\n--- [阶段 2/4] 执行: 并行分析独立模块 (带延迟)... ---");
-            const moduleAnalysisPromises: Promise<{ name: string; path: string; content: string; }>[] = [];
-
-            for (const [index, module] of plan.modules.entries()) {
-                const analyzeSingleModule = async (): Promise<{ name: string; path: string; content: string; }> => {
-                    this.log(`\n[模块 ${index + 1}/${plan.modules.length}] 开始分析 '${module.name}' (路径: '${module.path}')...`);
-                    const moduleDocContent = await this.analyzeModule(workspaceRoot, module, plan.language, runDir);
-                    
-                    const moduleDocPath = vscode.Uri.joinPath(runDir, `module_${module.name.replace(/[\s\/]/g, '_')}.md`);
-                    await vscode.workspace.fs.writeFile(moduleDocPath, Buffer.from(moduleDocContent, 'utf8'));
-
-                    this.log(`[成功] 模块 '${module.name}' 分析完成，文档已保存。`);
-                    return { ...module, content: moduleDocContent };
-                };
-                moduleAnalysisPromises.push(analyzeSingleModule());
-            }
-
-            this.log(`\n[信息] 所有 ${plan.modules.length} 个模块的分析任务已提交到队列，正在等待全部完成...`);
-            const moduleDocs = await Promise.all(moduleAnalysisPromises);
-            this.log(`\n[成功] 所有模块均已分析完毕。`);
-
-            this.log("\n--- [阶段 3/4] 综合: 生成最终文档... ---");
-            const synthesisPromptContent = await loadPromptFile(workspaceRoot, 'project_synthesis.yml');
-            const synthesisPromptTemplate = (yaml.load(synthesisPromptContent) as any).llm_prompt_template.human;
-            
-            const finalDoc = await this.runSynthesisPhase(plan, moduleDocs, runDir, synthesisPromptTemplate);
-            const finalDocPath = vscode.Uri.joinPath(runDir, '项目总体设计文档.md');
-            await vscode.workspace.fs.writeFile(finalDocPath, Buffer.from(finalDoc, 'utf8'));
-            
-            this.log(`\n--- [完成] ---`);
-            this.log(`项目文档已成功生成！`);
-            vscode.window.showInformationMessage(`文档已保存至: ${finalDocPath.fsPath}`, '打开文件').then(selection => {
-                if (selection === '打开文件') {
-                    vscode.window.showTextDocument(finalDocPath);
-                }
-            });
-
-        } catch (error: any) {
-            const errorMessage = `[致命错误] 智能体执行失败: ${error.message}\n${error.stack}`;
-            this.log(errorMessage);
-            vscode.window.showErrorMessage(error.message);
-        } finally {
-             this.tokenizer.free();
-        }
-    }
-
-    private async runPlanningPhase(workspaceRoot: vscode.Uri, runDir: vscode.Uri, promptTemplate: string): Promise<PlannerOutput> {
-        const treeTool = new GetDirectoryTreeTool();
-        this.log("[规划] 正在生成文件树...");
-        const fileTree = await treeTool.call({ path: '.', language: 'unknown' });
-        
-        this.log("[规划] 正在调用大模型进行规划...");
-        const prompt = promptTemplate.replace('{file_tree}', fileTree);
-        const messages: BaseMessage[] = [new HumanMessage(prompt)];
-        
-        // 使用默认温度 (0.1)
-        const responseContent = await this.invokeLlmAndLog(messages, "01_planning", runDir);
-        
-        try {
-            const jsonString = responseContent.match(/\{[\s\S]*\}/)?.[0];
-            if (!jsonString) throw new Error("大模型未能返回有效的JSON规划。");
-            return JSON.parse(jsonString) as PlannerOutput;
-        } catch (e: any) {
-            throw new Error(`解析规划输出失败: ${e.message}。原始输出: ${responseContent}`);
-        }
-    }
-
-    private async analyzeModule(
-        workspaceRoot: vscode.Uri,
-        module: { name: string; path: string },
-        language: string,
-        runDir: vscode.Uri
-    ): Promise<string> {
-        const moduleRunDir = vscode.Uri.joinPath(runDir, `module_analysis_${module.path.replace(/[\/\\]/g, '_')}`);
-        await vscode.workspace.fs.createDirectory(moduleRunDir);
-
-        const contentTool = new GetAllFilesContentTool();
-        const allContent = await contentTool.call({ path: module.path, language });
-        const tokenCount = this.tokenizer.encode(allContent).length;
-        this.log(` -> 模块 '${module.name}' Token总数: ${tokenCount}`);
-        
-        let finalResult = '';
-        const callbacks: AgentExecutorCallbacks = {
-            onToolStart: (toolName, input) => this.log(`   [TOOL START] ${toolName}: ${JSON.stringify(input)}`),
-            onToolEnd: (toolName, output) => {
-                const summary = output.length > 300 ? `${output.substring(0, 300)}...` : output;
-            },
-            onLlmStart: (system, human) => {
-                this.log(`   [LLM START]`);
-                const requestContent = `[SYSTEM]\n${system}\n\n---\n\n[HUMAN]\n${human}`;
-                const requestPath = vscode.Uri.joinPath(moduleRunDir, `llm_request.txt`);
-                vscode.workspace.fs.writeFile(requestPath, Buffer.from(requestContent, 'utf8'));
-            },
-            onLlmStream: (chunk) => { /* 不在主channel刷屏 */ },
-            onLlmEnd: (result) => {
-                this.log(`   [LLM END]`);
-                const responsePath = vscode.Uri.joinPath(moduleRunDir, `llm_response.md`);
-                vscode.workspace.fs.writeFile(responsePath, Buffer.from(result, 'utf8'));
-            },
-            onError: (error) => {
-                this.log(`   [错误] 子流程执行失败: ${error.message}`);
-                finalResult = `模块分析失败: ${error.message}`;
-            }
-        };
-
-        if (tokenCount <= this.MAX_TOKENS_FOR_DIRECT_ANALYSIS) {
-            this.log(` -> Token数在限制内，使用直接分析流程 (runActionPrompt)...`);
-            const yamlContent = await loadPromptFile(workspaceRoot, 'module_analysis_direct.yml');
-            finalResult = await runActionPrompt({
-                yamlContent,
-                userInputs: { module_path: module.path, language },
-                modelConfig: this.modelConfig,
-                tools: this.tools,
-                callbacks,
-                llmService: this.llmService // 传入 LLMService
-            });
-        } else {
-            this.log(` -> Token数超出限制，使用Map-Reduce流程 (runMapReduceAgent)...`);
-            const yamlContent = await loadPromptFile(workspaceRoot, 'module_analysis_mapreduce.yml');
-            const mapReduceChannel: vscode.OutputChannel = {
-                ...this.outputChannel,
-                append: (value: string) => this.log(`   [MR] ${value}`),
-                appendLine: (value: string) => this.log(`   [MR] ${value}`),
-                clear: () => {},
-                replace: (value: string) => this.log(`   [MR] ${value}`),
-                name: "MapReduce-Proxy"
-            };
-            
-            finalResult = await runMapReduceAgent(
-                yamlContent, 
-                { module_path: module.path, language }, 
-                this.modelConfig, 
-                mapReduceChannel,
-                this.llmService // 传入 LLMService
-            );
-        }
-
-        return finalResult;
-    }
-
-    private async runSynthesisPhase(plan: PlannerOutput, moduleDocs: { name: string; content: string; }[], runDir: vscode.Uri, promptTemplate: string): Promise<string> {
-        const moduleOverviews = plan.modules.map(m => `- **${m.name} (${m.path})**: ${m.description}`).join('\n');
-        const detailedModuleDocs = moduleDocs.map((doc, index) => `
-### 3.3.${index + 1} ${doc.name} 模块详细设计
-${doc.content}
-`).join('\n---\n');
-
-        const prompt = promptTemplate
-            .replace('{projectName}', plan.projectName)
-            .replace('{language}', plan.language)
-            .replace('{module_overviews}', moduleOverviews)
-            .replace('{detailed_module_docs}', detailedModuleDocs);
-
-        this.log("[综合] 正在调用大模型生成最终文档...");
-        const messages: BaseMessage[] = [new HumanMessage(prompt)];
-
-        // 使用稍高的温度进行综合
-        return await this.invokeLlmAndLog(messages, "03_synthesis", runDir, 0.4);
+    /**
+     * 根据名称列表获取一组工具。
+     * @param names 工具名称的数组。
+     * @returns 返回工具实例的数组。
+     * @throws 如果有任何一个工具找不到，则抛出错误。
+     */
+    public getTools(names: string[]): StructuredTool[] {
+         return names.map(name => {
+             const tool = this.getTool(name);
+             if (!tool) {
+                 throw new Error(`Tool "${name}" not found in registry.`);
+             }
+             return tool;
+         });
     }
 }
 
 --------------------------------------------------------------------------------
 
---- file_path: extension/config/fileFilters.ts ---
-// src/extension/config/fileFilters.ts
-
-/**
- * Defines a language's file filtering rules.
- */
-export interface LanguageFilter {
-    // Included file extensions
-    include: string[];
-    // Specific files or patterns to explicitly exclude
-    exclude: string[];
-}
-
-/**
- * Generic exclusion list, applicable to all languages and projects.
- */
-export const GENERIC_EXCLUDE = [
-    'node_modules',
-    'dist',
-    'out',
-    'build',
-    'target', // Common for Java (Maven/Gradle)
-    'bin',
-    'vendor',
-    '.git',
-    '.svn',
-    '.hg',
-    '__pycache__',
-    '.vscode',
-    '.idea',
-    'package-lock.json',
-    'yarn.lock',
-    'pnpm-lock.yaml',
-    'go.sum',
-    '.DS_Store'
-];
-
-/**
- * Language-specific filtering rules.
- */
-export const languageFilters: Record<string, LanguageFilter> = {
-    typescript: {
-        include: ['.ts', '.tsx'],
-        exclude: ['.d.ts', '.spec.ts', '.test.ts'],
-    },
-    javascript: {
-        include: ['.js', '.jsx'],
-        exclude: ['.spec.js', '.test.js'],
-    },
-    python: {
-        include: ['.py'],
-        exclude: [],
-    },
-    go: {
-        include: ['.go'],
-        exclude: ['_test.go'],
-    },
-    // highlight-start
-    java: {
-        include: ['.java'],
-        // Java testing is typically directory-based (src/test/java),
-        // which is handled by module selection rather than file-level filtering.
-        exclude: [], 
-    },
-    c: {
-        // Headers (.h) are crucial for understanding interfaces and must be included.
-        include: ['.c', '.h'],
-        exclude: [],
-    },
-    cpp: { // Using 'cpp' as the key for C++
-        // C++ has various extensions for source and header files.
-        // Including the most common ones. Headers are critical.
-        include: ['.cpp', '.hpp', '.cc', '.cxx', '.h'],
-        exclude: [],
-    },
-    // highlight-end
-    unknown: { // Default rule when language isn't identified
-        include: [
-            '.ts', '.tsx', '.js', '.jsx', '.py', '.go', 
-            // highlight-start
-            '.java', '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', 
-            // highlight-end
-            '.cs', '.rb', '.php', '.rs'
-        ],
-        exclude: ['.spec.ts', '.test.ts', '.spec.js', '.test.js', '_test.go'],
-    }
-};
-
---------------------------------------------------------------------------------
-
---- file_path: extension/extension.ts ---
-// src/extension/extension.ts (完整文件)
+--- file_path: extension/services/logging.ts ---
+// src/extension/services/logging.ts (修改后完整文件)
 
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as yaml from 'js-yaml';
-import { CodeWikiViewProvider } from './CodeWikiViewProvider';
-import { StateManager } from './StateManager';
-import { runMapReduceAgent } from './agentOrchestrator';
-import { ProjectDocumentationAgent } from './agents/ProjectDocumentationAgent';
-import { LLMService } from './LLMService';
+import { AgentPlan, StepExecution, StepUpdate, StepResult, StreamChunk, AgentResult } from '../../common/types';
+import * as path from 'path'; // 引入 path 模块
 
+/**
+ * Agent 执行过程中的通用日志记录器接口。
+ * 这使得核心逻辑可以与具体的UI（如OutputChannel或Webview）解耦。
+ */
+export interface AgentLogger {
+    info(message: string): void;
+    warn(message:string): void;
+    error(message: string, error?: Error): void;
+    log(message: string): void; // 用于原始输出，如LLM的流式数据
+    logLine(message: string): void; // 新增：用于打印带换行的详细日志
+    show(preserveFocus?: boolean): void; // 可选，用于显示日志面板
 
-export function activate(context: vscode.ExtensionContext) {
-    const provider = new CodeWikiViewProvider(context.extensionUri, context);
-
-    context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider(CodeWikiViewProvider.viewType, provider)
-    );
-
-    // =========================================================================
-    // == 注册一个灵活的、可交互的 Agent 运行命令
-    // =========================================================================
-    const runAgentDisposable = vscode.commands.registerCommand('codewiki.runAgent', async () => {
-        const outputChannel = vscode.window.createOutputChannel("CodeWiki Agent Run");
-        outputChannel.show(true);
-        outputChannel.clear();
-        outputChannel.appendLine("--- [START] CodeWiki Agent Runner ---\n");
-
-        try {
-            // 1. 获取工作区和 .codewiki 目录
-            const workspaceFolders = vscode.workspace.workspaceFolders;
-            if (!workspaceFolders || workspaceFolders.length === 0) {
-                throw new Error("No workspace folder is open. Please open a project to run an agent.");
-            }
-            const workspaceRoot = workspaceFolders[0].uri;
-            const codewikiDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki');
-
-            // 2. 扫描 .codewiki 目录下的所有 .yml 或 .yaml 文件
-            let promptFiles: [string, vscode.FileType][] = [];
-            try {
-                promptFiles = await vscode.workspace.fs.readDirectory(codewikiDir);
-            } catch (e) {
-                throw new Error("The '.codewiki' directory was not found in your workspace root. Please create it and add your Action Prompt YAML files there.");
-            }
-
-            const ymlFiles = promptFiles
-                .filter(([name, type]) => type === vscode.FileType.File && (name.endsWith('.yml') || name.endsWith('.yaml')))
-                .map(([name, type]) => name);
-
-            if (ymlFiles.length === 0) {
-                throw new Error("No YAML (.yml, .yaml) prompt files found in the '.codewiki' directory.");
-            }
-
-            // 3. 使用 Quick Pick 让用户选择一个 Prompt
-            const selectedFileName = await vscode.window.showQuickPick(ymlFiles, {
-                placeHolder: 'Select an Action Prompt to run',
-                title: 'CodeWiki Agent Runner'
-            });
-
-            if (!selectedFileName) {
-                outputChannel.appendLine("[INFO] User cancelled the operation. Exiting.");
-                return; // 用户取消选择
-            }
-            outputChannel.appendLine(`[INFO] User selected prompt: ${selectedFileName}`);
-
-            // 4. 读取并解析选中的 YAML 文件
-            const promptUri = vscode.Uri.joinPath(codewikiDir, selectedFileName);
-            const fileContent = await vscode.workspace.fs.readFile(promptUri);
-            const yamlContent = Buffer.from(fileContent).toString('utf-8');
-            // 初步解析以获取元数据和判断类型
-            const actionPrompt = yaml.load(yamlContent) as any;
-            outputChannel.appendLine(`[INFO] Successfully loaded and parsed: ${actionPrompt.title || selectedFileName}`);
-            
-            // 5. 动态获取用户输入
-            const userInputs: Record<string, string> = {};
-            if (actionPrompt.input_variables && Array.isArray(actionPrompt.input_variables)) {
-                outputChannel.appendLine(`[INFO] Requesting user inputs...`);
-                for (const variable of actionPrompt.input_variables) {
-                    const value = await vscode.window.showInputBox({
-                        prompt: `Enter value for '${variable.name}'`,
-                        placeHolder: variable.description,
-                        value: variable.default || '',
-                        title: `Input for: ${actionPrompt.title || selectedFileName}`
-                    });
-
-                    if (value === undefined) {
-                        outputChannel.appendLine("[INFO] User cancelled input. Exiting.");
-                        return; // 用户取消输入
-                    }
-                    userInputs[variable.name] = value;
-                    outputChannel.appendLine(`  - Input '${variable.name}': ${value}`);
-                }
-            } else {
-                outputChannel.appendLine(`[INFO] No 'input_variables' defined in the prompt. Proceeding without user input.`);
-            }
-
-            outputChannel.appendLine(`\n--- Starting Agent Execution ---`);
-            
-            // 6. 获取模型配置并创建 LLMService 实例
-            const stateManager = new StateManager(context.globalState);
-            const modelConfigs = await stateManager.getModelConfigs();
-            const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
-            if (!defaultConfig) { throw new Error("No default model config found."); }
-            
-            const llmService = new LLMService(); // 创建服务实例
-
-            // =========================================================================
-            // == 核心修改：根据YAML内容选择不同的执行器
-            // =========================================================================
-            if (actionPrompt.map_prompt_template && actionPrompt.reduce_prompt_template) {
-                // 这是新的 Map-Reduce Agent
-                outputChannel.appendLine("[INFO] Detected Map-Reduce Agent type. Starting orchestrator...");
-                await runMapReduceAgent(yamlContent, userInputs, defaultConfig, outputChannel, llmService);
-
-            } else if (actionPrompt.tool_chain && actionPrompt.llm_prompt_template) {
-                // 这是旧的 Tool-Chain Agent
-                outputChannel.appendLine("[ERROR] Detected Tool-Chain Agent type.");
-                // 旧的 runActionPrompt 逻辑应该在这里被调用，但我们在此示例中将其标记为未实现
-                // 以便专注于新的 Map-Reduce 流程。
-                // await runActionPrompt({ yamlContent, userInputs, modelConfig: defaultConfig, tools, callbacks, llmService });
-                throw new Error("Standard Tool-Chain agent runner is not connected in this version. Please use a Map-Reduce prompt YAML file or trigger it from the webview.");
-            } else {
-                throw new Error("Unknown or invalid Action Prompt YAML format. It must contain either ('map_prompt_template' and 'reduce_prompt_template') or ('tool_chain' and 'llm_prompt_template').");
-            }
-
-        } catch (error: any) {
-            const finalError = `[FATAL] An unexpected error occurred: ${error.message}`;
-            outputChannel.appendLine(finalError);
-            vscode.window.showErrorMessage(finalError);
-        }
-    });
-
-    context.subscriptions.push(runAgentDisposable);
-
-    // =========================================================================
-    // == 新增：运行项目级文档生成器的命令
-    // =========================================================================
-    const generateProjectDocDisposable = vscode.commands.registerCommand('codewiki.generateProjectDocumentation', async () => {
-        const outputChannel = vscode.window.createOutputChannel("CodeWiki Project Documentation");
-        outputChannel.show(true);
-        outputChannel.clear();
-
-        try {
-            // 1. 获取模型配置
-            outputChannel.appendLine("[INFO] 开始生成项目文档...");
-            const stateManager = new StateManager(context.globalState);
-            const modelConfigs = await stateManager.getModelConfigs();
-            const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
-            
-            if (!defaultConfig) {
-                throw new Error("No default model configuration found. Please configure a model in the CodeWiki settings.");
-            }
-             outputChannel.appendLine(`[INFO] Using model: ${defaultConfig.name}`);
-
-            // 2. 创建 LLMService 和文档生成智能体
-            const llmService = new LLMService();
-            const docAgent = new ProjectDocumentationAgent(outputChannel, defaultConfig, llmService);
-            await docAgent.run();
-
-        } catch (error: any) {
-            const finalError = `[FATAL] An unexpected error occurred: ${error.message}`;
-            outputChannel.appendLine(finalError);
-            vscode.window.showErrorMessage(finalError);
-        }
-    });
-    context.subscriptions.push(generateProjectDocDisposable);
+    // --- 新增的结构化事件方法 ---
+    onPlanGenerated(plan: AgentPlan): void;
+    onStepStart(step: StepExecution): void;
+    onStepUpdate(update: StepUpdate): void;
+    onStepEnd(result: StepResult): void;
+    onStreamChunk(chunk: StreamChunk): void;
+    onAgentEnd(result: AgentResult): void;
 }
 
-export function deactivate() {}
+/**
+ * AgentLogger接口的一个实现，它将日志写入VS Code的Output Channel。
+ */
+export class VscodeOutputChannelLogger implements AgentLogger {
+    private readonly channel: vscode.OutputChannel;
+    private streamBuffer: { [key: string]: string } = {}; // 用于缓存流式数据
+
+    constructor(channelName: string) {
+        this.channel = vscode.window.createOutputChannel(channelName);
+    }
+
+    public info(message: string): void {
+        this.channel.appendLine(`[INFO] ${message}`);
+    }
+
+    public warn(message: string): void {
+        this.channel.appendLine(`[WARN] ${message}`);
+    }
+
+    public error(message: string, error?: Error): void {
+        this.channel.appendLine(`[ERROR] ${message}`);
+        if (error?.stack) {
+            this.channel.appendLine(error.stack);
+        }
+    }
+
+    public log(message: string): void {
+        // 对于原始日志，我们不添加前缀，直接追加
+        this.channel.append(message);
+    }
+    
+    public logLine(message: string): void {
+        this.channel.appendLine(message);
+    }
+
+    public show(preserveFocus: boolean = true): void {
+        this.channel.show(preserveFocus);
+    }
+
+     /**
+     * 新接口方法的优化实现
+     */
+    public onPlanGenerated(plan: AgentPlan): void {
+        this.channel.appendLine(`[PLAN] Agent "${plan.agentName}" is ready.`);
+        plan.steps.forEach((step, i) => {
+            this.channel.appendLine(`  [Step ${i+1}] ${step.name}: ${step.description}`);
+        });
+    }
+
+    public onStepStart(step: StepExecution): void {
+        const id = step.taskId ? `${step.stepName} (Task: ${step.taskId})` : step.stepName;
+        this.channel.appendLine(`\n--- [START] ${id} ---`);
+        // 初始化当前任务的流式缓存
+        if (step.taskId) {
+            this.streamBuffer[step.taskId] = '';
+        }
+    }
+    
+    /**
+     * 核心修改：对 onStepUpdate 的内容进行审查和简化
+     */
+    public onStepUpdate(update: StepUpdate): void {
+        if (update.type === 'output') {
+            // 检查元数据中是否包含文件路径信息
+            if (update.metadata?.type === 'file' && typeof update.metadata.path === 'string') {
+                // 如果是文件输出，只打印文件名
+                const fileName = path.basename(update.metadata.path);
+                this.channel.appendLine(`[OUTPUT] Generated file: ${fileName}`);
+            } else {
+                // 对于其他输出，提取内容并进行长度限制
+                let outputStr = '';
+                if (typeof update.data === 'object' && update.data !== null && 'content' in update.data) {
+                    outputStr = String(update.data.content);
+                } else {
+                    outputStr = typeof update.data === 'string' ? update.data : JSON.stringify(update.data);
+                }
+                
+                // // 如果内容过长，只打印摘要信息，否则打印完整内容
+                // const MAX_LENGTH = 150;
+                // if (outputStr.length > MAX_LENGTH) {
+                //     this.channel.appendLine(`[OUTPUT] ${outputStr.substring(0, MAX_LENGTH)}... (Content too long)`);
+                // } else {
+                //     this.channel.appendLine(`[OUTPUT] ${outputStr}`);
+                // }
+            }
+        }
+        // 其他类型的 update (input, llm-request) 将被忽略，不打印
+    }
+    
+    /**
+     * 核心修改：onStepEnd 不再打印流式缓存，因为 onStreamChunk 已被禁用
+     */
+    public onStepEnd(result: StepResult): void {
+        const id = result.taskId ? `${result.status.toUpperCase()} (Task: ${result.taskId})` : result.status.toUpperCase();
+        
+        // 如果失败，打印错误信息
+        if (result.status === 'failed' && result.error) {
+            this.channel.appendLine(`[ERROR] ${result.error}`);
+        }
+        
+        this.channel.appendLine(`--- [${id}] ---`);
+        // 不再需要处理 streamBuffer
+    }
+
+    /**
+     * 核心修改：onStreamChunk 完全禁用，不执行任何操作
+     */
+    public onStreamChunk(chunk: StreamChunk): void {
+        // Do nothing. We don't want to log stream chunks to the output channel.
+    }
+
+    public onAgentEnd(result: AgentResult): void {
+        this.channel.appendLine(`\n====== [AGENT ${result.status.toUpperCase()}] ======`);
+        if(result.error) {
+            this.error("Agent failed", new Error(result.error));
+        }
+    }
+}
+
+/**
+ * AgentLogger接口的一个实现，它将日志通过postMessage发送到Webview。
+ */
+export class WebviewLogger implements AgentLogger {
+    constructor(private webview: vscode.Webview) {}
+
+    info(message: string): void {
+        // 只发送简洁的状态更新
+        this.webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'info', message }});
+    }
+
+    warn(message: string): void {
+        this.webview.postMessage({ command: 'agentStatusUpdate', payload: { status: 'warn', message }});
+    }
+
+    error(message: string, error?: Error): void {
+        const errorMessage = error ? `${message}: ${error.message}` : message;
+        this.webview.postMessage({ command: 'requestFailed', payload: { error: errorMessage }});
+    }
+
+    log(message: string): void {
+        // 流式数据有专门的命令
+        this.webview.postMessage({ command: 'streamData', payload: message });
+    }
+
+    logLine(message: string): void {
+        // 对于Webview，一行详细日志可以被视为一个'info'状态
+        this.info(message);
+    }
+
+    show(preserveFocus?: boolean | undefined): void {
+        // Webview 默认就是可见的，此方法可以为空
+    }
+
+    // --- 添加新方法的空实现 (TODO for Phase 3) ---
+    public onPlanGenerated(plan: AgentPlan): void { /* TODO in Phase 3 */ }
+    public onStepStart(step: StepExecution): void { /* TODO in Phase 3 */ }
+    public onStepUpdate(update: StepUpdate): void { /* TODO in Phase 3 */ }
+    public onStepEnd(result: StepResult): void { /* TODO in Phase 3 */ }
+    public onStreamChunk(chunk: StreamChunk): void { 
+        // 可以提前实现这个，因为它与现有逻辑相似
+        this.webview.postMessage({ command: 'agent:streamChunk', payload: chunk });
+    }
+    public onAgentEnd(result: AgentResult): void { /* TODO in Phase 3 */ }
+}
 
 --------------------------------------------------------------------------------
 
@@ -2300,7 +2675,7 @@ import { StructuredTool } from '@langchain/core/tools';
 import { BaseLanguageModel } from '@langchain/core/language_models/base';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import { StringOutputParser } from '@langchain/core/output_parsers';
-import { LLMService } from '../LLMService'; // 导入 LLMService
+import { LLMService } from '../services/LLMService'; // 导入 LLMService
 
 // 这是 FileSelectorLLMTool 内部使用的 Prompt 模板
 const SELECTION_PROMPT = `You are an expert software engineer assistant. Your task is to analyze a list of file summaries and select the most relevant files based on a user's task description.
@@ -2409,6 +2784,62 @@ export function createFileSelectorLLMTool(llm: BaseLanguageModel, llmService: LL
 
 --- file_path: test/suite/index.ts ---
 
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/components/AtCommandMenu.ts ---
+// webview/components/AtCommandMenu.ts
+export class AtCommandMenu {
+    private element: HTMLElement;
+    private commands = [
+        { id: 'project-documentation', name: '项目级文档生成' },
+        { id: 'module-direct', name: '模块级文档(直接分析)' },
+        { id: 'module-map-reduce', name: '模块级文档(摘要总结)' },
+    ];
+
+    constructor(private parent: HTMLElement) {
+        this.element = document.createElement('div');
+        this.element.className = 'at-command-menu';
+        this.element.style.display = 'none';
+        this.parent.appendChild(this.element);
+    }
+
+    show(x: number, y: number, filter: string, onSelect: (command: any) => void) {
+        const filtered = this.commands.filter(c => c.name.toLowerCase().includes(filter.toLowerCase()));
+        if(filtered.length === 0) {
+            this.hide();
+            return;
+        }
+
+        this.element.innerHTML = `
+            <ul>
+                ${filtered.map(c => `<li data-id="${c.id}">${c.name}</li>`).join('')}
+            </ul>
+        `;
+        
+        this.element.style.left = `${x}px`;
+        this.element.style.top = `${y}px`;
+        this.element.style.transform = 'translateY(-100%)';
+        this.element.style.display = 'block';
+
+        this.element.querySelectorAll('li').forEach(li => {
+            li.addEventListener('click', () => {
+                const command = this.commands.find(c => c.id === li.dataset.id);
+                if(command) onSelect(command);
+            });
+        });
+    }
+
+    hide() {
+        this.element.style.display = 'none';
+    }
+
+    // highlight-start
+    public isVisible(): boolean {
+        return this.element.style.display !== 'none';
+    }
+    // highlight-end
+}
 
 --------------------------------------------------------------------------------
 

@@ -1,12 +1,13 @@
-// src/extension/agents/executors/MapReduceExecutor.ts (修改后完整文件)
-
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { get_encoding, Tiktoken } from 'tiktoken';
+import { v4 as uuidv4 } from 'uuid'; // 修正: 添加 import
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { AgentContext } from '../AgentContext';
+import { StringOutputParser } from '@langchain/core/output_parsers'; // 修正: 添加 import
 
+// 接口定义
 interface MapReducePrompt {
     title?: string;
     description?: string;
@@ -22,6 +23,7 @@ interface FileData {
     tokenCount: number;
 }
 
+// 辅助函数
 async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
     let files: vscode.Uri[] = [];
     const entries = await vscode.workspace.fs.readDirectory(dirUri);
@@ -40,127 +42,113 @@ async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
     return files;
 }
 
-
 export class MapReduceExecutor {
     constructor(private readonly context: AgentContext) {}
 
-    public async run(yamlContent: string, userInputs: Record<string, any>): Promise<string> {
+    public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<string> {
         const { logger, llmService, modelConfig, runDir } = this.context;
         let tokenizer: Tiktoken | null = null;
         
         try {
-            logger.info("[STEP 1/5] Parsing Map-Reduce YAML...");
-            const actionPrompt = yaml.load(yamlContent) as MapReducePrompt;
+            const prepTaskId = uuidv4(); // 修正：确保 uuidv4 已 import
+            const prepStepName = "解析与准备";
+            logger.onStepStart({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'running' });
             
-            logger.info("\n[STEP 2/5] Gathering and tokenizing files...");
+            const actionPrompt = yaml.load(yamlContent) as MapReducePrompt;
             const modulePath = userInputs['module_path'];
             const workspaceFolders = vscode.workspace.workspaceFolders;
-            if (!workspaceFolders) throw new Error("No workspace folder open.");
+            if (!workspaceFolders) throw new Error("未打开工作区文件夹。");
+            
             const workspaceRoot = workspaceFolders[0].uri;
             const absoluteModulePath = vscode.Uri.joinPath(workspaceRoot, modulePath);
             const fileUris = await getAllFilePaths(absoluteModulePath);
             tokenizer = get_encoding("cl100k_base");
             
-            // ================================================================
-            // ==================== 错误修正处 ====================
-            // ================================================================
             const fileDataPromises = fileUris.map(async (uri): Promise<FileData> => {
-                if (!tokenizer) {
-                    throw new Error("Tokenizer was not initialized correctly.");
-                }
+                if (!tokenizer) throw new Error("Tokenizer not initialized.");
                 const contentBytes = await vscode.workspace.fs.readFile(uri);
                 const content = Buffer.from(contentBytes).toString('utf-8');
-                return {
-                    path: path.relative(workspaceRoot.fsPath, uri.fsPath).replace(/\\/g, '/'),
-                    content,
-                    tokenCount: tokenizer.encode(content).length,
-                };
+                return { path: path.relative(workspaceRoot.fsPath, uri.fsPath).replace(/\\/g, '/'), content, tokenCount: tokenizer.encode(content).length };
             });
-            // ================================================================
-            // ================================================================
-
             const allFiles = await Promise.all(fileDataPromises);
-            logger.info(` -> Found ${allFiles.length} files in '${modulePath}'.`);
+            logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "文件列表", content: `找到 ${allFiles.length} 个文件。` } });
 
-            logger.info("\n[STEP 3/5] Creating file batches...");
             const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || 12000;
             const batches: FileData[][] = [];
             let currentBatch: FileData[] = [];
             let currentBatchTokens = 0;
             for (const file of allFiles) {
-                if (file.tokenCount > MAX_TOKENS_PER_BATCH) {
-                    logger.warn(`[WARN] Skipping file '${file.path}' as its token count (${file.tokenCount}) exceeds the batch limit.`);
-                    continue;
-                }
-                if (currentBatchTokens + file.tokenCount > MAX_TOKENS_PER_BATCH) {
-                    batches.push(currentBatch);
-                    currentBatch = [];
-                    currentBatchTokens = 0;
-                }
+                if (file.tokenCount > MAX_TOKENS_PER_BATCH) { continue; }
+                if (currentBatchTokens + file.tokenCount > MAX_TOKENS_PER_BATCH) { batches.push(currentBatch); currentBatch = []; currentBatchTokens = 0; }
                 currentBatch.push(file);
                 currentBatchTokens += file.tokenCount;
             }
-            if (currentBatch.length > 0) {
-                batches.push(currentBatch);
-            }
-            logger.info(` -> Created ${batches.length} batches.`);
+            if (currentBatch.length > 0) { batches.push(currentBatch); }
+            logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "批次信息", content: `创建了 ${batches.length} 个批次。` } });
+            logger.onStepEnd({ runId, taskId: prepTaskId, status: 'completed' }); // 修正：移除 stepName
 
+            const mapStepName = "Map阶段: 并行分析";
+            logger.onStepStart({ runId, stepName: mapStepName, status: 'running' });
 
-            logger.info("\n[STEP 4/5] Starting MAP phase...");
             const llm = await llmService.createModel({ modelConfig, temperature: 0.1, streaming: false });
             const mapAnalysisPromises = batches.map(async (batch, i) => {
-                logger.info(` -> [MAP] Starting analysis for Batch ${i + 1}/${batches.length}...`);
-                const batchContent = batch.map(file => `--- START OF FILE: ${file.path} ---\n${file.content}\n--- END OF FILE ---`).join('\n\n');
-                const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
-                const mapMessages = [new SystemMessage(actionPrompt.map_prompt_template.system), new HumanMessage(humanPrompt)];
+                const mapTaskId = uuidv4(); // 修正：确保 uuidv4 已 import
+                const mapTaskName = `分析批次 ${i + 1}/${batches.length}`;
+                logger.onStepStart({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'running' });
                 
-                if (runDir) {
-                    const requestPath = vscode.Uri.joinPath(runDir, `map_${i + 1}_request.txt`);
-                    await vscode.workspace.fs.writeFile(requestPath, Buffer.from(humanPrompt, 'utf8'));
-                }
-                
-                const response = await llmService.scheduleLlmCall(() => llm.invoke(mapMessages));
-                const responseContent = response.content as string;
-                
-                if (runDir) {
-                    const responsePath = vscode.Uri.joinPath(runDir, `map_${i + 1}_response.md`);
-                    await vscode.workspace.fs.writeFile(responsePath, Buffer.from(responseContent, 'utf8'));
-                }
+                try {
+                    const batchContent = batch.map(f => `--- FILE: ${f.path} ---\n${f.content}`).join('\n\n');
+                    const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
+                    logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'llm-request', data: { system: actionPrompt.map_prompt_template.system, human: humanPrompt } });
+                    
+                    const response = await llmService.scheduleLlmCall(() => llm.invoke([new SystemMessage(actionPrompt.map_prompt_template.system), new HumanMessage(humanPrompt)]));
+                    const responseContent = response.content as string;
 
-                logger.info(` -> [MAP] Finished analysis for Batch ${i + 1}.`);
-                return responseContent;
+                    logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'output', data: { name: "批次摘要", content: responseContent } });
+                    logger.onStepEnd({ runId, taskId: mapTaskId, status: 'completed' }); // 修正
+                    return responseContent;
+                } catch (e: any) {
+                    logger.onStepEnd({ runId, taskId: mapTaskId, status: 'failed', error: e.message }); // 修正
+                    throw e;
+                }
             });
             const mapResults = await Promise.all(mapAnalysisPromises);
-            const combinedMarkdownSummaries = mapResults.join("\n\n");
-            logger.info(" -> [MAP] All batches analyzed successfully.");
+            logger.onStepEnd({ runId, status: 'completed' }); // 修正：聚合步骤的结束
 
-            logger.info("\n[STEP 5/5] Starting REDUCE phase...");
-            const reduceLlm = await llmService.createModel({ modelConfig, temperature: 0.5, streaming: false });
+            const reduceTaskId = uuidv4(); // 修正：确保 uuidv4 已 import
+            const reduceStepName = "Reduce阶段: 综合摘要";
+            logger.onStepStart({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'running' });
+
+            const combinedMarkdownSummaries = mapResults.join("\n\n");
+            logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'input', data: { name: "所有摘要", content: combinedMarkdownSummaries } });
+            
+            const reduceLlm = await llmService.createModel({ modelConfig, temperature: 0.5, streaming: true });
             let humanReducePrompt = actionPrompt.reduce_prompt_template.human;
             for (const key in userInputs) {
                 humanReducePrompt = humanReducePrompt.replace(new RegExp(`\\{${key}\\}`, 'g'), userInputs[key]);
             }
             humanReducePrompt = humanReducePrompt.replace('{combined_markdown_summaries}', combinedMarkdownSummaries);
             
-            if (runDir) {
-                const requestPath = vscode.Uri.joinPath(runDir, `llm_request.txt`);
-                await vscode.workspace.fs.writeFile(requestPath, Buffer.from(humanReducePrompt, 'utf8'));
+            logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'llm-request', data: { system: actionPrompt.reduce_prompt_template.system, human: humanReducePrompt } });
+
+            const reduceChain = reduceLlm.pipe(new StringOutputParser()); // 修正: 确保已 import
+            const stream = await reduceChain.stream([ new SystemMessage(actionPrompt.reduce_prompt_template.system), new HumanMessage(humanReducePrompt) ]);
+
+            let finalContent = '';
+            for await (const chunk of stream) {
+                const chunkContent = chunk as string; // 修正: 类型断言
+                finalContent += chunkContent;
+                logger.onStreamChunk({ runId, taskId: reduceTaskId, content: chunkContent });
             }
 
-            const reduceMessages = [new SystemMessage(actionPrompt.reduce_prompt_template.system), new HumanMessage(humanReducePrompt)];
-            const finalResponse = await llmService.scheduleLlmCall(() => reduceLlm.invoke(reduceMessages));
-            const finalContent = finalResponse.content as string;
-
-            if (runDir) {
-                const responsePath = vscode.Uri.joinPath(runDir, `llm_response.md`);
-                await vscode.workspace.fs.writeFile(responsePath, Buffer.from(finalContent, 'utf8'));
-            }
-
+            logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'output', data: { name: "最终文档", content: finalContent }, metadata: { type: 'markdown' } });
+            logger.onStepEnd({ runId, taskId: reduceTaskId, status: 'completed' }); // 修正
+            
             return finalContent;
 
         } catch (error: any) {
-            logger.error("Map-Reduce execution failed", error);
-            throw error;
+            const err = error instanceof Error ? error : new Error(String(error));
+            throw err;
         } finally {
             if (tokenizer) {
                 tokenizer.free();

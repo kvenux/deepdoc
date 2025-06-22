@@ -132,147 +132,312 @@ CodeWiki的Agent系统采用了严格的**分层和解耦**设计，旨在将**�
 9、点击start开始执行，执行过程要有很强的交互，不能让用户空等，即主要是运行过程就要表现地很卖力，最好让用户知道你当前在干啥，在等啥输入
 10、执行过程也要分阶段展示，当前阶段的任务是什么，输入是什么，输出是什么；输入要卡片展示；给大模型的request要单独卡片展示，支持可展开，大模型的回复也要卡片展示，支持可展开；输出要卡片展示，如果输出是markdown文档，要在卡片里显示临时文件名markdown，比如项目级文档生成过程中，每个模块的md文档就要卡片单独显示；比如当前子任务已完成，就显示md卡片，点击md卡片，编辑区跳转到对应md文档的临时文档
 11、由于当前已经并行化，每个并行化的任务都要刷新状态，默认是折叠态、可以展开，比如大模型回复区，需要流式显示当前的回复；
+12、保留原先从从命令CodeWiki: Generate Project Documentation入口，保留传统的命令入口的output方式，用户调试
 
 基于以上需求，进行需求级的实现设计，输出需求实现设计文档，重点阐述UI\UX设计的需求澄清、功能设计、实现手段
 
 
-好的，这是一个针对您提出的新需求的实现设计文档。文档将重点阐述UI/UX设计、功能设计，并提出具体的技术实现方案。
+好的，这是一份基于您提出的新需求的实现设计文档。
 
 ---
 
-## Agent 通用对话式交互：需求实现设计文档
+## **CodeWiki Agent 通用聊天交互需求实现设计文档**
 
 ### 1. 需求澄清与 UI/UX 设计
 
-本次的核心目标是将 Agent 的执行过程从一个黑盒（如后台输出通道）转变为一个在聊天界面中实时、可交互、高度可视化的“白盒”。用户不仅能触发 Agent，还能清晰地看到其思考和执行的每一步。
+本次需求的核心是将强大的 Agent 能力从后台命令迁移到用户更熟悉、交互性更强的聊天界面中。设计的关键在于如何在一个线性的聊天流中，清晰地展示和控制一个复杂的、非线性的、多步骤的 Agent 执行过程。
 
-#### 1.1. 交互触发：`@`命令菜单
+#### 1.1. 交互流程总览
 
--   **需求**: 输入`@`符号，弹出选项窗口。
--   **UI/UX 设计**:
-    -   当用户在聊天输入框中输入`@`时，立即在光标位置上方弹出一个浮层菜单（类似 GitHub 或 Slack 的用户提及）。
-    -   菜单分为两级：
-        1.  **第一级（大类）**: "文档生成" (未来可扩展为 "代码重构", "测试用例生成" 等)。
-        2.  **第二级（子命令）**: "项目级文档", "模块级文档 (直接分析)", "模块级文档 (摘要总结)"。
-    -   用户可以通过键盘上下键和回车，或鼠标点击来选择。
-    -   选择后，`@命令` 会以一个特殊的“胶囊”（Pill）形式出现在输入框中，例如：`[@文档生成: 项目级]`，后面跟随用户的自然语言描述，如：“帮我分析一下这个项目的主要功能”。
+用户与 Agent 的交互被划分为三个 distinct 阶段：
 
-    
+1.  **触发与规划 (Trigger & Planning)**: 用户通过 `@` 符号发起意图，系统展示一个可视化的执行计划，并确认必要参数。
+2.  **实时执行 (Live Execution)**: 用户点击“开始”后，计划视图转变为一个动态更新的执行日志视图，实时反馈每一步的进展。
+3.  **完成或取消 (Completion / Cancellation)**: Agent 执行完毕，展示最终产物；或用户中途取消，视图收起，保留最初的触发记录。
 
-#### 1.2. Agent 过程展示：两大核心UI块
+#### 1.2. UI/UX 细节设计
 
-为了将 Agent 的“配置阶段”和“执行阶段”清晰分开，我们引入两个新的聊天消息块类型。
+**A. 触发机制：`@` 命令菜单**
 
-**A. Agent 调用块 (Agent Invocation Block)**
+*   **交互**: 在聊天输入框中输入 `@` 符号。
+*   **UI**: 立即在输入框上方弹出一个浮动菜单。
+    *   菜单分层级，第一层为大类，如 `文档生成`。
+    *   鼠标悬停或点击 `文档生成`，会展开第二层菜单，显示三个具体的 Agent 选项：
+        *   `项目级文档生成`
+        *   `模块级文档 (直接分析)`
+        *   `模块级文档 (摘要总结)`
+*   **选定后**: 用户选择一个 Agent 后，该命令（如 `@项目级文档生成`）会作为一个“Pill”（胶囊）插入到输入框。用户可以在后面继续输入自然语言描述，如：`@项目级文档生成 为我的这个电商后端项目写个文档`。
 
--   **用途**: 当用户按下回车确认`@`命令后，在聊天窗口中出现此块。它是一个**交互式配置面板**，用于展示 Agent 的工作流并收集必要的参数。
--   **UI/UX 设计**:
-    -   这是一个大型卡片，包含清晰的标题，如“**即将运行: 项目文档生成 Agent**”。
-    -   **工作流预览区**:
-        -   将 Agent 的主要执行阶段（如“规划”、“分析”、“综合”）显示为垂直排列的、带有编号的大型步骤卡片。
-        -   每个步骤卡片内，简要描述该步骤的目标。
-        -   如果步骤使用提示词，会显示一个**可点击的 YML 提示词卡片** (例如 `planner.yml`)。点击后，会向扩展发消息，在新的编辑器标签页中打开对应的 `.codewiki/*.yml` 文件，允许用户查看甚至**临时修改**。
-    -   **参数区**:
-        -   根据 Agent 的需求清单，显示需要用户提供的参数输入框（例如“模块路径”）。
-        -   Agent 会尝试从用户的初始输入（`@命令`后面的文字）中**自动填充**这些参数。
-        -   如果路径不存在或格式错误，输入框会高亮显示错误信息，并提示用户修改。
-    -   **操作区**:
-        -   如果所有必需参数都已满足，显示 **`[Start]`** 和 **`[Cancel]`** 按钮。
-        -   如果还有参数缺失，`[Start]` 按钮会是禁用状态。
-    -   **取消**: 点击 `[Cancel]` 或此块右上角的关闭按钮，整个“调用块”将从聊天记录中移除，只留下用户最初输入的那行 `@命令` 文本。
+**B. 新增核心UI组件：`AgentRunBlock`**
 
-    
+这不再是一个简单的消息块，而是一个存在于聊天流中的、具有内部状态和复杂渲染逻辑的**“智能小程序”**。它将承载“规划”和“执行”两个阶段的视图。
 
-**B. Agent 执行块 (Agent Execution Block)**
+**C. 阶段一：Agent 规划视图 (The "Planning" View)**
 
--   **用途**: 用户点击 `[Start]` 后，“调用块”会转变为“执行块”。这是一个**实时日志和结果展示面板**。
--   **UI/UX 设计**:
-    -   整体卡片标题变为“**正在运行: 项目文档生成 Agent**”，并带有一个旋转的加载图标。
-    -   **阶段式可折叠视图**:
-        -   执行过程按“规划”、“分析”、“综合”等阶段划分，每个阶段都是一个**默认折叠**的卡片。
-        -   当前正在执行的阶段会自动展开，并显示绿色“正在运行”状态。已完成的阶段显示灰色“已完成”状态。
-    -   **步骤细节展示**:
-        -   在展开的阶段卡片内，每一步操作都以子卡片的形式实时追加。
-        -   **并行任务**: 对于 Map-Reduce 的并行分析，会有一个“并行任务”容器，内部为每个批次（Batch）显示一行状态，如 `[Batch 1/5: ✔️ 完成]`, `[Batch 2/5: ⚙️ 分析中...]`, `[Batch 3/5: 🕒 等待中]...`。每一行都可以展开查看该批次的详细执行日志。
-        -   **LLM 调用**: 对大模型的请求和响应会用专门的卡片展示。
-            -   **Request 卡片**: 标题为 `[Request to LLM]`，默认折叠，可展开查看完整的 System 和 Human Prompt。
-            -   **Response 卡片**: 标题为 `[Response from LLM]`，内容区域会**流式显示**LLM返回的文本。
-        -   **文件输出**: 当 Agent 生成一个中间文件（如模块分析的 Markdown），会显示一个**文件卡片**，如 `[📄 module_services.md]`。点击此卡片，会向扩展发消息，在新的编辑器标签页中打开这个位于 `.codewiki/runs/...` 目录下的临时文件。
-    -   **最终产出**: 整个流程结束后，卡片顶部状态变为“**✔️ 执行完成**”，并在底部显示最终的产出文件卡片（如 `[📄 项目总体设计文档.md]`）。
+当用户按下回车发送 `@` 命令后，一个新的 `AgentRunBlock` 会被创建并显示在聊天界面中，初始状态为“规划中”。
 
-    
+*   **整体布局**: 一个带有特殊边框和背景色的大卡片，以区别于普通聊天消息。
+*   **顶部标题**: "Agent 准备就绪: [Agent 名称]"。
+*   **工作流展示区**:
+    *   将 Agent 的执行流程分解为多个**步骤卡片 (Step Card)**，垂直排列。
+    *   每个步骤卡片包含：
+        *   **步骤编号和标题**: 例如 `[步骤 1/3] 规划：分析项目结构`。
+        *   **描述**: 简要说明该步骤的目标。
+        *   **提示词卡片 (Prompt Card)**: 如果该步骤使用了一个或多个 `.yml` 提示词，则将它们显示为小型的、类似标签的卡片。
+            *   **UI**: 显示文件名，如 `project_planner.yml`，并带有一个小铅笔图标。
+            *   **交互**: 点击该卡片，会向扩展后端发送一个消息，要求在新的编辑器标签页中打开对应的 `.yml` 文件，允许用户在执行前查看和修改。
 
-### 2. 功能设计
+*   **参数确认区 (Parameter Section)**:
+    *   **自动解析**: 后端会尝试用 LLM 从用户的初始输入中解析出所需参数（如模块路径）。
+    *   **UI 展示**:
+        *   如果参数已满足（如路径 `src/api` 存在），则显示为：`模块路径: [src/api]` (已验证 ✔️)。
+        *   如果需要参数但用户未提供，则显示一个输入框：`模块路径: [___________] (必需)`。
+        *   如果解析出的参数不合法（如路径不存在），则显示错误信息和输入框：`模块路径: [src/non-existent] (路径不存在 ❌，请重新输入)`。
+    *   系统会在此阶段与用户交互，直到所有必需参数都合法为止。
 
-#### 2.1. Agent 定义与清单 (Manifest)
+*   **控制按钮**:
+    *   在视图底部，始终显示两个按钮：**`[▶️ 开始执行]`** 和 **`[⏹️ 取消]`**。
+    *   `开始执行` 按钮在所有参数验证通过前为禁用状态。
 
--   为了让前端能够动态渲染“调用块”，我们需要为每个 Agent 定义一个“清单”文件（例如 `project_doc_agent.manifest.json`）。
--   此清单将包含：
-    -   `id`: `project-documentation`
-    -   `displayName`: "项目级文档生成"
-    -   `description`: "自动分析整个项目结构，生成高级设计文档..."
-    -   `parameters`: [ { `name`: "user_goal", `type`: "string", `required`: true, `description`: "用户的目标描述" } ] // 项目级Agent可能只需要自然语言
-    -   `workflow`: [
-            { `phase`: "规划", `description`: "分析项目结构，制定分析计划。", `prompt`: "project_planner.yml" },
-            { `phase`: "模块分析", `description`: "根据计划，并行分析各模块。", `prompt`: ["module_analysis_direct.yml", "module_analysis_mapreduce.yml"] },
-            { `phase`: "综合", `description`: "汇总所有分析结果，生成最终文档。", `prompt`: "project_synthesis.yml" }
-        ]
+**D. 阶段二：Agent 实时执行视图 (The "Live Execution" View)**
 
-#### 2.2. 完整的端到端流程
+用户点击 `开始执行` 后，同一个 `AgentRunBlock` 的内容会**完全替换**为“实时执行”视图。
 
-1.  **触发**: 用户输入`@`，前端显示`@`命令菜单，用户选择`项目级文档`，输入“`@文档生成: 项目级` 帮我分析一下认证和授权模块的功能”，然后回车。
-2.  **调用**:
-    -   前端 Webview 将 `{ command: 'agent:invoke', payload: { agentId: 'project-documentation', text: '帮我分析一下...' } }` 发送给扩展。
-    -   `AgentService` 接收到消息，加载对应的 `manifest.json`。
-    -   `AgentService` 使用一个轻量级的LLM调用，尝试从用户输入文本中提取 `user_goal` 参数。
-    -   `AgentService` 将 Agent 清单和已提取的参数发回给 Webview。
-    -   Webview 渲染出“**Agent 调用块**”，并自动填入参数。
-3.  **配置与启动**:
-    -   用户在“调用块”中确认或修改参数。
-    -   用户点击 `[Start]` 按钮。
-    -   Webview 发送 `{ command: 'agent:start', payload: { agentId: 'project-documentation', params: { ... } } }`。
-4.  **执行与反馈**:
-    -   `AgentService` 实例化 `ProjectDocumentationOrchestrator`。
-    -   **核心改造**: `Orchestrator` 和 `Executor` 在执行过程中，不再调用简单的 `logger.info()`，而是通过 `context.eventEmitter.emit('phaseStart', ...)`、`context.eventEmitter.emit('toolOutput', ...)` 等方式**发射结构化事件**。
-    -   `AgentService` 监听这些事件，并立即将格式化后的状态更新 `postMessage` 给 Webview (`{ command: 'agent:updateState', payload: { executionState: ... } }`)。
-    -   Webview 接收到状态更新，**增量渲染**“执行块”，例如追加一个日志、更新一个并行任务的状态、或流式更新LLM的响应内容。
-    -   当有文件生成时，`Orchestrator` 发射 `fileGenerated` 事件，`AgentService` 将文件路径通知 Webview，Webview 渲染出可点击的文件卡片。
-5.  **完成/取消**:
-    -   执行成功后，`AgentService` 发送最终的完成状态。Webview 将“执行块”锁定为只读日志。
-    -   若用户中途点击了取消按钮，Webview 发送 `agent:cancel`，`AgentService` 中止 Agent 执行，并通知 Webview 移除整个“执行块”。
+*   **整体布局**: 保持大卡片容器，但内部结构变化。步骤卡片现在是**可折叠**的（Accordion 风格）。默认只展开当前正在执行的步骤。
+*   **步骤卡片 (Step Card) 的动态更新**:
+    *   **状态指示器**: 每个步骤标题旁边都有一个状态图标：
+        *   `⏳ 运行中`
+        *   `✅ 已完成`
+        *   `❌ 失败`
+        *   `🕒 等待中`
+    *   **详细内容（展开后）**:
+        *   **任务 (Task)**: 清晰描述当前子任务，如 `Executing tool: get_directory_tree`。
+        *   **输入 (Input)**: 将任务的输入参数格式化为卡片。例如，`{ path: '.', language: 'unknown' }` 会被展示为一个代码块卡片。
+        *   **LLM 请求 (LLM Request)**: 如果有 LLM 调用，会显示一个**可展开的卡片** `[LLM Request]`。展开后，清晰地展示 `System Prompt` 和 `Human Prompt` 的内容。
+        *   **LLM 响应 (LLM Response)**: 同样是一个**可展开卡片**。
+            *   **流式显示**: 当 LLM 响应正在流式返回时，卡片内容会实时追加，给用户强烈的“正在工作”的感觉。
+            *   **并行处理**: 对于 Map-Reduce 阶段，会同时显示多个 `[MAP] Batch X/Y` 的状态卡片，每个卡片内部可以独立更新自己的状态和结果。
+        *   **输出 (Output)**: 任务的最终输出。
+            *   **文件卡片 (File Card)**: 如果输出是一个 Markdown 文档（例如，每个模块的分析结果），则显示为一个文件卡片，如 `module_services.md`。点击该卡片，会向后端发送消息，要求打开这个位于 `.codewiki/runs/...` 目录下的临时文件。
 
-### 3. 技术实现方案
+*   **取消操作**: 在 `AgentRunBlock` 的右上角，提供一个全局的 `[⏹️ 终止]` 按钮，允许用户随时停止整个 Agent 的执行。
 
-#### 3.1. Webview (前端)
+### 2. 核心功能设计
 
--   **状态管理**: 在 `ChatView` 的 `messages` 数组中，元素类型需要扩展为 `ChatMessage | AgentInvocationState | AgentExecutionState`。
--   **新组件**:
-    -   `AtCommandMenu.ts`: 负责渲染和处理`@`命令的浮层菜单。
-    -   `AgentInvocationBlock.ts`: 渲染“调用块”，处理参数输入和与后端的交互。
-    -   `AgentExecutionBlock.ts`: 渲染“执行块”，接收并动态展示后端发来的状态更新。
-    -   `WorkflowStepCard.ts`, `FileCard.ts`, `LLMCallCard.ts` 等子组件，用于构建两大核心UI块。
--   **交互逻辑**:
-    -   输入框逻辑更新，以支持`@`命令的识别和胶囊（Pill）的渲染。
-    -   实现对 `agent:updateState` 消息的监听，并找到对应的 `AgentExecutionBlock` 实例进行 `update(newState)` 调用。
-    -   文件卡片和YML卡片的点击事件会触发新的 `postMessage`，如 `{ command: 'action:openFile', payload: { path: '...' } }`。
+为了实现上述 UI/UX，我们需要对前后端进行相应的改造。
 
-#### 3.2. Extension (后端)
+#### 2.1. Webview (Frontend) 设计
 
--   **`AgentService` 大改造**:
-    -   `runActionFromWebview` 将被 `invokeAgent` 和 `startAgent` 两个方法取代。
-    -   需要引入一个事件发射器（如 Node.js 的 `EventEmitter`）到 `AgentContext` 中。
-    -   `startAgent` 方法将不再是 `async/await` 等待其完成，而是启动后立即返回，通过监听内部事件来向前端发送更新。
--   **`Orchestrator` 和 `Executor` 重构**:
-    -   所有 `logger.info/log` 调用都需要替换为发射具体的、结构化的事件。
-    -   例如 `logger.info("> Executing tool: ${toolName}...")` 变为 `this.context.emitter.emit('stepStart', { type: 'tool', name: toolName, input: ... })`。
-    -   并行任务需要为每个子任务分配唯一ID，并围绕此ID发射状态更新事件（`pending`, `running`, `success`, `error`）。
--   **新的 `PostMessage` 命令**:
-    -   `agent:invoke`: 客户端请求展示一个Agent的调用块。
-    -   `agent:start`: 客户端确认启动Agent。
-    -   `agent:cancel`: 客户端请求中止Agent。
-    -   `agent:updateState`: **服务端主动推送**，携带最新的执行树状态。
-    -   `action:openFile`: 客户端请求在VS Code编辑器中打开一个文件。
--   **文件系统**:
-    -   Agent 执行的所有临时产出（中间MD文件、LLM请求/响应日志等）都应保存在一个带时间戳的唯一运行目录中（例如 `.codewiki/runs/project-doc-20231027T103000Z/`），这使得文件卡片的点击跳转实现变得简单可靠。
+1.  **`ChatView.ts` 改造**:
+    *   **@ 触发器**: 监听输入框的 `input` 事件，检测到 `@` 时，根据预定义的 Agent 列表渲染浮动菜单。
+    *   **Agent 命令提交**: 当用户回车时，如果输入框内容包含 Agent 命令，则不作为普通消息发送，而是向后端发送一个新的 `agent:start` 消息，附带完整的用户输入文本。
+    *   **`AgentRunBlock` 管理**: `ChatView` 将负责在消息列表中创建和销毁 `AgentRunBlock` 组件。它会持有一个 `activeAgentRun` 的状态，确保一次只有一个 Agent 在运行。
 
-通过以上设计，我们可以构建一个高度互动、透明且可扩展的 Agent 交互框架，极大地提升用户体验，并为未来集成更多、更复杂的 Agent 打下坚实的基础。
+2.  **新增 `AgentRunBlock.ts` 组件**:
+    *   **状态管理**: 该组件内部管理自己的状态，包括 `status` (`planning` | `executing` | `done` | `cancelled` | `error`)、`agentDefinition` (包含步骤、提示词信息)、`executionLog` (包含每一步的输入输出)等。
+    *   **渲染逻辑**: 包含 `renderPlanningView()` 和 `renderExecutingView()` 两个核心方法，根据当前状态进行渲染。
+    *   **事件处理**: 处理内部的点击事件（如点击 `.yml` 卡片、`Start`、`Cancel` 按钮），并转换为发往后端的 `postMessage`。
+
+3.  **新增 `postMessage` 命令 (Webview -> Extension)**:
+    *   `agent:start`: `{ command: 'agent:start', payload: { agentId: 'docgen-project', userInput: '为我的项目生成文档' } }`
+    *   `agent:execute`: `{ command: 'agent:execute', payload: { agentId: '...', parameters: { ... } } }`
+    *   `agent:cancel`: `{ command: 'agent:cancel', payload: { ... } }`
+    *   `agent:openFile`: `{ command: 'agent:openFile', payload: { filePath: '.codewiki/prompts/planner.yml' } }`
+
+#### 2.2. Extension (Backend) 设计
+
+1.  **`CodeWikiViewProvider.ts` (消息路由)**:
+    *   新增 `case 'agent:start'`: 接收到后，调用 `AgentService` 的新方法 `prepareAgentRun`，并将 `webview` 实例传递过去。
+    *   新增 `case 'agent:execute'`: 调用 `AgentService.executeAgentRun`。
+    *   新增 `case 'agent:openFile'`: 使用 `vscode.workspace.openTextDocument` 和 `vscode.window.showTextDocument` 打开指定文件。
+
+2.  **`AgentService.ts` (核心调度器)**:
+    *   **`prepareAgentRun(agentId, userInput, webview)`**:
+        1.  根据 `agentId` 加载 Agent 的元数据（定义了步骤、提示词、所需参数）。
+        2.  **(可选) LLM 调用**: 使用一个简单的 LLM prompt 来从 `userInput` 中提取参数。
+        3.  创建一个 `WebviewLogger` 实例。
+        4.  向 Webview 发送 `agent:showPlan` 消息， payload 包含 Agent 元数据和已解析/待填写的参数。
+    *   **`executeAgentRun(agentId, parameters, webview)`**:
+        1.  根据 `agentId` 选择要实例化的 `Orchestrator` 或 `Executor`。
+        2.  创建包含 `WebviewLogger` 的 `AgentContext`。
+        3.  调用相应 Agent 的 `run` 方法。
+
+3.  **Agent Core (`Orchestrator`/`Executor`) 改造**:
+    *   **粒度化日志**: `run` 方法需要被重构，以发出更结构化的事件，而不仅仅是打印字符串。
+    *   `AgentLogger` 接口需要扩展，以支持结构化事件。
+
+4.  **`AgentLogger` 接口扩展与 `WebviewLogger` 实现**:
+    *   **新接口方法**:
+        ```typescript
+        interface AgentLogger {
+            // ... existing methods
+            startStep(stepInfo: { name: string; description: string }): void;
+            logInput(stepName: string, input: any): void;
+            logOutput(stepName: string, output: any, metadata?: { type: 'file', path: string }): void;
+            logLlmRequest(stepName: string, request: { system: string; human: string }): void;
+            logLlmStreamChunk(stepName: string, chunk: string): void;
+            endStep(stepName: string, status: 'success' | 'failure'): void;
+        }
+        ```
+    *   **`WebviewLogger` 实现**:
+        *   每个新的接口方法都会被实现为向 Webview 发送一个特定的 `postMessage`。例如，`logInput` 会发送 `agent:update` 消息，其 `payload` 包含 `stepName` 和要更新的 `input` 数据。`logLlmStreamChunk` 会发送 `agent:streamChunk` 消息。
+
+5.  **新增 `postMessage` 命令 (Extension -> Webview)**:
+    *   `agent:showPlan`: `{ command: 'agent:showPlan', payload: { agentDefinition: {...}, parameters: {...} } }`
+    *   `agent:update`: `{ command: 'agent:update', payload: { stepName: '...', update: { status: 'running', input: {...} } } }` (一个通用的更新命令)
+    *   `agent:streamChunk`: `{ command: 'agent:streamChunk', payload: { stepName: '...', chunk: '...' } }`
+    *   `agent:runFinished`: `{ command: 'agent:runFinished', payload: { status: 'success' | 'error', finalOutput: '...' } }`
+
+### 3. 实现手段
+
+*   **前端**:
+    *   使用 `lit-html` 或类似的轻量级模板引擎来高效地渲染和更新复杂的 `AgentRunBlock` 组件，避免手动操作大量 DOM。
+    *   CSS 将大量使用 Flexbox 和 Grid 布局来构建卡片式 UI。`--vscode-` 变量将确保 UI 风格与 VS Code 保持一致。
+    *   `@` 菜单将通过绝对定位的 `div` 实现，并根据输入框位置动态计算。
+*   **后端**:
+    *   Agent 的元数据（步骤、提示词等）可以定义在单独的 `JSON` 或 `YAML` 文件中，方便管理和扩展新的 Agent。
+    *   `AgentService` 将扮演更重要的角色，成为一个真正的 Agent 调度中心。
+    *   对现有 `Orchestrator` 和 `Executor` 的改造是关键，需要细心地将原本线性的 `logger.info` 调用替换为结构化的 `logger.startStep`, `logger.logInput` 等事件发射。
+
+### 4. 保留现有功能
+
+*   `codewiki.generateProjectDocumentation` 命令的入口将保持不变。
+*   在其处理函数 (`extension.ts`) 中，它会像现在一样，**实例化一个 `VscodeOutputChannelLogger`** 并传递给 `AgentService`。
+*   `AgentService` 和核心 Agent 逻辑通过依赖注入的 `AgentLogger` 接口与日志实现解耦，因此它们无需任何改动即可同时支持新的 Webview 交互和旧的 Output Channel 输出。**这是我们架构解耦优势的最佳体现。**
+
+
+好的，这是一个基于现有架构，分阶段、可实施的新需求开发计划。
+
+---
+
+## **CodeWiki Agent 通用聊天交互 - 开发计划**
+
+本计划将新需求的开发分为三个主要阶段，旨在最大化地利用现有架构，降低风险，并实现平稳迭代。每个阶段都包含详细的任务列表和明确的验收标准。
+
+### **阶段一：后端能力扩展与接口定义 (Backend Foundation)**
+
+**目标**: 在不触及任何前端 UI 的情况下，对后端进行扩展，使其能够支持结构化的 Agent 执行流程和事件。这个阶段的重点是**“能力的准备”**和**“契约的定义”**。
+
+#### **任务列表:**
+
+1.  **定义 Agent 元数据结构**:
+    *   在 `common/types.ts` 或新文件中，定义 `AgentDefinition` 接口。
+    *   该接口应包含 `id`, `name`, `description`, `steps` (一个数组，每个 step 包含 `name`, `description`, `promptFiles`) 和 `parameters` (一个数组，定义所需的用户输入)。
+    *   为现有的三个 Agent（项目文档、模块-直接、模块-摘要）创建对应的元数据定义文件（可以是 `.ts` 或 `.json` 文件）。
+
+2.  **扩展 `AgentLogger` 接口**:
+    *   在 `extension/services/logging.ts` 中，为 `AgentLogger` 接口添加新的方法以支持结构化日志：
+        ```typescript
+        interface AgentLogger {
+          // ... (保留现有方法)
+          // 新增方法
+          onPlanGenerated(plan: AgentPlan): void; // 发送规划
+          onStepStart(step: StepExecution): void; // 步骤开始
+          onStepUpdate(update: StepUpdate): void; // 步骤更新 (如输入/输出)
+          onStepEnd(result: StepResult): void;   // 步骤结束
+          onStreamChunk(chunk: StreamChunk): void; // LLM流式块
+          onAgentEnd(result: AgentResult): void;   // Agent整体结束
+        }
+        ```
+    *   同时定义 `AgentPlan`, `StepExecution` 等相关的类型。
+
+3.  **重构核心 Agent 逻辑 (`Orchestrator` & `Executors`)**:
+    *   修改 `ProjectDocumentationOrchestrator`, `ToolChainExecutor`, `MapReduceExecutor` 的 `run` 方法。
+    *   将原有的 `logger.info(...)` 调用替换为新的结构化事件调用，如 `logger.onStepStart(...)`, `logger.onStepUpdate(...)` 等。
+    *   **关键点**: 这项工作需要非常细致，确保每一个关键动作（如工具调用、LLM 请求、文件写入）都通过 `AgentLogger` 发出事件。
+    *   并行任务（如 Map-Reduce）需要为每个并行的子任务发出独立的 `onStepStart`/`onStepEnd` 事件，并携带唯一的 `taskId`。
+
+4.  **创建 `HeadlessLogger` 用于测试**:
+    *   在 `extension/services/logging.ts` (或测试目录下) 创建一个新的 `HeadlessLogger` 类，实现 `AgentLogger` 接口。
+    *   这个 Logger 的实现非常简单：它只是将接收到的所有结构化事件推送（push）到一个内部的事件数组中。
+    *   这将用于在没有 UI 的情况下，验证 Agent 重构后是否能正确地发射事件序列。
+
+5.  **改造 `AgentService`**:
+    *   创建新的入口方法 `prepareAndRunAgent(agentId: string, userInput: string, logger: AgentLogger)`。
+    *   这个方法会加载 Agent 元数据，解析 `userInput`，然后调用重构后的 Agent `run` 方法。
+
+#### **验收标准:**
+
+*   ✅ 能够通过单元测试或一个临时的测试命令，调用 `prepareAndRunAgent` (传入 `HeadlessLogger`) 来执行任一 Agent。
+*   ✅ 执行完毕后，检查 `HeadlessLogger` 内部的事件数组，其内容和顺序必须与预期的 Agent 执行流程完全一致。
+*   ✅ **不破坏现有功能**: 运行旧的 `CodeWiki: Generate Project Documentation` 命令，其在 VS Code Output Channel 中的输出应与修改前基本保持一致（因为 `VscodeOutputChannelLogger` 仍然使用旧的 `info`, `error` 方法，而这些方法在重构中被保留了）。
+
+---
+
+### **阶段二：前端交互实现与模拟 (Frontend Prototyping)**
+
+**目标**: 在 Webview 端独立开发完整的用户交互界面，包括 `@` 命令、规划视图和执行视图。在这一阶段，所有与后端的通信都通过**模拟数据 (mock data)** 进行，以实现前后端并行开发。
+
+#### **任务列表:**
+
+1.  **`ChatView` UI 增强**:
+    *   实现 `@` 命令的浮动菜单 UI。
+    *   实现将选中的 Agent 命令作为“Pill”插入到输入框中。
+
+2.  **创建 `AgentRunBlock` 组件**:
+    *   在 `webview/components/` 目录下创建 `AgentRunBlock.ts`。
+    *   实现该组件的内部状态管理 (`planning`, `executing`, `done` 等)。
+    *   实现 `renderPlanningView()` 方法，它能根据传入的模拟 `AgentPlan` 数据渲染出规划视图（包含步骤卡片、提示词卡片、参数输入框）。
+    *   实现 `renderExecutingView()` 方法，它能根据模拟的 `StepExecution` 日志数据渲染出动态的执行视图（包含可折叠的步骤、状态图标、输入/输出卡片）。
+
+3.  **实现前端消息处理器与模拟后端**:
+    *   在 `App.ts` 或 `ChatView.ts` 中，创建一个临时的 `mockBackendHandler` 函数。
+    *   当用户发送 `@` 命令时，不发送 `postMessage`，而是调用 `mockBackendHandler`。
+    *   `mockBackendHandler` 会：
+        1.  立即在聊天区创建一个 `AgentRunBlock` 实例。
+        2.  向 `AgentRunBlock` 传入一个预先定义好的、模拟的 `AgentPlan` JSON 对象，使其渲染出规划视图。
+        3.  模拟参数验证的过程。
+    *   当用户在 `AgentRunBlock` 中点击“开始执行”时：
+        1.  `mockBackendHandler` 会使用 `setInterval` 或 `setTimeout` 来**模拟**后端事件流。
+        2.  它会按时间间隔，依次调用 `AgentRunBlock` 的公共方法（如 `updateStep`, `appendStreamChunk` 等），传入模拟的 `StepUpdate`, `StreamChunk` 数据。
+
+4.  **UI 细化与动效**:
+    *   完善所有卡片（步骤、提示词、文件、LLM 请求/响应）的 CSS 样式。
+    *   为步骤的折叠/展开、LLM 响应的流式出现等添加平滑的 CSS 过渡效果。
+
+#### **验收标准:**
+
+*   ✅ 在聊天框输入 `@` 能正常弹出并选择 Agent。
+*   ✅ 选择 Agent 并回车后，能立即看到一个**完整**的、由模拟数据生成的**规划视图**。
+*   ✅ 点击规划视图中的“开始执行”按钮后，视图能切换到**执行视图**，并能**流畅地、动态地**展示一个完整的、由 `setInterval` 模拟的 Agent 执行过程。
+*   ✅ 所有 UI 元素的交互（点击提示词卡片、展开/折叠步骤、点击文件卡片）都已实现，即使它们只是在控制台打印日志。
+*   ✅ 在此阶段，所有功能**完全不依赖**于 VS Code 扩展后端的任何新接口。
+
+---
+
+### **阶段三：前后端联调与整合 (Integration & Polish)**
+
+**目标**: 将前两个阶段的成果连接起来，用真实的后端事件驱动前端 UI，并进行最终的打磨和测试。
+
+#### **任务列表:**
+
+1.  **定义前后端通信契约**:
+    *   在 `common/types.ts` 中正式定义所有 `agent:*` 相关的 `PostMessage` 命令和载荷（payload）的类型。这些类型定义在阶段一和阶段二中已经基本成型。
+
+2.  **实现 `WebviewLogger`**:
+    *   在 `extension/services/logging.ts` 中，创建 `WebviewLogger` 类。
+    *   实现 `AgentLogger` 接口的所有新方法。每个方法的实现就是向其持有的 `webview` 实例 `postMessage` 一个符合契约的结构化事件。
+
+3.  **连接 `AgentService` 与 Webview**:
+    *   在 `CodeWikiViewProvider.ts` 中，实现对 `agent:start`, `agent:execute`, `agent:cancel`, `agent:openFile` 等新命令的处理逻辑。
+    *   这些处理逻辑会调用 `AgentService` 的相应方法，并将 `WebviewLogger` 实例传入。
+
+4.  **前端改造：移除模拟后端**:
+    *   在 `App.ts` 和 `ChatView.ts` 中，移除 `mockBackendHandler`。
+    *   将所有用户操作（如发送 `@` 命令、点击“开始执行”）转换为真实的 `vscode.postMessage`调用。
+    *   在 `window.addEventListener('message', ...)` 中，添加对所有新的 `agent:*` 消息的处理逻辑。这些逻辑会调用 `AgentRunBlock` 的相应方法来更新其 UI。
+
+5.  **端到端测试与打磨**:
+    *   对所有三种 Agent 进行完整的端到端测试，确保从触发到执行完成的整个流程在真实环境下是流畅和正确的。
+    *   特别关注并行任务（Map-Reduce）的 UI 更新是否及时准确。
+    *   根据实际效果微调 UI/UX，例如调整流式输出的速度感、卡片展开/折叠的动画效果等。
+    *   处理所有边缘情况，如 Agent 执行失败、用户中途取消等。
+
+#### **验收标准:**
+
+*   ✅ 用户在 Webview 中选择并执行任何一个 Agent，`AgentRunBlock` 能够由**真实的后端事件驱动**，完整、正确地展示规划和执行的全过程。
+*   ✅ 点击提示词卡片能够在新标签页中打开正确的文件。
+*   ✅ 点击执行过程中生成的 `.md` 文件卡片，能够打开正确的临时文档。
+*   ✅ 用户中途点击取消，Agent 后端能正确中止，前端 UI 也能正确更新为“已取消”状态。
+*   ✅ 旧的 `CodeWiki: Generate Project Documentation` 命令功能完好无损。
+*   ✅ 最终功能符合产品需求文档中描述的所有 UI/UX 细节。

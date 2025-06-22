@@ -1,6 +1,7 @@
 import { Conversation, ChatMessage, ModelConfig, Prompt } from "../../common/types";
 import { vscode } from "../vscode";
 import { MessageBlock } from "../components/MessageBlock";
+import { AtCommandMenu } from "../components/AtCommandMenu";
 
 export class ChatView {
     private messages: ChatMessage[] = [];
@@ -13,6 +14,9 @@ export class ChatView {
     private isStreaming: boolean = false;
     private editingMessageIndex: number | null = null;
     private originalMessageContent: string | null = null;
+    private atCommandMenu: AtCommandMenu;
+    private inputBox: HTMLElement; // 从 HTMLTextAreaElement 改为 HTMLElement
+
 
     constructor(private readonly parent: HTMLElement) {
         this.parent.innerHTML = this.renderInitialLayout();
@@ -20,7 +24,14 @@ export class ChatView {
         this.bottomPanel = this.parent.querySelector('.chat-sticky-bottom') as HTMLElement;
         this.modelSelector = this.parent.querySelector('#model-selector') as HTMLSelectElement;
         this.promptSelector = this.parent.querySelector('#prompt-selector') as HTMLSelectElement;
-        this.renderBottomInput();
+
+        // 渲染输入框并获取其引用
+        this.renderBottomInput(); 
+        this.inputBox = this.bottomPanel.querySelector('.chat-input-box') as HTMLElement;
+        
+        // 将菜单附加到父级容器，以便绝对定位
+        this.atCommandMenu = new AtCommandMenu(this.parent);
+
         this.setupEventListeners();
     }
 
@@ -60,6 +71,11 @@ export class ChatView {
         this.parent.addEventListener('click', (event) => {
             const target = event.target as HTMLElement;
             const button = target.closest('button');
+
+            // 如果点击了输入框外部，且@菜单是可见的，则隐藏它
+            if (!this.inputBox.contains(target) && !this.atCommandMenu['element'].contains(target)) {
+                this.atCommandMenu.hide();
+            }
 
             if (this.editingMessageIndex !== null) {
                 const editingBlock = this.parent.querySelector('.message-block.editing');
@@ -122,14 +138,13 @@ export class ChatView {
             if (selectedPromptId) {
                 const selectedPrompt = this.prompts.find(p => p.id === selectedPromptId);
                 if (selectedPrompt) {
-                    const inputBox = this.bottomPanel.querySelector('textarea');
-                    if (inputBox) {
-                        inputBox.value = selectedPrompt.content;
-                        this.autoResizeInput(inputBox);
-                        inputBox.focus();
+                    // 更新为操作 contenteditable div
+                    if (this.inputBox) {
+                        this.inputBox.innerText = selectedPrompt.content;
+                        this.inputBox.focus();
                         vscode.postMessage({
                             command: 'updateWebviewContent',
-                            payload: { content: inputBox.value }
+                            payload: { content: this.inputBox.innerText }
                         });
                     }
                 }
@@ -146,18 +161,14 @@ export class ChatView {
                 case 'setActiveConversation': this.loadConversation(message.payload); break;
                 case 'updatePrompts': this.setPrompts(message.payload); break;
                 case 'updateContent': {
-                    const inputBox = this.bottomPanel.querySelector('textarea');
-                    if (inputBox && inputBox.value !== message.payload.content) {
-                        inputBox.value = message.payload.content;
-                        this.autoResizeInput(inputBox);
+                    if (this.inputBox && this.inputBox.innerText !== message.payload.content) {
+                        this.inputBox.innerText = message.payload.content;
                     }
                     break;
                 }
                 case 'clearInput': {
-                    const inputBox = this.bottomPanel.querySelector('textarea');
-                    if (inputBox) {
-                        inputBox.value = '';
-                        this.autoResizeInput(inputBox);
+                    if (this.inputBox) {
+                       this.inputBox.innerHTML = '';
                     }
                     break;
                 }
@@ -187,79 +198,24 @@ export class ChatView {
             vscode.postMessage({ command: 'stopMessage' });
             return;
         }
-
-        const inputBox = this.bottomPanel.querySelector('textarea');
-        if (!inputBox) return;
-
-        const prompt = inputBox.value.trim();
-        if (!prompt) return;
-
-        // --- 临时的 Agent 触发器 ---
-        if (prompt.startsWith('/agent')) {
-            const selectedModelId = this.modelSelector.value;
-            const selectedConfig = this.modelConfigs.find(c => c.id === selectedModelId);
-            if (!selectedConfig) {
-                 vscode.postMessage({ command: 'error', payload: 'Please select a valid model from settings.' });
-                return;
-            }
-
-            const testYaml = `
-title: "生成核心模块设计文档 (智能筛选版)"
-description: "智能分析模块内的所有文件，找出核心文件，并基于它们生成技术文档。"
-input_variables:
-  - name: module_path
-    description: "请输入或选择要分析的模块/文件夹路径。"
-    type: "path"
-    default: "src/extension"
-  - name: task_description
-    description: "简要描述你想分析的核心任务是什么？"
-    type: "text"
-    default: "这个模块的核心功能是处理大模型请求和管理插件状态。"
-tool_chain:
-  - tool: "get_file_summaries"
-    # 修正: 将 input 从字符串改为对象格式，以匹配工具的 schema
-    input: 
-      path: "{module_path}"
-    output_variable: all_file_summaries
-  - tool: "file_selector_llm_tool"
-    input: 
-      file_summaries: "{all_file_summaries}"
-      task_description: "{task_description}"
-    output_variable: selected_files_list
-  - tool: "get_files_content_by_list"
-    # 修正: 将 input 从字符串改为对象格式
-    input:
-      file_paths: "{selected_files_list}"
-    output_variable: selected_files_content
-llm_prompt_template:
-  system: |
-    你是一个经验丰富的软件架构师，你的任务是基于提供的核心文件内容，为模块生成一份详细、专业的技术设计文档。文档需要包含以下部分：1. 模块概述 2. 核心职责 3. 主要组件分析（逐一分析每个文件） 4. 数据流和交互 5. 潜在改进点。请使用 Markdown 格式化你的回答。
-  human: |
-    请根据以下精心筛选出的核心文件，为模块生成一份详细设计文档。
-
-    **核心文件内容如下：**
-    {selected_files_content}
-`;
+        
+        // highlight-start
+        // 检查输入框中是否已有 Pill
+        const pill = this.inputBox.querySelector('.content-pill');
+        if (pill) {
+            const agentId = pill.getAttribute('data-agent-id');
+            vscode.postMessage({command: 'info', payload: `触发 Agent: ${agentId} (模拟)`});
             
-            const userInputs = {
-                module_path: "src/extension", // 可以硬编码或从 prompt 中解析
-                task_description: "这个模块的核心功能是处理大模型请求、状态管理和视图提供。"
-            };
-
-            vscode.postMessage({ 
-                command: 'executeActionPrompt', 
-                payload: {
-                    yamlContent: testYaml,
-                    userInputs: userInputs,
-                    modelConfig: selectedConfig
-                }
-            });
-            inputBox.value = '';
-            this.autoResizeInput(inputBox);
+            // 在阶段二，我们只是清空输入框，为未来的 AgentRunBlock 留出空间
+            // 实际的后端调用和 UI 渲染将在任务 2 和 3 中实现
+            this.inputBox.innerHTML = '';
+            
             return; // 结束执行
         }
-        // --- 结束 Agent 触发器 ---
 
+        const prompt = this.inputBox.innerText.trim();
+        if (!prompt) return;
+        // highlight-end
 
         const selectedModelId = this.modelSelector.value;
         const selectedConfig = this.modelConfigs.find(c => c.id === selectedModelId);
@@ -273,8 +229,9 @@ llm_prompt_template:
         this.messages.push(message);
         this.renderMessages();
 
-        inputBox.value = '';
-        this.autoResizeInput(inputBox);
+        // highlight-start
+        this.inputBox.innerHTML = '';
+        // highlight-end
         vscode.postMessage({ command: 'sendMessage', payload: { prompt, config: selectedConfig } });
     }
 
@@ -297,11 +254,9 @@ llm_prompt_template:
         this.editingMessageIndex = index;
         this.originalMessageContent = this.messages[index].content;
 
-        const mainTextarea = this.bottomPanel.querySelector('textarea');
-        if (mainTextarea) {
-            mainTextarea.value = this.originalMessageContent;
-            this.autoResizeInput(mainTextarea);
-            mainTextarea.focus();
+        if (this.inputBox) {
+            this.inputBox.innerText = this.originalMessageContent;
+            this.inputBox.focus();
         }
 
         this.renderMessages();
@@ -318,10 +273,8 @@ llm_prompt_template:
         this.editingMessageIndex = null;
         this.originalMessageContent = null;
 
-        const mainTextarea = this.bottomPanel.querySelector('textarea');
-        if (mainTextarea) {
-            mainTextarea.value = '';
-            this.autoResizeInput(mainTextarea);
+        if (this.inputBox) {
+            this.inputBox.innerHTML = '';
         }
 
         this.renderMessages();
@@ -329,10 +282,8 @@ llm_prompt_template:
     }
 
     private handleSaveEdit(index: number) {
-        const mainTextarea = this.bottomPanel.querySelector('textarea');
-        if (!mainTextarea) return;
-
-        const newContent = mainTextarea.value.trim();
+        if (!this.inputBox) return;
+        const newContent = this.inputBox.innerText.trim();
         if (newContent) {
             this.messages[index].content = newContent;
             vscode.postMessage({ command: 'editMessage', payload: { messageIndex: index, content: newContent } });
@@ -341,8 +292,7 @@ llm_prompt_template:
         this.editingMessageIndex = null;
         this.originalMessageContent = null;
 
-        mainTextarea.value = '';
-        this.autoResizeInput(mainTextarea);
+        this.inputBox.innerHTML = '';
 
         this.renderMessages();
         this.updateSendButtonState();
@@ -382,8 +332,7 @@ llm_prompt_template:
         this.renderMessages();
 
         if (lastUserMessage) {
-            const inputBox = this.bottomPanel.querySelector('textarea');
-            if (inputBox) inputBox.value = lastUserMessage.content;
+            if (this.inputBox) this.inputBox.innerText = lastUserMessage.content;
         }
 
         const errorElement = document.createElement('div');
@@ -394,12 +343,11 @@ llm_prompt_template:
     }
 
     private handleMaximizeEditor() {
-        const inputBox = this.bottomPanel.querySelector('textarea');
-        if (inputBox) {
+        if (this.inputBox) {
             vscode.postMessage({
                 command: 'openFocusEditor',
                 payload: {
-                    content: inputBox.value,
+                    content: this.inputBox.innerText,
                     modelId: this.modelSelector.value,
                     promptId: this.promptSelector.value
                 }
@@ -437,25 +385,105 @@ llm_prompt_template:
         const container = this.bottomPanel.querySelector('.chat-input-box-container');
         if (!container) return;
 
-        container.innerHTML = `<textarea placeholder="输入消息，或从下拉菜单选择提示词..."></textarea>`;
-        const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+        // 关键改动：使用 contenteditable div 替换 textarea
+        container.innerHTML = `<div class="chat-input-box" contenteditable="true" placeholder="输入消息，或用'@'触发命令..."></div>`;
+        const inputBox = container.querySelector('.chat-input-box') as HTMLElement;
 
-        textarea.addEventListener('keydown', (e) => {
+        inputBox.addEventListener('keydown', (e) => {
+            // 如果 @ 菜单可见，则优先处理菜单导航（未来实现）
+            if (this.atCommandMenu.isVisible()) {
+                // TODO: Handle Up/Down/Enter keys to navigate the menu
+            }
+
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 this.handleSendOrSave();
             }
         });
 
-        textarea.addEventListener('input', () => {
-            this.autoResizeInput(textarea);
+        inputBox.addEventListener('input', () => {
+            this.handleInputForAtCommand(inputBox);
             vscode.postMessage({
                 command: 'updateWebviewContent',
-                payload: { content: textarea.value }
+                payload: { content: inputBox.innerText }
             });
         });
 
+        // 如果输入框为空，显示 placeholder
+        inputBox.addEventListener('focus', () => {
+             if (inputBox.getAttribute('placeholder')) {
+                inputBox.removeAttribute('placeholder');
+             }
+        });
+        inputBox.addEventListener('blur', () => {
+            if (!inputBox.textContent) {
+                 inputBox.setAttribute('placeholder', "输入消息，或用'@'触发命令...");
+            }
+        });
+
         this.updateSendButtonState();
+    }
+
+    /**
+     * 处理输入事件，用于触发 @ 命令菜单
+     */
+    private handleInputForAtCommand(inputBox: HTMLElement) {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) return;
+
+        const range = selection.getRangeAt(0);
+        const textUpToCursor = range.startContainer.textContent?.substring(0, range.startOffset) || '';
+
+        // 正则表达式匹配以 @ 开头，后面跟0或多个非空格字符，且位于字符串末尾的模式
+        const atMatch = textUpToCursor.match(/@(\S*)$/);
+
+        if (atMatch) {
+            const rect = inputBox.getBoundingClientRect();
+            this.atCommandMenu.show(rect.left, rect.top, atMatch[1], (command) => {
+                this.insertAgentPill(command, atMatch);
+            });
+        } else {
+            this.atCommandMenu.hide();
+        }
+    }
+
+    /**
+     * 将选中的 Agent 命令作为 "Pill" 插入到输入框中
+     */
+    private insertAgentPill(command: {id: string, name: string}, atMatch: RegExpMatchArray) {
+        const pillHtml = `<span class="content-pill" contenteditable="false" data-agent-id="${command.id}">@${command.name}</span> `;
+
+        this.inputBox.focus(); // 确保输入框有焦点
+        
+        // 替换掉 @触发词
+        const selection = window.getSelection();
+        if (selection && selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0);
+            
+            // 定位到 @ 的起始位置
+            const startOffset = atMatch.index!;
+            range.setStart(range.startContainer, startOffset);
+            range.setEnd(range.startContainer, startOffset + atMatch[0].length);
+
+            // 删除范围内的文本（即 @keyword）
+            range.deleteContents();
+
+            // 插入 Pill
+            const pillNode = document.createRange().createContextualFragment(pillHtml);
+            range.insertNode(pillNode);
+            
+            // 将光标移动到 Pill 之后
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+        } else {
+            // Fallback: 如果没有选区，直接替换内容
+            const currentText = this.inputBox.innerText;
+            const newText = currentText.replace(/@(\S*)$/, '');
+            this.inputBox.innerHTML = newText + pillHtml;
+        }
+
+        this.atCommandMenu.hide();
     }
 
     private updateSendButtonState() {
