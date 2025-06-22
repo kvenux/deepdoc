@@ -8,11 +8,8 @@ html {
     color: var(--vscode-editor-foreground);
     font-family: var(--vscode-font-family);
     display: flex;
-    /* Make body/html a flex container */
     flex-direction: column;
-    /* Stack children vertically */
     position: absolute;
-    /* Position absolutely to fill the entire webview */
     top: 0;
     left: 0;
     right: 0;
@@ -23,9 +20,7 @@ html {
     display: flex;
     flex-direction: column;
     height: 100%;
-    /* Use 100% relative to absolute positioned parent */
     flex: 1;
-    /* Allow #root to grow and take available space */
 }
 
 .top-toolbar {
@@ -53,7 +48,6 @@ html {
 
 .main-content {
     flex-grow: 1;
-    /* Removed overflow-y: hidden to allow internal scrolling */
     display: flex;
     flex-direction: column;
     padding: 0;
@@ -78,37 +72,24 @@ html {
     display: flex;
     flex-direction: column;
     flex: 1;
-    position: relative; 
-    /* Ensure it takes full available space within its flex parent */
+    position: relative;
 }
 
 .messages-list {
     flex-grow: 1;
-    /* Allow it to grow and take available space */
     overflow-y: auto;
-    /* Make this the scrolling container */
     min-height: 0;
-    /* Allow the flex item to shrink below its content size */
     width: 100%;
-    /* Ensure it takes full width of its flex container */
     box-sizing: border-box;
-    /* Include padding and border in the element's total width and height */
 }
 
 .chat-sticky-bottom {
-    /* No position: sticky needed, flexbox handles it */
     flex-shrink: 0;
-    /* Prevent shrinking */
     width: 100%;
-    /* Ensure it takes full width of its flex container */
     box-sizing: border-box;
-    /* Include padding and border in the element's total width and height */
-
     padding: 10px;
     border-top: 1px solid var(--vscode-editorGroup-border);
     background-color: var(--vscode-sideBar-background);
-    /* Give it a solid background */
-
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -154,13 +135,10 @@ html {
     border-radius: 5px;
 }
 
-/* Chat View Specific */
 .chat-container .chat-input-box-container textarea {
     max-height: 250px;
-    /* Increased height */
 }
 
-/* Focus Editor View Specific */
 .focus-editor-container {
     padding: 10px;
 }
@@ -189,16 +167,13 @@ html {
 .message-content {
     transition: max-height 0.3s ease-in-out;
     overflow: hidden;
-    /* Hide content that exceeds max-height */
     position: relative;
 }
 
 .message-block.folded .message-content {
     max-height: 70px;
-    /* Adjust as needed, approx 3-4 lines */
 }
 
-/* Add a "read more" fade effect when folded */
 .message-block.folded .message-content::after {
     content: '';
     position: absolute;
@@ -208,7 +183,6 @@ html {
     height: 30px;
     background: linear-gradient(to bottom, transparent, var(--vscode-editor-background));
     pointer-events: none;
-    /* Allows clicks to pass through */
 }
 
 .message-block:last-child {
@@ -443,10 +417,8 @@ button:hover {
 
 .prompt-editor-view {
     display: none;
-    /* Hidden by default */
 }
 
-/* Search Bar in Header */
 .search-bar {
     display: flex;
     align-items: center;
@@ -511,7 +483,6 @@ button:hover {
 }
 
 
-/* Prompt List */
 .prompt-list-container {
     flex-grow: 1;
     overflow-y: auto;
@@ -581,7 +552,6 @@ button:hover {
     opacity: 1;
 }
 
-/* Empty State */
 .empty-state {
     text-align: center;
     padding: 40px 20px;
@@ -629,7 +599,6 @@ button:hover {
 .prompt-editor-form input,
 .prompt-editor-form textarea {
     width: calc(100% - 22px);
-    /* 100% - padding - border */
     background-color: var(--vscode-input-background);
     color: var(--vscode-input-foreground);
     border: 1px solid var(--vscode-input-border);
@@ -643,12 +612,14 @@ button:hover {
     font-family: var(--vscode-editor-font-family);
 }
 
-/* highlight-start */
+.prompt-editor-form textarea:focus {
+    outline: none;
+}
+
 /*=================================*/
 /*====== Rich Input & Pills =======*/
 /*=================================*/
 
-/* Rich text input box style */
 .chat-input-box {
     flex-grow: 1;
     background-color: var(--vscode-input-background);
@@ -668,40 +639,36 @@ button:hover {
     outline: 1px solid var(--vscode-focusBorder);
 }
 
-/* Pill style */
 .content-pill {
     display: inline-block;
-    background-color: var(--vscode-button-background); /* Use a prominent background color */
-    color: var(--vscode-button-foreground); /* Use a contrasting foreground color for visibility */
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
     border-radius: 12px;
     padding: 2px 10px;
     margin: 0 2px;
     font-size: 0.9em;
     font-weight: 500;
-    cursor: default; /* Pill is not interactive */
+    cursor: default;
 }
 
-/* Ensure no extra margin on paragraphs inside contenteditable */
 .chat-input-box p, .chat-input-box div {
     margin: 0;
 }
-/* highlight-end */
 
 /*=================================*/
 /*====== @ Command Menu ===========*/
 /*=================================*/
 .at-command-menu {
-    /* 移除 position: absolute，让它成为正常的块级元素 */
     width: 100%;
     box-sizing: border-box;
     background-color: var(--vscode-editorWidget-background);
     border: 1px solid var(--vscode-editorWidget-border);
     border-radius: 5px;
     z-index: 100;
-    max-height: 220px; /* 增加一点最大高度 */
+    max-height: 220px;
     overflow-y: auto;
-    margin-bottom: 8px; /* 与下方的输入框区域产生间距 */
-    display: none; /* 默认隐藏，由 JS 控制 */
+    margin-bottom: 8px;
+    display: none;
 }
 
 .at-command-menu ul {
@@ -735,7 +702,7 @@ button:hover {
 .at-command-menu .menu-item-name {
     display: flex;
     align-items: center;
-    justify-content: space-between; /* 让图标能靠右 */
+    justify-content: space-between;
     width: 100%;
 }
 
@@ -746,5 +713,416 @@ button:hover {
 .at-command-menu .menu-item-description {
     font-size: 0.9em;
     color: var(--vscode-descriptionForeground);
-    margin-top: 4px; /* 与名称拉开一点距离 */
+    margin-top: 4px;
+}
+
+/*=================================*/
+/*====== Agent Run Block (Final & Cleaned) =======*/
+/*=================================*/
+
+.agent-run-block {
+    background-color: var(--vscode-sideBar-sectionHeader-background);
+    border: 1px solid var(--vscode-editorGroup-border);
+    border-radius: 8px;
+    margin: 10px 0;
+    padding: 15px;
+    font-size: 0.9em;
+}
+
+.agent-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    padding-bottom: 10px;
+    margin-bottom: 15px;
+}
+
+.agent-header h4 {
+    margin: 0;
+    font-size: 1.2em;
+}
+
+.badge {
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-weight: 500;
+}
+.badge.planning { background-color: var(--vscode-testing-iconQueued-foreground); color: var(--vscode-button-foreground); }
+.badge.executing { background-color: var(--vscode-testing-iconRunning-foreground); color: var(--vscode-button-foreground); }
+.badge.completed { background-color: var(--vscode-testing-iconPassed-foreground); color: var(--vscode-button-foreground); }
+.badge.failed { background-color: var(--vscode-testing-iconFailed-foreground); color: var(--vscode-button-foreground); }
+.badge.cancelled { background-color: var(--vscode-testing-iconSkipped-foreground); color: var(--vscode-button-foreground); }
+
+.agent-plan-steps, .agent-parameters {
+    margin-bottom: 20px;
+}
+
+.agent-plan-steps h5, .agent-parameters h5 {
+    margin: 0 0 10px 0;
+    color: var(--vscode-descriptionForeground);
+}
+
+.step-card {
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border);
+    border-radius: 5px;
+    padding: 10px;
+    margin-bottom: 8px;
+}
+
+.step-card-name {
+    font-weight: bold;
+    margin-bottom: 4px;
+}
+
+.step-card-desc {
+    font-size: 0.95em;
+    color: var(--vscode-descriptionForeground);
+}
+
+.parameter-item {
+    margin-bottom: 10px;
+}
+
+.parameter-item label {
+    display: block;
+    margin-bottom: 5px;
+}
+
+.parameter-item input {
+    width: calc(100% - 16px);
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 8px;
+    border-radius: 5px;
+}
+
+.parameter-item .error-text {
+    color: var(--vscode-errorForeground);
+    font-size: 0.9em;
+    margin-top: 5px;
+}
+
+.parameter-item input.invalid {
+    border-color: var(--vscode-errorForeground);
+}
+
+.agent-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 15px;
+}
+
+.agent-actions button {
+    flex: 1;
+    padding: 10px;
+    font-size: 1.1em;
+    font-weight: 500;
+}
+.agent-actions button.secondary {
+    background-color: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+}
+.agent-actions button.secondary:hover {
+    background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+.execute-btn {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none;
+    padding: 8px 15px;
+    cursor: pointer;
+    border-radius: 5px;
+}
+.execute-btn:hover {
+    background-color: var(--vscode-button-hoverBackground);
+}
+
+
+/* -- Executing View -- */
+.execution-step {
+    border-left: 3px solid;
+    margin-bottom: 10px;
+    transition: all 0.2s ease-in-out;
+    border-radius: 0 5px 5px 0;
+    overflow: hidden;
+}
+.execution-step.waiting { border-color: var(--vscode-editorHint-foreground); }
+.execution-step.completed { border-color: var(--vscode-testing-iconPassed-foreground); }
+.execution-step.failed { border-color: var(--vscode-testing-iconFailed-foreground); }
+
+@keyframes pulse-border {
+    0% { border-color: var(--vscode-testing-iconRunning-foreground); }
+    50% { border-color: var(--vscode-focusBorder); }
+    100% { border-color: var(--vscode-testing-iconRunning-foreground); }
+}
+
+.execution-step.running {
+    animation: pulse-border 2s infinite;
+}
+
+.execution-step .step-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    cursor: pointer;
+    background-color: var(--vscode-sideBar-sectionHeader-background);
+    transition: background-color 0.2s ease;
+}
+.execution-step .step-header:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.execution-step .status-icon {
+    font-size: 1.1em;
+}
+
+.execution-step .step-name {
+    flex-grow: 1;
+}
+
+.execution-step .step-status {
+    font-family: monospace;
+    font-size: 0.9em;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background-color: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+}
+
+.execution-step .step-content {
+    overflow: hidden;
+    transition: max-height 0.4s ease-in-out, padding 0.4s ease-in-out;
+    padding: 0 15px;
+    background-color: var(--vscode-input-background);
+}
+.execution-step .step-content[style*="max-height: 2000px"],
+.execution-step .step-content[style*="max-height: 5000px"] {
+    padding: 10px 15px;
+}
+
+
+.log-item {
+    border: 1px solid var(--vscode-input-border);
+    border-left-width: 4px;
+    border-radius: 5px;
+    margin: 10px 0;
+    background: var(--vscode-editor-background);
+}
+.log-item.log-input { border-left-color: var(--vscode-terminal-ansiBlue); }
+.log-item.log-output { border-left-color: var(--vscode-terminal-ansiGreen); }
+.log-item.log-llm-request { border-left-color: var(--vscode-terminal-ansiYellow); }
+.log-item.log-llm-stream { border-left-color: var(--vscode-terminal-ansiCyan); }
+
+.log-item .log-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(128, 128, 128, 0.1);
+    padding: 5px 10px;
+    font-weight: bold;
+    color: var(--vscode-descriptionForeground);
+    border-bottom: 1px solid var(--vscode-input-border);
+}
+.log-item .log-header .codicon {
+    font-size: 1.1em;
+}
+
+.log-content-wrapper {
+    padding: 5px 10px;
+}
+
+.log-content-wrapper pre {
+    margin: 0;
+    padding: 5px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+.log-content-wrapper code {
+    font-family: var(--vscode-editor-font-family);
+}
+
+.log-llm-stream .markdown-body {
+    padding: 0 10px 10px 10px;
+}
+.log-llm-stream .markdown-body p:first-child,
+.log-llm-stream .markdown-body ul:first-child,
+.log-llm-stream .markdown-body ol:first-child {
+    margin-top: 10px;
+}
+.log-llm-stream .markdown-body p,
+.log-llm-stream .markdown-body ul,
+.log-llm-stream .markdown-body ol {
+    margin-top: 0;
+    margin-bottom: 0.5em;
+}
+
+.step-error {
+    background-color: rgba(255, 0, 0, 0.1);
+    border: 1px solid var(--vscode-errorForeground);
+    color: var(--vscode-errorForeground);
+    padding: 10px;
+    border-radius: 5px;
+    margin: 10px 0;
+    white-space: pre-wrap;
+}
+
+.agent-final-result {
+    margin-top: 20px;
+    border: 1px solid var(--vscode-editorGroup-border);
+    border-left-width: 4px;
+    border-radius: 5px;
+    overflow: hidden;
+}
+.agent-final-result.completed {
+    border-left-color: var(--vscode-testing-iconPassed-foreground);
+    background-color: rgba(45, 212, 129, 0.1);
+}
+.agent-final-result.failed,
+.agent-final-result.cancelled {
+    border-left-color: var(--vscode-testing-iconFailed-foreground);
+    background-color: rgba(255, 0, 0, 0.1);
+}
+
+.result-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    font-weight: bold;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+}
+
+.result-header .codicon {
+    font-size: 1.2em;
+}
+
+.result-content {
+    padding: 12px;
+}
+.result-content .error-text {
+    color: var(--vscode-errorForeground);
+    white-space: pre-wrap;
+}
+
+/* --- File & Prompt Card Styles --- */
+.prompt-files-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.file-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border);
+    padding: 6px 12px;
+    border-radius: 5px;
+    font-size: 0.9em;
+    cursor: pointer;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+    flex-grow: 0;
+}
+.file-card:hover {
+    background-color: var(--vscode-list-hoverBackground);
+    border-color: var(--vscode-focusBorder);
+}
+.file-card .codicon {
+    font-size: 1.2em;
+    color: var(--vscode-descriptionForeground);
+}
+.result-content .file-card {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 1em;
+}
+.result-content .file-card:hover {
+    background: var(--vscode-list-hoverBackground);
+}
+
+
+/* --- Sub-step Styles --- */
+.sub-steps-container {
+    padding: 10px;
+    margin: 10px 0;
+    border-radius: 5px;
+    background-color: var(--vscode-sideBar-background);
+}
+
+.sub-step-placeholder {
+    color: var(--vscode-descriptionForeground);
+    font-style: italic;
+    text-align: center;
+    padding: 15px;
+}
+
+.sub-step {
+    padding: 0;
+    border-left: 3px solid;
+    margin-bottom: 8px;
+    background-color: var(--vscode-editor-background);
+    border-radius: 0 3px 3px 0;
+    overflow: hidden;
+}
+.sub-step:last-child {
+    margin-bottom: 0;
+}
+
+.sub-step.waiting { border-color: var(--vscode-editorHint-foreground); }
+.sub-step.running { border-color: var(--vscode-testing-iconRunning-foreground); }
+.sub-step.completed { border-color: var(--vscode-testing-iconPassed-foreground); }
+.sub-step.failed { border-color: var(--vscode-testing-iconFailed-foreground); }
+
+.sub-step-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+}
+.sub-step-header:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.sub-step-content {
+    padding: 0 10px 10px 10px;
+    overflow: hidden;
+    transition: max-height 0.3s ease-in-out;
+}
+.sub-step-content .log-item {
+    margin: 0;
+}
+
+.planning-view.read-only .parameter-item input {
+    background-color: var(--vscode-input-background);
+    opacity: 0.7;
+    cursor: not-allowed;
+    border-style: dashed;
+}
+
+.planning-view.read-only .prompt-file-card {
+    cursor: default;
+}
+.planning-view.read-only .prompt-file-card:hover {
+    background-color: var(--vscode-button-secondaryBackground);
+}
+
+@keyframes pulse-waiting {
+  0% { opacity: 1; }
+  50% { opacity: 0.4; }
+  100% { opacity: 1; }
+}
+.execution-step.waiting .status-icon .codicon-more,
+.sub-step.waiting .status-icon .codicon-more {
+  animation: pulse-waiting 2s infinite ease-in-out;
 }

@@ -1,7 +1,12 @@
+// --- file_path: webview/views/ChatView.ts ---
+
 import { Conversation, ChatMessage, ModelConfig, Prompt } from "../../common/types";
 import { vscode } from "../vscode";
 import { MessageBlock } from "../components/MessageBlock";
 import { AtCommandMenu } from "../components/AtCommandMenu";
+// 在文件顶部添加新的 import
+import { AgentRunBlock } from "../components/AgentRunBlock";
+import { AgentPlan, StepExecution, StepUpdate, StreamChunk, AgentResult } from "../../common/types"; // 确保这些类型被导入
 
 export class ChatView {
     private messages: ChatMessage[] = [];
@@ -200,23 +205,19 @@ export class ChatView {
             return;
         }
         
-        // highlight-start
-        // 检查输入框中是否已有 Pill
         const pill = this.inputBox.querySelector('.content-pill');
         if (pill) {
             const agentId = pill.getAttribute('data-agent-id');
-            vscode.postMessage({command: 'info', payload: `触发 Agent: ${agentId} (模拟)`});
-            
-            // 在阶段二，我们只是清空输入框，为未来的 AgentRunBlock 留出空间
-            // 实际的后端调用和 UI 渲染将在任务 2 和 3 中实现
-            this.inputBox.innerHTML = '';
-            
-            return; // 结束执行
+            const agentName = pill.textContent; // e.g., "@Project"
+            if (agentId && agentName) {
+                this.mockBackendHandler(agentId, agentName); // 调用模拟后端
+                this.inputBox.innerHTML = ''; // 清空输入框
+                return; // 结束执行
+            }
         }
 
         const prompt = this.inputBox.innerText.trim();
         if (!prompt) return;
-        // highlight-end
 
         const selectedModelId = this.modelSelector.value;
         const selectedConfig = this.modelConfigs.find(c => c.id === selectedModelId);
@@ -230,9 +231,7 @@ export class ChatView {
         this.messages.push(message);
         this.renderMessages();
 
-        // highlight-start
         this.inputBox.innerHTML = '';
-        // highlight-end
         vscode.postMessage({ command: 'sendMessage', payload: { prompt, config: selectedConfig } });
     }
 
@@ -396,7 +395,7 @@ export class ChatView {
                 return; // 阻止后续的 Enter 发送等行为
             }
 
-            // 新增 Backspace 处理逻辑
+            // 优化 Backspace 处理逻辑，使其更健壮
             if (e.key === 'Backspace') {
                 const sel = window.getSelection();
                 if (sel && sel.isCollapsed) {
@@ -447,7 +446,8 @@ export class ChatView {
      * 处理输入事件，用于触发 @ 命令菜单
      */
     private handleInputForAtCommand(inputBox: HTMLElement) {
-         if (inputBox.querySelector('.content-pill')) {
+        // 1. 如果输入框中已经存在一个Pill，则不应触发@命令菜单。
+        if (inputBox.querySelector('.content-pill')) {
             this.atCommandMenu.hide();
             return;
         }
@@ -475,7 +475,7 @@ export class ChatView {
     // 更新方法签名以接收完整的 CommandLeaf 对象
     private insertAgentPill(command: { agentId: string, name: string }) {
         // 使用更具描述性的 Pill 内容
-        const pillHtml = `<span class="content-pill" contenteditable="false" data-agent-id="${command.agentId}">@${command.name}</span> `;
+        const pillHtml = `<span class="content-pill" contenteditable="false" data-agent-id="${command.agentId}">@${command.name}</span> `;
         
         // 清空输入框并插入 Pill
         this.inputBox.innerHTML = pillHtml;
@@ -568,5 +568,122 @@ export class ChatView {
             textarea.style.height = `${scrollHeight}px`;
             textarea.style.overflowY = 'hidden';
         }
+    }
+    
+    // --- 新增：模拟后端处理器 ---
+    private mockBackendHandler(agentId: string, agentName: string) {
+        // 1. 创建 AgentRunBlock 的容器并添加到聊天列表中
+        const agentRunContainer = document.createElement('div');
+        this.messageContainer.appendChild(agentRunContainer);
+        this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
+
+        // 2. 定义模拟的 AgentPlan 数据
+        const mockPlan: AgentPlan = {
+            agentId: 'docgen-project',
+            agentName: '项目级文档生成',
+            steps: [
+                { name: "规划: 分析项目结构", description: "分析文件树，规划需要分析的核心模块。", promptFiles: ['project_planner.yml'] },
+                { name: "执行: 并行分析所有模块", description: "为每个已规划的模块生成详细的文档。", promptFiles: ['module_analysis_direct.yml', 'module_analysis_mapreduce.yml']},
+                { name: "综合: 生成最终文档", description: "将所有模块分析结果汇编成最终的项目设计文档。", promptFiles: ['project_synthesis.yml'] }
+            ],
+            parameters: [] // 项目级文档生成不需要参数
+        };
+
+
+        // 3. 定义执行回调，当用户点击“开始执行”时触发
+        const onExecute = (params: Record<string, any>) => {
+            console.log("Mock backend received execute command with params:", params);
+            this.runMockExecution(agentBlock, mockPlan);
+        };
+
+        // 4. 创建 AgentRunBlock 实例，传入容器、计划和回调
+        const agentBlock = new AgentRunBlock(agentRunContainer, mockPlan, onExecute);
+    }
+    
+    // --- 新增：模拟执行流程 ---
+    private runMockExecution(agentBlock: AgentRunBlock, plan: AgentPlan) {
+        const runId = `run_${Date.now()}`;
+        let eventIndex = 0;
+        
+        // 模拟从 plan.json 读取到的模块列表
+        const plannedModules = [
+            { name: "核心业务模块", path: "agile-boot/agile-spring-boot-starter" },
+            { name: "前端控制台工具", path: "agile-boot/agile-console" },
+            { name: "后台管理服务", path: "agile-boot/agile-serve-admin" },
+            { name: "文件上传服务", path: "agile-boot/agile-spring-upload" },
+            { name: "RESTful接口服务", path: "agile-boot/agile-serve-restful" },
+            { name: "验证码服务", path: "agile-boot/agile-spring-captcha" }
+        ];
+
+        // 高保真模拟事件流
+        const mockEventStream: (StepExecution | StepUpdate | StreamChunk | AgentResult)[] = [
+            // === 阶段 1: 规划 ===
+            { runId, taskId: 'task_plan', stepName: "规划: 分析项目结构", status: 'running' } as StepExecution,
+            { runId, taskId: 'task_plan', type: 'llm-request', data: { name: '规划请求' }, metadata: { type: 'file', path: '.codewiki/runs/.../01_planning_request.txt' } } as StepUpdate,
+            { runId, taskId: 'task_plan', type: 'output', data: { name: '规划响应' }, metadata: { type: 'file', path: '.codewiki/runs/.../01_planning_response.txt' } } as StepUpdate,
+            // Agent "思考" 的关键步骤：展示 plan.json 的内容
+            { runId, taskId: 'task_plan', type: 'output', data: { name: 'Agent 决策：已规划以下模块进行分析', content: JSON.stringify(plannedModules, null, 2) } } as StepUpdate,
+            { runId, taskId: 'task_plan', stepName: "规划: 分析项目结构", status: 'completed' } as StepExecution,
+
+            // === 阶段 2: 并行分析 (父任务启动) ===
+            { runId, taskId: 'task_parallel_parent', stepName: "执行: 并行分析所有模块", status: 'running' } as StepExecution,
+            
+            // --- 模拟所有子任务的创建和执行 ---
+            // 模块 1
+            { runId, taskId: 'task_mod_1', stepName: "分析模块: '核心业务模块'", status: 'running' } as StepExecution,
+            { runId, taskId: 'task_mod_1', type: 'output', data: { name: '模块文档' }, metadata: { type: 'file', path: '.codewiki/runs/.../module_核心业务模块.md' } } as StepUpdate,
+            { runId, taskId: 'task_mod_1', stepName: "分析模块: '核心业务模块'", status: 'completed' } as StepExecution,
+            
+            // 模块 2
+            { runId, taskId: 'task_mod_2', stepName: "分析模块: '前端控制台工具'", status: 'running' } as StepExecution,
+            { runId, taskId: 'task_mod_2', type: 'output', data: { name: '模块文档' }, metadata: { type: 'file', path: '.codewiki/runs/.../module_前端控制台工具.md' } } as StepUpdate,
+            { runId, taskId: 'task_mod_2', stepName: "分析模块: '前端控制台工具'", status: 'completed' } as StepExecution,
+
+             // 模块 3 (模拟延迟完成)
+            { runId, taskId: 'task_mod_3', stepName: "分析模块: '后台管理服务'", status: 'running' } as StepExecution,
+
+            // ... 其他模块可以类似地添加
+
+            // 模块 3 完成
+            { runId, taskId: 'task_mod_3', type: 'output', data: { name: '模块文档' }, metadata: { type: 'file', path: '.codewiki/runs/.../module_后台管理服务.md' } } as StepUpdate,
+            { runId, taskId: 'task_mod_3', stepName: "分析模块: '后台管理服务'", status: 'completed' } as StepExecution,
+
+            // === 阶段 2: 并行分析 (父任务完成) ===
+            { runId, taskId: 'task_parallel_parent', stepName: "执行: 并行分析所有模块", status: 'completed' } as StepExecution,
+            
+            // === 阶段 3: 综合 ===
+            { runId, taskId: 'task_synthesis', stepName: "综合: 生成最终文档", status: 'running' } as StepExecution,
+            { runId, taskId: 'task_synthesis', type: 'llm-request', data: { name: '综合请求' }, metadata: { type: 'file', path: '.codewiki/runs/.../03_synthesis_request.txt' } } as StepUpdate,
+            { runId, taskId: 'task_synthesis', content: '# Agile-Boot 项目总体设计文档\n\n' } as StreamChunk,
+            { runId, taskId: 'task_synthesis', content: '本文档旨在提供Agile-Boot项目的整体架构...' } as StreamChunk,
+            { runId, taskId: 'task_synthesis', stepName: "综合: 生成最终文档", status: 'completed' } as StepExecution,
+
+            // === 最终结果 ===
+            { runId, status: 'completed', finalOutput: "项目总体设计文档.md 已生成。" } as AgentResult
+        ];
+
+
+        const intervalId = setInterval(() => {
+            if (eventIndex >= mockEventStream.length) {
+                clearInterval(intervalId);
+                return;
+            }
+
+            const event = mockEventStream[eventIndex++];
+            
+            // 更稳健的类型检查
+            if ('stepName' in event && 'status' in event && 'runId' in event) {
+                 if('taskId' in event) {
+                    agentBlock.updateStep(event as StepExecution);
+                 }
+            } else if ('status' in event && 'runId' in event && !('stepName' in event)) {
+                 agentBlock.setAgentResult(event as AgentResult);
+            } else if ('type' in event && 'data' in event) {
+                agentBlock.addStepLog(event as StepUpdate);
+            } else if ('content' in event && !('role' in event)) {
+                 agentBlock.appendStreamChunk(event as StreamChunk);
+            }
+
+        }, 400); // 每 800 毫秒发送一个事件
     }
 }
