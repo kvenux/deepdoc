@@ -80,23 +80,37 @@ export class AgentService {
         console.log("AgentService initialized successfully.");
     }
 
+    /**
+     * 根据 Agent ID 获取其预定义的计划（元数据）。
+     * @param agentId Agent的唯一标识符。
+     * @returns 返回 AgentPlan 对象，如果未找到则返回 null。
+     */
+    public getAgentPlan(agentId: string): AgentPlan | null {
+        const plan = AGENT_DEFINITIONS[agentId];
+        return plan ? { ...plan } : null; // 返回一个副本以避免意外修改
+    }
+
     public async prepareAndRunAgent(
         agentId: string,
-        userInput: string,
+        userInputs: Record<string, any>,
         modelConfig: ModelConfig,
         logger: AgentLogger
     ) {
         const runId = uuidv4();
-        const agentPlan = AGENT_DEFINITIONS[agentId];
+        const agentPlan = this.getAgentPlan(agentId);
+        
         if (!agentPlan) {
             const errorMsg = `Agent with ID "${agentId}" not found.`;
             logger.onAgentEnd({ runId, status: 'failed', error: errorMsg });
             return;
         }
         
-        // TODO: 解析 userInput 并填充 agentPlan.parameters
-        
-        logger.onPlanGenerated(agentPlan);
+        // 填充从前端接收到的参数值
+        agentPlan.parameters.forEach(param => {
+            if (userInputs[param.name] !== undefined) {
+                param.value = userInputs[param.name];
+            }
+        });
         
         const context: AgentContext = {
             logger,
@@ -113,7 +127,7 @@ export class AgentService {
 
         try {
             switch (agentId) {
-                case 'docgen-project':
+                case 'docgen-project': {
                     const projPrompts = {
                         plannerPrompt: await loadPromptFile(workspaceRoot, 'project_planner.yml'),
                         directAnalysisPrompt: await loadPromptFile(workspaceRoot, 'module_analysis_direct.yml'),
@@ -121,29 +135,39 @@ export class AgentService {
                         synthesisPrompt: await loadPromptFile(workspaceRoot, 'project_synthesis.yml'),
                     };
                     const orchestrator = new ProjectDocumentationOrchestrator(context, projPrompts);
-                    // 修正：传入 runId
                     await orchestrator.run(runId);
                     break;
+                }
                 
-                case 'docgen-module-direct':
+                case 'docgen-module-direct': {
                     const directPromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_direct.yml');
-                    // 修正：准备 userInputs
-                    const directInputs = { module_path: agentPlan.parameters.find(p => p.name === 'module_path')?.value || '' };
+                    // 从填充好的 plan 的 parameters 中查找 'module_path' 参数的值
+                    const modulePathParam = agentPlan.parameters.find(p => p.name === 'module_path');
+                    if (!modulePathParam || !modulePathParam.value) {
+                         throw new Error("Missing required parameter: module_path");
+                    }
+                    const directInputs = { module_path: modulePathParam.value };
+
                     const toolchainExecutor = new ToolChainExecutor(context);
-                    // 修正：传入 runId, yaml, 和 userInputs
                     const directResult = await toolchainExecutor.run(runId, directPromptYaml, directInputs);
                     logger.onAgentEnd({ runId, status: 'completed', finalOutput: directResult });
                     break;
+                }
 
-                case 'docgen-module-mapreduce':
+                case 'docgen-module-mapreduce': {
                     const mapreducePromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_mapreduce.yml');
-                    // 修正：准备 userInputs
-                    const mapreduceInputs = { module_path: agentPlan.parameters.find(p => p.name === 'module_path')?.value || '' };
+                    // 同样，从填充好的 plan 的 parameters 中查找 'module_path' 参数的值
+                    const modulePathParam = agentPlan.parameters.find(p => p.name === 'module_path');
+                    if (!modulePathParam || !modulePathParam.value) {
+                         throw new Error("Missing required parameter: module_path");
+                    }
+                    const mapreduceInputs = { module_path: modulePathParam.value };
+
                     const mapReduceExecutor = new MapReduceExecutor(context);
-                    // 修正：传入 runId, yaml, 和 userInputs
                     const mapreduceResult = await mapReduceExecutor.run(runId, mapreducePromptYaml, mapreduceInputs);
                     logger.onAgentEnd({ runId, status: 'completed', finalOutput: mapreduceResult });
                     break;
+                }
 
                 default:
                     logger.onAgentEnd({ runId, status: 'failed', error: `Execution for agent "${agentId}" is not yet implemented.` });
@@ -155,7 +179,7 @@ export class AgentService {
 
     public async runProjectDocumentation(modelConfig: ModelConfig) {
         const logger = new VscodeOutputChannelLogger("CodeWiki Project Documentation");
-        await this.prepareAndRunAgent('docgen-project', '', modelConfig, logger);
+        await this.prepareAndRunAgent('docgen-project', {}, modelConfig, logger);
     }
     
     public async runActionFromWebview(

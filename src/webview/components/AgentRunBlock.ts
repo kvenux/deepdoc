@@ -623,17 +623,28 @@ export class AgentRunBlock {
     private renderLogItem(log: { type: string, data: any, metadata?: Record<string, any> }): string {
         let content = '';
         const logDataName = log.data && typeof log.data === 'object' && 'name' in log.data ? log.data.name : '';
+        
+        // 提取 log content 用于判断长度
+        const logContent = log.data && typeof log.data === 'object' && 'content' in log.data
+            ? (typeof log.data.content === 'string' ? log.data.content : JSON.stringify(log.data.content, null, 2))
+            : (typeof log.data === 'string' ? log.data : JSON.stringify(log.data, null, 2));
+
         if (log.metadata?.type === 'file') {
             content = this.renderFileCard(log.metadata.path, logDataName);
         } else {
-            const logContent = log.data && typeof log.data === 'object' && 'content' in log.data
-                ? (typeof log.data.content === 'string' ? log.data.content : JSON.stringify(log.data.content, null, 2))
-                : (typeof log.data === 'string' ? log.data : JSON.stringify(log.data, null, 2));
+            // 使用已经提取的 logContent
             content = `<pre><code>${logContent}</code></pre>`;
         }
+        
         const iconHtml = this.getIconForLogType(log.type);
         const titleText = `${log.type.toUpperCase()}${logDataName ? ': ' + logDataName : ''}`;
-        return `<div class="log-item log-${log.type}"><div class="log-header">${iconHtml}<span>${titleText}</span></div><div class="log-content-wrapper">${content}</div></div>`;
+
+        // 启发式判断：如果是一个 input 类型的日志，并且内容很长（比如超过500字符且包含换行），
+        // 就默认给它添加 'collapsed' 类。这能很好地匹配文件树的场景。
+        const isLargeInput = log.type === 'input' && logContent.length > 500 && logContent.includes('\n');
+        const collapsedClass = isLargeInput ? 'collapsed' : '';
+        
+        return `<div class="log-item log-${log.type} ${collapsedClass}"><div class="log-header">${iconHtml}<span>${titleText}</span></div><div class="log-content-wrapper">${content}</div></div>`;
     }
 
     private renderStreamedContent(content: string): string {
@@ -684,37 +695,49 @@ export class AgentRunBlock {
     private setupEventListeners() {
         this.element.addEventListener('click', (e) => { // 委托到根元素 this.element
             const target = e.target as HTMLElement;
+            
+            // 新增：处理日志卡片头部的点击事件，用于折叠/展开
+            const logHeader = target.closest('.log-header');
+            if (logHeader) {
+                const logItem = logHeader.closest('.log-item');
+                if (logItem) {
+                    // 阻止事件冒泡，以防它触发了更外层（如步骤）的折叠事件
+                    e.stopPropagation(); 
+                    logItem.classList.toggle('collapsed');
+                    return; // 处理完毕，提前返回
+                }
+            }
 
             // --- 规划视图的交互 ---
             const planningView = target.closest('.planning-view:not(.read-only)');
             if (planningView) {
                 const executeBtn = target.closest('.execute-btn');
                 if (executeBtn) {
-                    // ... (参数处理逻辑不变) ...
+                    // 收集参数并调用 onExecute
                     const params: Record<string, any> = {};
                     let allValid = true;
+                    
                     this.plan.parameters.forEach(p => {
                         const input = this.element.querySelector(`#param-${p.name}`) as HTMLInputElement;
                         if (input) {
-                            p.value = input.value;
-                            if (!input.value && p.type !== 'string') {
+                            const value = input.value.trim();
+                            // 简单的非空验证
+                            if (!value && p.type === 'path') { // 假设 path 类型是必需的
                                 p.error = 'This field is required.';
                                 allValid = false;
                             } else {
-                                p.error = '';
+                                p.error = undefined;
+                                params[p.name] = value;
+                                p.value = value; // 更新内部状态
                             }
                         }
                     });
-                    this.plan.parameters.forEach(p => {
-                        const inputVal = (this.element.querySelector(`#param-${p.name}`) as HTMLInputElement)?.value;
-                        if (inputVal !== undefined) p.value = inputVal;
-                    });
 
                     this.status = allValid ? 'executing' : 'validating';
-                    this.render(); // 重新渲染以显示错误或锁定UI
+                    this.render(); // 重新渲染以显示错误或进入执行状态
+
                     if (allValid) {
-                        const finalParams = Object.fromEntries(this.plan.parameters.map(p => [p.name, p.value]));
-                        this.onExecute(finalParams);
+                        this.onExecute(params); // 将收集到的参数传递出去
                     }
                     return;
                 }

@@ -1,12 +1,13 @@
 // src/extension/CodeWikiViewProvider.ts (修改后完整文件)
 
 import * as vscode from 'vscode';
-import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig } from '../common/types';
+import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig, AgentPlan } from '../common/types'; // AgentPlan 可能也需要
 import { StateManager } from './StateManager';
 import { LLMService } from './services/LLMService';
-import { AgentService } from './services/AgentService'; // <-- 引入新的 AgentService
+import { AgentService } from './services/AgentService';
 import { v4 as uuidv4 } from 'uuid';
-import * as yaml from 'js-yaml'; // js-yaml 仍然需要，但仅用于其他可能的YAML处理
+import * as yaml from 'js-yaml';
+import { WebviewLogger } from './services/logging'; 
 
 export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
 
@@ -55,6 +56,21 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleMessage(data: PostMessage, source: 'sidebar' | 'focus-editor' = 'sidebar') {
+        const webview = (source === 'sidebar' && data.command.startsWith('agent:'))
+            ? this._view?.webview
+            : (source === 'focus-editor')
+                ? this._focusEditorView?.webview
+                : this._view?.webview; // 默认或非 agent 命令使用主视图
+
+        // 对于 Agent 命令，我们强制它必须来自主视图，并检查 webview 是否存在
+        if (data.command.startsWith('agent:')) {
+            if (!this._view?.webview) {
+                 console.error("Agent command received but main webview is not available.");
+                 return;
+            }
+        }
+        const sourceWebview = (source === 'focus-editor') ? this._focusEditorView?.webview : this._view?.webview;
+
         switch (data.command) {
             case 'ready':
                 {
@@ -381,6 +397,50 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 }
+            case 'agent:getPlan': {
+                // 确保 webview 存在，agent 命令只在主视图处理
+                const mainWebview = this._view?.webview;
+                if (!mainWebview) break;
+
+                const { agentId } = data.payload;
+                const plan = this._agentService.getAgentPlan(agentId);
+                if (plan) {
+                    const logger = new WebviewLogger(mainWebview);
+                    logger.onPlanGenerated(plan);
+                } else {
+                    vscode.window.showErrorMessage(`Agent with ID "${agentId}" could not be found.`);
+                }
+                break;
+            }
+
+            case 'agent:execute': {
+                // 确保 webview 存在
+                const mainWebview = this._view?.webview;
+                if (!mainWebview) break;
+
+                const { agentId, parameters } = data.payload;
+                
+                const modelConfigs = await this._stateManager.getModelConfigs();
+                const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
+                if (!defaultConfig) {
+                    const errorMsg = 'No default model configured. Please set one in the settings.';
+                    vscode.window.showErrorMessage(errorMsg);
+                    const logger = new WebviewLogger(mainWebview);
+                    logger.onAgentEnd({ runId: 'init-fail', status: 'failed', error: errorMsg });
+                    return;
+                }
+
+                const logger = new WebviewLogger(mainWebview);
+                
+                // 异步执行 Agent
+                this._agentService.prepareAndRunAgent(
+                    agentId,
+                    parameters,
+                    defaultConfig,
+                    logger
+                );
+                break;
+            }
         }
     }
 

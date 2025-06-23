@@ -178,14 +178,25 @@ export class WebviewLogger implements AgentLogger {
         // Webview 默认就是可见的，此方法可以为空
     }
 
-    // --- 添加新方法的空实现 (TODO for Phase 3) ---
-    public onPlanGenerated(plan: AgentPlan): void { /* TODO in Phase 3 */ }
-    public onStepStart(step: StepExecution): void { /* TODO in Phase 3 */ }
-    public onStepUpdate(update: StepUpdate): void { /* TODO in Phase 3 */ }
-    public onStepEnd(result: StepResult): void { /* TODO in Phase 3 */ }
+    // --- highlight-start ---
+    // --- 任务1实现：填充结构化事件发送方法 ---
+    public onPlanGenerated(plan: AgentPlan): void {
+        this.webview.postMessage({ command: 'agent:planGenerated', payload: plan });
+    }
+    public onStepStart(step: StepExecution): void {
+        this.webview.postMessage({ command: 'agent:stepStart', payload: step });
+    }
+    public onStepUpdate(update: StepUpdate): void {
+        this.webview.postMessage({ command: 'agent:stepUpdate', payload: update });
+    }
+    public onStepEnd(result: StepResult): void {
+        this.webview.postMessage({ command: 'agent:stepEnd', payload: result });
+    }
     public onStreamChunk(chunk: StreamChunk): void { 
-        // 可以提前实现这个，因为它与现有逻辑相似
         this.webview.postMessage({ command: 'agent:streamChunk', payload: chunk });
     }
-    public onAgentEnd(result: AgentResult): void { /* TODO in Phase 3 */ }
+    public onAgentEnd(result: AgentResult): void {
+        this.webview.postMessage({ command: 'agent:end', payload: result });
+    }
+    // --- highlight-end ---
 }

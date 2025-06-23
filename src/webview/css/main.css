@@ -928,6 +928,7 @@ button:hover {
     font-weight: bold;
     color: var(--vscode-descriptionForeground);
     border-bottom: 1px solid var(--vscode-input-border);
+    cursor: pointer; /* 添加手型光标，提示用户这里可以点击 */
 }
 .log-item .log-header .codicon {
     font-size: 1.1em;
@@ -935,6 +936,18 @@ button:hover {
 
 .log-content-wrapper {
     padding: 5px 10px;
+    max-height: 400px; /* 设置一个合理的默认最大高度 */
+    overflow-y: auto;  /* 当内容超出时，显示内部滚动条 */
+    transition: max-height 0.3s ease-out, padding 0.3s ease-out; /* 添加平滑过渡动画 */
+    background-color: var(--vscode-editor-background); /* 确保滚动条背景色正确 */
+}
+
+.log-item.collapsed .log-content-wrapper {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    overflow: hidden; /* 在折叠时隐藏内容，防止文字溢出 */
+    border-bottom: none; /* 折叠时不需要底边框 */
 }
 
 .log-content-wrapper pre {
@@ -1052,7 +1065,7 @@ button:hover {
 
 /* --- Sub-step Styles --- */
 .sub-steps-container {
-    padding: 10px;
+    padding: 10px 5px;
     margin: 10px 0;
     border-radius: 5px;
     background-color: var(--vscode-sideBar-background);

@@ -1,12 +1,18 @@
 // --- file_path: webview/views/ChatView.ts ---
 
-import { Conversation, ChatMessage, ModelConfig, Prompt } from "../../common/types";
 import { vscode } from "../vscode";
 import { MessageBlock } from "../components/MessageBlock";
 import { AtCommandMenu } from "../components/AtCommandMenu";
 // 在文件顶部添加新的 import
 import { AgentRunBlock } from "../components/AgentRunBlock";
-import { AgentPlan, StepExecution, StepUpdate, StreamChunk, AgentResult } from "../../common/types"; // 确保这些类型被导入
+import { Conversation, ChatMessage, ModelConfig, Prompt, AgentPlan, StepExecution, StepUpdate, StreamChunk, AgentResult } from "../../common/types"; // 确保 Agent 相关类型被导入
+
+interface CommandLeaf {
+    id: string;
+    name: string;
+    agentId: string;
+    description: string;
+}
 
 export class ChatView {
     private messages: ChatMessage[] = [];
@@ -21,7 +27,8 @@ export class ChatView {
     private originalMessageContent: string | null = null;
     private atCommandMenu: AtCommandMenu;
     private inputBox: HTMLElement; // 从 HTMLTextAreaElement 改为 HTMLElement
-
+    private activeAgentRunContainer: HTMLElement | null = null;
+    private activeAgentRunBlock: AgentRunBlock | null = null;
 
     constructor(private readonly parent: HTMLElement) {
         this.parent.innerHTML = this.renderInitialLayout();
@@ -159,6 +166,54 @@ export class ChatView {
 
         window.addEventListener('message', event => {
             const message = event.data;
+            const { command, payload } = message;
+            // 如果存在活动的 AgentRunBlock，则将事件转发给它处理
+            if (this.activeAgentRunBlock) {
+                switch (command) {
+                    case 'agent:stepStart':
+                    case 'agent:stepEnd': // StepEnd 也可以视为一种状态更新
+                        this.activeAgentRunBlock.updateStep(payload);
+                        return;
+                    case 'agent:stepUpdate':
+                        this.activeAgentRunBlock.addStepLog(payload);
+                        return;
+                    case 'agent:streamChunk':
+                        this.activeAgentRunBlock.appendStreamChunk(payload);
+                        return;
+                    case 'agent:end':
+                        this.activeAgentRunBlock.setAgentResult(payload);
+                        // Agent 运行结束，重置跟踪器
+                        this.activeAgentRunBlock = null; 
+                        this.activeAgentRunContainer = null;
+                        return;
+                }
+            }
+            
+            // 如果没有活动的 AgentRunBlock，则可能是创建新实例的事件
+            if (command === 'agent:planGenerated' && this.activeAgentRunContainer) {
+                const plan: AgentPlan = payload;
+
+                // 定义当用户点击“执行”时要运行的回调
+                const onExecute = (params: Record<string, any>) => {
+                    // --- 任务5实现：发送执行命令到后端 ---
+                    vscode.postMessage({
+                        command: 'agent:execute',
+                        payload: {
+                            agentId: plan.agentId,
+                            parameters: params
+                        }
+                    });
+                };
+
+                // 创建 AgentRunBlock 实例
+                this.activeAgentRunBlock = new AgentRunBlock(
+                    this.activeAgentRunContainer,
+                    plan,
+                    onExecute
+                );
+
+                return; // 事件已处理
+            }
             switch (message.command) {
                 case 'startStreaming': this.beginStream(); break;
                 case 'streamData': this.appendStreamData(message.payload); break;
@@ -205,17 +260,6 @@ export class ChatView {
             return;
         }
         
-        const pill = this.inputBox.querySelector('.content-pill');
-        if (pill) {
-            const agentId = pill.getAttribute('data-agent-id');
-            const agentName = pill.textContent; // e.g., "@Project"
-            if (agentId && agentName) {
-                this.mockBackendHandler(agentId, agentName); // 调用模拟后端
-                this.inputBox.innerHTML = ''; // 清空输入框
-                return; // 结束执行
-            }
-        }
-
         const prompt = this.inputBox.innerText.trim();
         if (!prompt) return;
 
@@ -462,11 +506,38 @@ export class ChatView {
             const filter = text.substring(1);
             this.atCommandMenu.show(
                 filter,
-                (command) => { this.insertAgentPill(command); }
+                (command) => { 
+                    this.handleAgentCommandSelected(command); 
+                }
             );
         } else {
             this.atCommandMenu.hide();
         }
+    }
+
+    /**
+     * 新增方法：处理从 @ 菜单中选择 Agent 命令的逻辑
+     * @param command 选中的 CommandLeaf 对象
+     */
+    private handleAgentCommandSelected(command: CommandLeaf) {
+        // 1. 清空输入框
+        this.inputBox.innerHTML = '';
+        this.atCommandMenu.hide();
+
+        // 2. 在消息列表中创建一个新的 div 容器，作为 AgentRunBlock 的占位符
+        this.activeAgentRunContainer = document.createElement('div');
+        this.messageContainer.appendChild(this.activeAgentRunContainer);
+        
+        // 确保视图滚动到底部，以便用户能看到新创建的容器（即使它现在是空的）
+        this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
+
+        // 3. 向后端发送消息，请求这个 Agent 的执行计划
+        vscode.postMessage({
+            command: 'agent:getPlan',
+            payload: {
+                agentId: command.agentId
+            }
+        });
     }
 
     /**
