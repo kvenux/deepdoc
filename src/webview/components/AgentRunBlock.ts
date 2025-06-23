@@ -1,6 +1,6 @@
 // --- file_path: webview/components/AgentRunBlock.ts ---
 
-import { AgentPlan, AgentResult, StepExecution, StepUpdate, StreamChunk, AgentPlanStep } from '../../common/types';
+import { AgentPlan, AgentResult, StepExecution, StepUpdate, StreamChunk, AgentPlanStep, StepResult } from '../../common/types'; 
 import { marked } from 'marked';
 import { vscode } from '../vscode';
 
@@ -37,7 +37,9 @@ export class AgentRunBlock {
         this.setupEventListeners();
     }
 
-    public updateStep(step: StepExecution) {
+    public updateStep(step: StepExecution | StepResult) { 
+        console.log('[AgentRunBlock] updateStep called with:', step); // <--- ADD THIS
+        // console.log('[AgentRunBlock] current executionState before update:', new Map(this.executionState)); // <--- ADD THIS
         let existing = this.executionState.get(step.taskId || step.stepName);
         if (existing) {
             existing.status = step.status;
@@ -203,6 +205,11 @@ export class AgentRunBlock {
             const executionStepState = Array.from(this.executionState.values())
                 .find(s => s.stepName === planStep.name);
 
+            console.log(`[AgentRunBlock] Rendering plan step: "${planStep.name}". Found state:`, executionStepState); // <--- ADD THIS
+            if (!executionStepState && planStep.name === "分析: 并行处理模块") {
+                console.warn("[AgentRunBlock] State for '分析: 并行处理模块' not found!"); // <--- ADD THIS
+            }
+
             if (!executionStepState) { // 如果此计划步骤还没有对应的执行状态，则不渲染
                 // 确保如果之前渲染过，现在被移除了
                 const existingEl = this.stepElementsCache.get(planStep.name);
@@ -223,7 +230,7 @@ export class AgentRunBlock {
                     this.animatedStepIds.add(stepMapKey);
                 }
 
-                const stepHtml = planStep.name === "执行: 并行分析所有模块"
+                const stepHtml = planStep.name === "分析: 并行处理模块"
                     ? this.getParallelAnalysisStepHtml(planStep, index, executionStepState, animationClass)
                     : this.getExecutionStepHtml(executionStepState, planStep, index, animationClass);
 
@@ -236,7 +243,7 @@ export class AgentRunBlock {
                     this.stepElementsCache.set(stepMapKey, stepElement);
                 }
             } else { // 元素已存在，更新它
-                this.updateStepElement(stepElement, executionStepState, planStep, planStep.name === "执行: 并行分析所有模块", index);
+                this.updateStepElement(stepElement, executionStepState, planStep, planStep.name === "分析: 并行处理模块", index);
             }
         });
 
@@ -327,6 +334,8 @@ export class AgentRunBlock {
         const subSteps = Array.from(this.executionState.values()).filter(s =>
             s.stepName.startsWith("分析模块:") && s.runId === parentStepState.runId
         );
+        console.log('[ARB] Filtered subSteps:', subSteps.map(s => ({name: s.stepName, taskId: s.taskId, status: s.status })));
+
 
         if (subSteps.length > 0) {
             return subSteps.map(sub => {
@@ -469,7 +478,7 @@ export class AgentRunBlock {
                 this.animatedStepIds.add(mainStepMapKey);
             }
 
-            if (planStep.name === "执行: 并行分析所有模块") {
+            if (planStep.name === "分析: 并行处理模块") {
                 return this.renderParallelAnalysisStep(planStep, index, executionStepState, animationClass);
             } else {
                 return this.renderExecutionStep(executionStepState, planStep, index, animationClass);
@@ -623,7 +632,7 @@ export class AgentRunBlock {
     private renderLogItem(log: { type: string, data: any, metadata?: Record<string, any> }): string {
         let content = '';
         const logDataName = log.data && typeof log.data === 'object' && 'name' in log.data ? log.data.name : '';
-        
+
         // 提取 log content 用于判断长度
         const logContent = log.data && typeof log.data === 'object' && 'content' in log.data
             ? (typeof log.data.content === 'string' ? log.data.content : JSON.stringify(log.data.content, null, 2))
@@ -635,7 +644,7 @@ export class AgentRunBlock {
             // 使用已经提取的 logContent
             content = `<pre><code>${logContent}</code></pre>`;
         }
-        
+
         const iconHtml = this.getIconForLogType(log.type);
         const titleText = `${log.type.toUpperCase()}${logDataName ? ': ' + logDataName : ''}`;
 
@@ -643,7 +652,7 @@ export class AgentRunBlock {
         // 就默认给它添加 'collapsed' 类。这能很好地匹配文件树的场景。
         const isLargeInput = log.type === 'input' && logContent.length > 500 && logContent.includes('\n');
         const collapsedClass = isLargeInput ? 'collapsed' : '';
-        
+
         return `<div class="log-item log-${log.type} ${collapsedClass}"><div class="log-header">${iconHtml}<span>${titleText}</span></div><div class="log-content-wrapper">${content}</div></div>`;
     }
 
@@ -695,14 +704,14 @@ export class AgentRunBlock {
     private setupEventListeners() {
         this.element.addEventListener('click', (e) => { // 委托到根元素 this.element
             const target = e.target as HTMLElement;
-            
+
             // 新增：处理日志卡片头部的点击事件，用于折叠/展开
             const logHeader = target.closest('.log-header');
             if (logHeader) {
                 const logItem = logHeader.closest('.log-item');
                 if (logItem) {
                     // 阻止事件冒泡，以防它触发了更外层（如步骤）的折叠事件
-                    e.stopPropagation(); 
+                    e.stopPropagation();
                     logItem.classList.toggle('collapsed');
                     return; // 处理完毕，提前返回
                 }
@@ -716,7 +725,7 @@ export class AgentRunBlock {
                     // 收集参数并调用 onExecute
                     const params: Record<string, any> = {};
                     let allValid = true;
-                    
+
                     this.plan.parameters.forEach(p => {
                         const input = this.element.querySelector(`#param-${p.name}`) as HTMLInputElement;
                         if (input) {

@@ -188,12 +188,13 @@ export interface AgentResult {
 // src/extension/CodeWikiViewProvider.ts (修改后完整文件)
 
 import * as vscode from 'vscode';
-import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig } from '../common/types';
+import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig, AgentPlan } from '../common/types'; // AgentPlan 可能也需要
 import { StateManager } from './StateManager';
 import { LLMService } from './services/LLMService';
-import { AgentService } from './services/AgentService'; // <-- 引入新的 AgentService
+import { AgentService } from './services/AgentService';
 import { v4 as uuidv4 } from 'uuid';
-import * as yaml from 'js-yaml'; // js-yaml 仍然需要，但仅用于其他可能的YAML处理
+import * as yaml from 'js-yaml';
+import { WebviewLogger } from './services/logging'; 
 
 export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
 
@@ -242,6 +243,21 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleMessage(data: PostMessage, source: 'sidebar' | 'focus-editor' = 'sidebar') {
+        const webview = (source === 'sidebar' && data.command.startsWith('agent:'))
+            ? this._view?.webview
+            : (source === 'focus-editor')
+                ? this._focusEditorView?.webview
+                : this._view?.webview; // 默认或非 agent 命令使用主视图
+
+        // 对于 Agent 命令，我们强制它必须来自主视图，并检查 webview 是否存在
+        if (data.command.startsWith('agent:')) {
+            if (!this._view?.webview) {
+                 console.error("Agent command received but main webview is not available.");
+                 return;
+            }
+        }
+        const sourceWebview = (source === 'focus-editor') ? this._focusEditorView?.webview : this._view?.webview;
+
         switch (data.command) {
             case 'ready':
                 {
@@ -568,6 +584,50 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 }
+            case 'agent:getPlan': {
+                // 确保 webview 存在，agent 命令只在主视图处理
+                const mainWebview = this._view?.webview;
+                if (!mainWebview) break;
+
+                const { agentId } = data.payload;
+                const plan = this._agentService.getAgentPlan(agentId);
+                if (plan) {
+                    const logger = new WebviewLogger(mainWebview);
+                    logger.onPlanGenerated(plan);
+                } else {
+                    vscode.window.showErrorMessage(`Agent with ID "${agentId}" could not be found.`);
+                }
+                break;
+            }
+
+            case 'agent:execute': {
+                // 确保 webview 存在
+                const mainWebview = this._view?.webview;
+                if (!mainWebview) break;
+
+                const { agentId, parameters } = data.payload;
+                
+                const modelConfigs = await this._stateManager.getModelConfigs();
+                const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
+                if (!defaultConfig) {
+                    const errorMsg = 'No default model configured. Please set one in the settings.';
+                    vscode.window.showErrorMessage(errorMsg);
+                    const logger = new WebviewLogger(mainWebview);
+                    logger.onAgentEnd({ runId: 'init-fail', status: 'failed', error: errorMsg });
+                    return;
+                }
+
+                const logger = new WebviewLogger(mainWebview);
+                
+                // 异步执行 Agent
+                this._agentService.prepareAndRunAgent(
+                    agentId,
+                    parameters,
+                    defaultConfig,
+                    logger
+                );
+                break;
+            }
         }
     }
 
@@ -1378,6 +1438,7 @@ export class ProjectDocumentationOrchestrator {
         logger.onStepEnd({ runId, taskId: filterTaskId, status: 'completed' });
         
         const analysisStepName = "执行: 并行分析所有有效模块";
+        logger.info(`[DEBUG] Attempting to start parent step: ${analysisStepName}`); 
         logger.onStepStart({ runId, stepName: analysisStepName, status: 'running' });
         const analysisPromises = finalModules.map((module, index) => 
             this.analyzeSingleModule(runId, module, plan.language, index + 1, finalModules.length)
@@ -1391,6 +1452,7 @@ export class ProjectDocumentationOrchestrator {
         const { logger } = this.context;
         const taskId = uuidv4();
         const stepName = `分析模块: '${module.name}' (${index}/${total})`;
+        logger.info(`[DEBUG] Attempting to start sub-step: ${stepName} with taskId: ${taskId}`);
         logger.onStepStart({ runId, taskId, stepName, status: 'running' });
         
         const moduleAnalysisDir = vscode.Uri.joinPath(this.runDir, `module_${module.path.replace(/[\/\\]/g, '_')}`);
@@ -1716,23 +1778,37 @@ export class AgentService {
         console.log("AgentService initialized successfully.");
     }
 
+    /**
+     * 根据 Agent ID 获取其预定义的计划（元数据）。
+     * @param agentId Agent的唯一标识符。
+     * @returns 返回 AgentPlan 对象，如果未找到则返回 null。
+     */
+    public getAgentPlan(agentId: string): AgentPlan | null {
+        const plan = AGENT_DEFINITIONS[agentId];
+        return plan ? { ...plan } : null; // 返回一个副本以避免意外修改
+    }
+
     public async prepareAndRunAgent(
         agentId: string,
-        userInput: string,
+        userInputs: Record<string, any>,
         modelConfig: ModelConfig,
         logger: AgentLogger
     ) {
         const runId = uuidv4();
-        const agentPlan = AGENT_DEFINITIONS[agentId];
+        const agentPlan = this.getAgentPlan(agentId);
+        
         if (!agentPlan) {
             const errorMsg = `Agent with ID "${agentId}" not found.`;
             logger.onAgentEnd({ runId, status: 'failed', error: errorMsg });
             return;
         }
         
-        // TODO: 解析 userInput 并填充 agentPlan.parameters
-        
-        logger.onPlanGenerated(agentPlan);
+        // 填充从前端接收到的参数值
+        agentPlan.parameters.forEach(param => {
+            if (userInputs[param.name] !== undefined) {
+                param.value = userInputs[param.name];
+            }
+        });
         
         const context: AgentContext = {
             logger,
@@ -1749,7 +1825,7 @@ export class AgentService {
 
         try {
             switch (agentId) {
-                case 'docgen-project':
+                case 'docgen-project': {
                     const projPrompts = {
                         plannerPrompt: await loadPromptFile(workspaceRoot, 'project_planner.yml'),
                         directAnalysisPrompt: await loadPromptFile(workspaceRoot, 'module_analysis_direct.yml'),
@@ -1757,29 +1833,39 @@ export class AgentService {
                         synthesisPrompt: await loadPromptFile(workspaceRoot, 'project_synthesis.yml'),
                     };
                     const orchestrator = new ProjectDocumentationOrchestrator(context, projPrompts);
-                    // 修正：传入 runId
                     await orchestrator.run(runId);
                     break;
+                }
                 
-                case 'docgen-module-direct':
+                case 'docgen-module-direct': {
                     const directPromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_direct.yml');
-                    // 修正：准备 userInputs
-                    const directInputs = { module_path: agentPlan.parameters.find(p => p.name === 'module_path')?.value || '' };
+                    // 从填充好的 plan 的 parameters 中查找 'module_path' 参数的值
+                    const modulePathParam = agentPlan.parameters.find(p => p.name === 'module_path');
+                    if (!modulePathParam || !modulePathParam.value) {
+                         throw new Error("Missing required parameter: module_path");
+                    }
+                    const directInputs = { module_path: modulePathParam.value };
+
                     const toolchainExecutor = new ToolChainExecutor(context);
-                    // 修正：传入 runId, yaml, 和 userInputs
                     const directResult = await toolchainExecutor.run(runId, directPromptYaml, directInputs);
                     logger.onAgentEnd({ runId, status: 'completed', finalOutput: directResult });
                     break;
+                }
 
-                case 'docgen-module-mapreduce':
+                case 'docgen-module-mapreduce': {
                     const mapreducePromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_mapreduce.yml');
-                    // 修正：准备 userInputs
-                    const mapreduceInputs = { module_path: agentPlan.parameters.find(p => p.name === 'module_path')?.value || '' };
+                    // 同样，从填充好的 plan 的 parameters 中查找 'module_path' 参数的值
+                    const modulePathParam = agentPlan.parameters.find(p => p.name === 'module_path');
+                    if (!modulePathParam || !modulePathParam.value) {
+                         throw new Error("Missing required parameter: module_path");
+                    }
+                    const mapreduceInputs = { module_path: modulePathParam.value };
+
                     const mapReduceExecutor = new MapReduceExecutor(context);
-                    // 修正：传入 runId, yaml, 和 userInputs
                     const mapreduceResult = await mapReduceExecutor.run(runId, mapreducePromptYaml, mapreduceInputs);
                     logger.onAgentEnd({ runId, status: 'completed', finalOutput: mapreduceResult });
                     break;
+                }
 
                 default:
                     logger.onAgentEnd({ runId, status: 'failed', error: `Execution for agent "${agentId}" is not yet implemented.` });
@@ -1791,7 +1877,7 @@ export class AgentService {
 
     public async runProjectDocumentation(modelConfig: ModelConfig) {
         const logger = new VscodeOutputChannelLogger("CodeWiki Project Documentation");
-        await this.prepareAndRunAgent('docgen-project', '', modelConfig, logger);
+        await this.prepareAndRunAgent('docgen-project', {}, modelConfig, logger);
     }
     
     public async runActionFromWebview(
@@ -2311,16 +2397,27 @@ export class WebviewLogger implements AgentLogger {
         // Webview 默认就是可见的，此方法可以为空
     }
 
-    // --- 添加新方法的空实现 (TODO for Phase 3) ---
-    public onPlanGenerated(plan: AgentPlan): void { /* TODO in Phase 3 */ }
-    public onStepStart(step: StepExecution): void { /* TODO in Phase 3 */ }
-    public onStepUpdate(update: StepUpdate): void { /* TODO in Phase 3 */ }
-    public onStepEnd(result: StepResult): void { /* TODO in Phase 3 */ }
+    // --- highlight-start ---
+    // --- 任务1实现：填充结构化事件发送方法 ---
+    public onPlanGenerated(plan: AgentPlan): void {
+        this.webview.postMessage({ command: 'agent:planGenerated', payload: plan });
+    }
+    public onStepStart(step: StepExecution): void {
+        this.webview.postMessage({ command: 'agent:stepStart', payload: step });
+    }
+    public onStepUpdate(update: StepUpdate): void {
+        this.webview.postMessage({ command: 'agent:stepUpdate', payload: update });
+    }
+    public onStepEnd(result: StepResult): void {
+        this.webview.postMessage({ command: 'agent:stepEnd', payload: result });
+    }
     public onStreamChunk(chunk: StreamChunk): void { 
-        // 可以提前实现这个，因为它与现有逻辑相似
         this.webview.postMessage({ command: 'agent:streamChunk', payload: chunk });
     }
-    public onAgentEnd(result: AgentResult): void { /* TODO in Phase 3 */ }
+    public onAgentEnd(result: AgentResult): void {
+        this.webview.postMessage({ command: 'agent:end', payload: result });
+    }
+    // --- highlight-end ---
 }
 
 --------------------------------------------------------------------------------
@@ -2829,6 +2926,8 @@ export class AgentRunBlock {
     }
 
     public updateStep(step: StepExecution) {
+        console.log('[AgentRunBlock] updateStep called with:', step); // <--- ADD THIS
+        console.log('[AgentRunBlock] current executionState before update:', new Map(this.executionState)); // <--- ADD THIS
         let existing = this.executionState.get(step.taskId || step.stepName);
         if (existing) {
             existing.status = step.status;
@@ -2994,6 +3093,11 @@ export class AgentRunBlock {
             const executionStepState = Array.from(this.executionState.values())
                 .find(s => s.stepName === planStep.name);
 
+            console.log(`[AgentRunBlock] Rendering plan step: "${planStep.name}". Found state:`, executionStepState); // <--- ADD THIS
+            if (!executionStepState && planStep.name === "执行: 并行分析所有有效模块") {
+                console.warn("[AgentRunBlock] State for '执行: 并行分析所有有效模块' not found!"); // <--- ADD THIS
+            }
+            
             if (!executionStepState) { // 如果此计划步骤还没有对应的执行状态，则不渲染
                 // 确保如果之前渲染过，现在被移除了
                 const existingEl = this.stepElementsCache.get(planStep.name);
@@ -3414,17 +3518,28 @@ export class AgentRunBlock {
     private renderLogItem(log: { type: string, data: any, metadata?: Record<string, any> }): string {
         let content = '';
         const logDataName = log.data && typeof log.data === 'object' && 'name' in log.data ? log.data.name : '';
+
+        // 提取 log content 用于判断长度
+        const logContent = log.data && typeof log.data === 'object' && 'content' in log.data
+            ? (typeof log.data.content === 'string' ? log.data.content : JSON.stringify(log.data.content, null, 2))
+            : (typeof log.data === 'string' ? log.data : JSON.stringify(log.data, null, 2));
+
         if (log.metadata?.type === 'file') {
             content = this.renderFileCard(log.metadata.path, logDataName);
         } else {
-            const logContent = log.data && typeof log.data === 'object' && 'content' in log.data
-                ? (typeof log.data.content === 'string' ? log.data.content : JSON.stringify(log.data.content, null, 2))
-                : (typeof log.data === 'string' ? log.data : JSON.stringify(log.data, null, 2));
+            // 使用已经提取的 logContent
             content = `<pre><code>${logContent}</code></pre>`;
         }
+
         const iconHtml = this.getIconForLogType(log.type);
         const titleText = `${log.type.toUpperCase()}${logDataName ? ': ' + logDataName : ''}`;
-        return `<div class="log-item log-${log.type}"><div class="log-header">${iconHtml}<span>${titleText}</span></div><div class="log-content-wrapper">${content}</div></div>`;
+
+        // 启发式判断：如果是一个 input 类型的日志，并且内容很长（比如超过500字符且包含换行），
+        // 就默认给它添加 'collapsed' 类。这能很好地匹配文件树的场景。
+        const isLargeInput = log.type === 'input' && logContent.length > 500 && logContent.includes('\n');
+        const collapsedClass = isLargeInput ? 'collapsed' : '';
+
+        return `<div class="log-item log-${log.type} ${collapsedClass}"><div class="log-header">${iconHtml}<span>${titleText}</span></div><div class="log-content-wrapper">${content}</div></div>`;
     }
 
     private renderStreamedContent(content: string): string {
@@ -3476,36 +3591,48 @@ export class AgentRunBlock {
         this.element.addEventListener('click', (e) => { // 委托到根元素 this.element
             const target = e.target as HTMLElement;
 
+            // 新增：处理日志卡片头部的点击事件，用于折叠/展开
+            const logHeader = target.closest('.log-header');
+            if (logHeader) {
+                const logItem = logHeader.closest('.log-item');
+                if (logItem) {
+                    // 阻止事件冒泡，以防它触发了更外层（如步骤）的折叠事件
+                    e.stopPropagation();
+                    logItem.classList.toggle('collapsed');
+                    return; // 处理完毕，提前返回
+                }
+            }
+
             // --- 规划视图的交互 ---
             const planningView = target.closest('.planning-view:not(.read-only)');
             if (planningView) {
                 const executeBtn = target.closest('.execute-btn');
                 if (executeBtn) {
-                    // ... (参数处理逻辑不变) ...
+                    // 收集参数并调用 onExecute
                     const params: Record<string, any> = {};
                     let allValid = true;
+
                     this.plan.parameters.forEach(p => {
                         const input = this.element.querySelector(`#param-${p.name}`) as HTMLInputElement;
                         if (input) {
-                            p.value = input.value;
-                            if (!input.value && p.type !== 'string') {
+                            const value = input.value.trim();
+                            // 简单的非空验证
+                            if (!value && p.type === 'path') { // 假设 path 类型是必需的
                                 p.error = 'This field is required.';
                                 allValid = false;
                             } else {
-                                p.error = '';
+                                p.error = undefined;
+                                params[p.name] = value;
+                                p.value = value; // 更新内部状态
                             }
                         }
                     });
-                    this.plan.parameters.forEach(p => {
-                        const inputVal = (this.element.querySelector(`#param-${p.name}`) as HTMLInputElement)?.value;
-                        if (inputVal !== undefined) p.value = inputVal;
-                    });
 
                     this.status = allValid ? 'executing' : 'validating';
-                    this.render(); // 重新渲染以显示错误或锁定UI
+                    this.render(); // 重新渲染以显示错误或进入执行状态
+
                     if (allValid) {
-                        const finalParams = Object.fromEntries(this.plan.parameters.map(p => [p.name, p.value]));
-                        this.onExecute(finalParams);
+                        this.onExecute(params); // 将收集到的参数传递出去
                     }
                     return;
                 }
@@ -4833,6 +4960,7 @@ button:hover {
     font-weight: bold;
     color: var(--vscode-descriptionForeground);
     border-bottom: 1px solid var(--vscode-input-border);
+    cursor: pointer; /* 添加手型光标，提示用户这里可以点击 */
 }
 .log-item .log-header .codicon {
     font-size: 1.1em;
@@ -4840,6 +4968,18 @@ button:hover {
 
 .log-content-wrapper {
     padding: 5px 10px;
+    max-height: 400px; /* 设置一个合理的默认最大高度 */
+    overflow-y: auto;  /* 当内容超出时，显示内部滚动条 */
+    transition: max-height 0.3s ease-out, padding 0.3s ease-out; /* 添加平滑过渡动画 */
+    background-color: var(--vscode-editor-background); /* 确保滚动条背景色正确 */
+}
+
+.log-item.collapsed .log-content-wrapper {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    overflow: hidden; /* 在折叠时隐藏内容，防止文字溢出 */
+    border-bottom: none; /* 折叠时不需要底边框 */
 }
 
 .log-content-wrapper pre {
@@ -4957,7 +5097,7 @@ button:hover {
 
 /* --- Sub-step Styles --- */
 .sub-steps-container {
-    padding: 10px;
+    padding: 10px 5px;
     margin: 10px 0;
     border-radius: 5px;
     background-color: var(--vscode-sideBar-background);
@@ -5460,13 +5600,19 @@ export class ChatHistoryView {
 --- file_path: webview/views/ChatView.ts ---
 // --- file_path: webview/views/ChatView.ts ---
 
-import { Conversation, ChatMessage, ModelConfig, Prompt } from "../../common/types";
 import { vscode } from "../vscode";
 import { MessageBlock } from "../components/MessageBlock";
 import { AtCommandMenu } from "../components/AtCommandMenu";
 // 在文件顶部添加新的 import
 import { AgentRunBlock } from "../components/AgentRunBlock";
-import { AgentPlan, StepExecution, StepUpdate, StreamChunk, AgentResult } from "../../common/types"; // 确保这些类型被导入
+import { Conversation, ChatMessage, ModelConfig, Prompt, AgentPlan, StepExecution, StepUpdate, StreamChunk, AgentResult } from "../../common/types"; // 确保 Agent 相关类型被导入
+
+interface CommandLeaf {
+    id: string;
+    name: string;
+    agentId: string;
+    description: string;
+}
 
 export class ChatView {
     private messages: ChatMessage[] = [];
@@ -5481,7 +5627,8 @@ export class ChatView {
     private originalMessageContent: string | null = null;
     private atCommandMenu: AtCommandMenu;
     private inputBox: HTMLElement; // 从 HTMLTextAreaElement 改为 HTMLElement
-
+    private activeAgentRunContainer: HTMLElement | null = null;
+    private activeAgentRunBlock: AgentRunBlock | null = null;
 
     constructor(private readonly parent: HTMLElement) {
         this.parent.innerHTML = this.renderInitialLayout();
@@ -5619,6 +5766,55 @@ export class ChatView {
 
         window.addEventListener('message', event => {
             const message = event.data;
+            const { command, payload } = message;
+            // 如果存在活动的 AgentRunBlock，则将事件转发给它处理
+            if (this.activeAgentRunBlock) {
+                switch (command) {
+                    case 'agent:stepStart':
+                    case 'agent:stepEnd': // StepEnd 也可以视为一种状态更新
+                        console.log('[ChatView] Received agent:stepStart:', payload); 
+                        this.activeAgentRunBlock.updateStep(payload);
+                        return;
+                    case 'agent:stepUpdate':
+                        this.activeAgentRunBlock.addStepLog(payload);
+                        return;
+                    case 'agent:streamChunk':
+                        this.activeAgentRunBlock.appendStreamChunk(payload);
+                        return;
+                    case 'agent:end':
+                        this.activeAgentRunBlock.setAgentResult(payload);
+                        // Agent 运行结束，重置跟踪器
+                        this.activeAgentRunBlock = null; 
+                        this.activeAgentRunContainer = null;
+                        return;
+                }
+            }
+            
+            // 如果没有活动的 AgentRunBlock，则可能是创建新实例的事件
+            if (command === 'agent:planGenerated' && this.activeAgentRunContainer) {
+                const plan: AgentPlan = payload;
+
+                // 定义当用户点击“执行”时要运行的回调
+                const onExecute = (params: Record<string, any>) => {
+                    // --- 任务5实现：发送执行命令到后端 ---
+                    vscode.postMessage({
+                        command: 'agent:execute',
+                        payload: {
+                            agentId: plan.agentId,
+                            parameters: params
+                        }
+                    });
+                };
+
+                // 创建 AgentRunBlock 实例
+                this.activeAgentRunBlock = new AgentRunBlock(
+                    this.activeAgentRunContainer,
+                    plan,
+                    onExecute
+                );
+
+                return; // 事件已处理
+            }
             switch (message.command) {
                 case 'startStreaming': this.beginStream(); break;
                 case 'streamData': this.appendStreamData(message.payload); break;
@@ -5665,17 +5861,6 @@ export class ChatView {
             return;
         }
         
-        const pill = this.inputBox.querySelector('.content-pill');
-        if (pill) {
-            const agentId = pill.getAttribute('data-agent-id');
-            const agentName = pill.textContent; // e.g., "@Project"
-            if (agentId && agentName) {
-                this.mockBackendHandler(agentId, agentName); // 调用模拟后端
-                this.inputBox.innerHTML = ''; // 清空输入框
-                return; // 结束执行
-            }
-        }
-
         const prompt = this.inputBox.innerText.trim();
         if (!prompt) return;
 
@@ -5922,11 +6107,38 @@ export class ChatView {
             const filter = text.substring(1);
             this.atCommandMenu.show(
                 filter,
-                (command) => { this.insertAgentPill(command); }
+                (command) => { 
+                    this.handleAgentCommandSelected(command); 
+                }
             );
         } else {
             this.atCommandMenu.hide();
         }
+    }
+
+    /**
+     * 新增方法：处理从 @ 菜单中选择 Agent 命令的逻辑
+     * @param command 选中的 CommandLeaf 对象
+     */
+    private handleAgentCommandSelected(command: CommandLeaf) {
+        // 1. 清空输入框
+        this.inputBox.innerHTML = '';
+        this.atCommandMenu.hide();
+
+        // 2. 在消息列表中创建一个新的 div 容器，作为 AgentRunBlock 的占位符
+        this.activeAgentRunContainer = document.createElement('div');
+        this.messageContainer.appendChild(this.activeAgentRunContainer);
+        
+        // 确保视图滚动到底部，以便用户能看到新创建的容器（即使它现在是空的）
+        this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
+
+        // 3. 向后端发送消息，请求这个 Agent 的执行计划
+        vscode.postMessage({
+            command: 'agent:getPlan',
+            payload: {
+                agentId: command.agentId
+            }
+        });
     }
 
     /**

@@ -5,7 +5,7 @@ import { MessageBlock } from "../components/MessageBlock";
 import { AtCommandMenu } from "../components/AtCommandMenu";
 // 在文件顶部添加新的 import
 import { AgentRunBlock } from "../components/AgentRunBlock";
-import { Conversation, ChatMessage, ModelConfig, Prompt, AgentPlan, StepExecution, StepUpdate, StreamChunk, AgentResult } from "../../common/types"; // 确保 Agent 相关类型被导入
+import { Conversation, ChatMessage, ModelConfig, Prompt, AgentPlan, StepExecution, StepUpdate, StepResult, StreamChunk, AgentResult } from "../../common/types"; // 确保 Agent 相关类型被导入
 
 interface CommandLeaf {
     id: string;
@@ -171,8 +171,12 @@ export class ChatView {
             if (this.activeAgentRunBlock) {
                 switch (command) {
                     case 'agent:stepStart':
-                    case 'agent:stepEnd': // StepEnd 也可以视为一种状态更新
-                        this.activeAgentRunBlock.updateStep(payload);
+                        console.log('[ChatView] Received agent:stepStart:', payload);
+                        this.activeAgentRunBlock.updateStep(payload as StepExecution); // Explicit cast
+                        return;
+                    case 'agent:stepEnd': 
+                        console.log('[ChatView] Received agent:stepEnd:', payload);
+                        this.activeAgentRunBlock.updateStep(payload as StepResult); // Explicit cast
                         return;
                     case 'agent:stepUpdate':
                         this.activeAgentRunBlock.addStepLog(payload);
@@ -182,7 +186,6 @@ export class ChatView {
                         return;
                     case 'agent:end':
                         this.activeAgentRunBlock.setAgentResult(payload);
-                        // Agent 运行结束，重置跟踪器
                         this.activeAgentRunBlock = null; 
                         this.activeAgentRunContainer = null;
                         return;
@@ -192,10 +195,7 @@ export class ChatView {
             // 如果没有活动的 AgentRunBlock，则可能是创建新实例的事件
             if (command === 'agent:planGenerated' && this.activeAgentRunContainer) {
                 const plan: AgentPlan = payload;
-
-                // 定义当用户点击“执行”时要运行的回调
                 const onExecute = (params: Record<string, any>) => {
-                    // --- 任务5实现：发送执行命令到后端 ---
                     vscode.postMessage({
                         command: 'agent:execute',
                         payload: {
@@ -204,16 +204,14 @@ export class ChatView {
                         }
                     });
                 };
-
-                // 创建 AgentRunBlock 实例
                 this.activeAgentRunBlock = new AgentRunBlock(
                     this.activeAgentRunContainer,
                     plan,
                     onExecute
                 );
-
-                return; // 事件已处理
+                return; 
             }
+
             switch (message.command) {
                 case 'startStreaming': this.beginStream(); break;
                 case 'streamData': this.appendStreamData(message.payload); break;

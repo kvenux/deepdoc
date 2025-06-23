@@ -106,6 +106,7 @@ export interface StepUpdate {
  */
 export interface StepResult {
     runId: string;
+    stepName: string; // <-- 新增: 确保步骤名称被传递
     taskId?: string; //
     status: 'completed' | 'failed';
     output?: any;

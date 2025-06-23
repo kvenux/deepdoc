@@ -1,3 +1,4 @@
+// file_path: extension/agents/executors/MapReduceExecutor.ts
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
@@ -50,7 +51,7 @@ export class MapReduceExecutor {
         let tokenizer: Tiktoken | null = null;
         
         try {
-            const prepTaskId = uuidv4(); // 修正：确保 uuidv4 已 import
+            const prepTaskId = uuidv4(); 
             const prepStepName = "解析与准备";
             logger.onStepStart({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'running' });
             
@@ -85,14 +86,14 @@ export class MapReduceExecutor {
             }
             if (currentBatch.length > 0) { batches.push(currentBatch); }
             logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "批次信息", content: `创建了 ${batches.length} 个批次。` } });
-            logger.onStepEnd({ runId, taskId: prepTaskId, status: 'completed' }); // 修正：移除 stepName
+            logger.onStepEnd({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'completed' }); // 修正: 添加 stepName
 
             const mapStepName = "Map阶段: 并行分析";
-            logger.onStepStart({ runId, stepName: mapStepName, status: 'running' });
+            logger.onStepStart({ runId, stepName: mapStepName, status: 'running' }); // 这个是父步骤的开始
 
             const llm = await llmService.createModel({ modelConfig, temperature: 0.1, streaming: false });
             const mapAnalysisPromises = batches.map(async (batch, i) => {
-                const mapTaskId = uuidv4(); // 修正：确保 uuidv4 已 import
+                const mapTaskId = uuidv4(); 
                 const mapTaskName = `分析批次 ${i + 1}/${batches.length}`;
                 logger.onStepStart({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'running' });
                 
@@ -105,17 +106,17 @@ export class MapReduceExecutor {
                     const responseContent = response.content as string;
 
                     logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'output', data: { name: "批次摘要", content: responseContent } });
-                    logger.onStepEnd({ runId, taskId: mapTaskId, status: 'completed' }); // 修正
+                    logger.onStepEnd({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'completed' }); // 修正: 添加 stepName
                     return responseContent;
                 } catch (e: any) {
-                    logger.onStepEnd({ runId, taskId: mapTaskId, status: 'failed', error: e.message }); // 修正
+                    logger.onStepEnd({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'failed', error: e.message }); // 修正: 添加 stepName
                     throw e;
                 }
             });
             const mapResults = await Promise.all(mapAnalysisPromises);
-            logger.onStepEnd({ runId, status: 'completed' }); // 修正：聚合步骤的结束
+            logger.onStepEnd({ runId, stepName: mapStepName, status: 'completed' }); // 修正: 父步骤的结束, 添加 stepName
 
-            const reduceTaskId = uuidv4(); // 修正：确保 uuidv4 已 import
+            const reduceTaskId = uuidv4(); 
             const reduceStepName = "Reduce阶段: 综合摘要";
             logger.onStepStart({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'running' });
 
@@ -131,18 +132,18 @@ export class MapReduceExecutor {
             
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'llm-request', data: { system: actionPrompt.reduce_prompt_template.system, human: humanReducePrompt } });
 
-            const reduceChain = reduceLlm.pipe(new StringOutputParser()); // 修正: 确保已 import
+            const reduceChain = reduceLlm.pipe(new StringOutputParser()); 
             const stream = await reduceChain.stream([ new SystemMessage(actionPrompt.reduce_prompt_template.system), new HumanMessage(humanReducePrompt) ]);
 
             let finalContent = '';
             for await (const chunk of stream) {
-                const chunkContent = chunk as string; // 修正: 类型断言
+                const chunkContent = chunk as string; 
                 finalContent += chunkContent;
-                logger.onStreamChunk({ runId, taskId: reduceTaskId, content: chunkContent });
+                // logger.onStreamChunk({ runId, taskId: reduceTaskId, content: chunkContent });
             }
 
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'output', data: { name: "最终文档", content: finalContent }, metadata: { type: 'markdown' } });
-            logger.onStepEnd({ runId, taskId: reduceTaskId, status: 'completed' }); // 修正
+            logger.onStepEnd({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'completed' }); // 修正: 添加 stepName
             
             return finalContent;
 
