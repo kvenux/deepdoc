@@ -1,6 +1,6 @@
 // --- file_path: webview/components/AgentRunBlock.ts ---
 
-import { AgentPlan, AgentResult, StepExecution, StepUpdate, StreamChunk, AgentPlanStep, StepResult } from '../../common/types'; 
+import { AgentPlan, AgentResult, StepExecution, StepUpdate, StreamChunk, AgentPlanStep, StepResult } from '../../common/types';
 import { marked } from 'marked';
 import { vscode } from '../vscode';
 
@@ -37,7 +37,7 @@ export class AgentRunBlock {
         this.setupEventListeners();
     }
 
-    public updateStep(step: StepExecution | StepResult) { 
+    public updateStep(step: StepExecution | StepResult) {
         console.log('[AgentRunBlock] updateStep called with:', step); // <--- ADD THIS
         // console.log('[AgentRunBlock] current executionState before update:', new Map(this.executionState)); // <--- ADD THIS
         let existing = this.executionState.get(step.taskId || step.stepName);
@@ -334,7 +334,7 @@ export class AgentRunBlock {
         const subSteps = Array.from(this.executionState.values()).filter(s =>
             s.stepName.startsWith("分析模块:") && s.runId === parentStepState.runId
         );
-        console.log('[ARB] Filtered subSteps:', subSteps.map(s => ({name: s.stepName, taskId: s.taskId, status: s.status })));
+        console.log('[ARB] Filtered subSteps:', subSteps.map(s => ({ name: s.stepName, taskId: s.taskId, status: s.status })));
 
 
         if (subSteps.length > 0) {
@@ -760,9 +760,12 @@ export class AgentRunBlock {
             // --- 文件卡片点击 ---
             const fileCard = target.closest('.file-card');
             if (fileCard) {
-                e.stopPropagation();
+                e.stopPropagation(); // Prevent other clicks if needed
                 const filePath = (fileCard as HTMLElement).dataset.filePath;
-                if (filePath) { vscode.postMessage({ command: 'viewFile', payload: { path: filePath } }); }
+                if (filePath) {
+                    console.log('[AgentRunBlock] File card clicked, path:', filePath); // For debugging
+                    vscode.postMessage({ command: 'viewFile', payload: { path: filePath } });
+                }
                 return;
             }
 

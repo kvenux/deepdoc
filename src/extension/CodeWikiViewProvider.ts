@@ -7,7 +7,8 @@ import { LLMService } from './services/LLMService';
 import { AgentService } from './services/AgentService';
 import { v4 as uuidv4 } from 'uuid';
 import * as yaml from 'js-yaml';
-import { WebviewLogger } from './services/logging'; 
+import { WebviewLogger } from './services/logging';
+import * as path from 'path';
 
 export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
 
@@ -65,8 +66,8 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
         // 对于 Agent 命令，我们强制它必须来自主视图，并检查 webview 是否存在
         if (data.command.startsWith('agent:')) {
             if (!this._view?.webview) {
-                 console.error("Agent command received but main webview is not available.");
-                 return;
+                console.error("Agent command received but main webview is not available.");
+                return;
             }
         }
         const sourceWebview = (source === 'focus-editor') ? this._focusEditorView?.webview : this._view?.webview;
@@ -419,7 +420,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 if (!mainWebview) break;
 
                 const { agentId, parameters } = data.payload;
-                
+
                 const modelConfigs = await this._stateManager.getModelConfigs();
                 const defaultConfig = modelConfigs.find(c => c.isDefault) || modelConfigs[0];
                 if (!defaultConfig) {
@@ -431,7 +432,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 }
 
                 const logger = new WebviewLogger(mainWebview);
-                
+
                 // 异步执行 Agent
                 this._agentService.prepareAndRunAgent(
                     agentId,
@@ -439,6 +440,81 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     defaultConfig,
                     logger
                 );
+                break;
+            }
+
+            case 'viewFile': {
+                const filePathPayload = data.payload?.path;
+                if (typeof filePathPayload === 'string') {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (workspaceFolders && workspaceFolders.length > 0) {
+                        const workspaceRootUri = workspaceFolders[0].uri;
+                        let fileToOpenUri: vscode.Uri;
+
+                        // 检查 filePathPayload 是否已经是绝对路径 (虽然通常 webview 发送的是相对路径或特殊标记的路径)
+                        // 或者是否是相对于 .codewiki/runs/... 的路径
+                        if (path.isAbsolute(filePathPayload)) {
+                            fileToOpenUri = vscode.Uri.file(filePathPayload);
+                        } else if (filePathPayload.startsWith('.codewiki/') || filePathPayload.startsWith('.vscode/')) {
+                            // 假设路径是相对于工作区根目录的，例如从 .codewiki 目录
+                            fileToOpenUri = vscode.Uri.joinPath(workspaceRootUri, filePathPayload);
+                        } else {
+                            // 默认行为：如果不是 .codewiki/runs/... 下的，尝试把它作为相对于 .codewiki 目录下的提示文件
+                            // (这可能需要调整，取决于 fileCard 的 filePath 具体是什么)
+                            // 假设它可能是 .codewiki 目录下的 yml 文件
+                            // 如果是 Agent 运行产生的 markdown 文件，路径可能需要特别处理
+                            // 例如，AgentResult 的 finalOutput 可能是 "项目总体设计文档.md"
+                            // 这时需要结合 Agent 运行的 runDir 来构造完整路径
+
+                            // 对于 AgentPlan 中的 promptFiles (e.g., 'project_planner.yml')
+                            // 它们是相对于 .codewiki 目录的
+                            if (filePathPayload.endsWith('.yml') || filePathPayload.endsWith('.yaml')) {
+                                fileToOpenUri = vscode.Uri.joinPath(workspaceRootUri, '.codewiki', filePathPayload);
+                            } else if (filePathPayload.endsWith('.md') && this._agentService && (this._agentService as any).getLastRunDir) {
+                                // 这是一个假设：AgentService 能提供上次运行的目录
+                                // 这个逻辑比较复杂，因为 CodeWikiViewProvider 通常不知道 runDir
+                                // 更好的做法是让 AgentRunBlock 发送更明确的路径类型或完整路径
+                                // 或者，AgentResult.finalOutput 如果是文件，应该是相对于工作区的路径
+                                const lastRunDir = await (this._agentService as any).getLastRunDir(); // 需要 AgentService 支持
+                                if (lastRunDir) {
+                                    fileToOpenUri = vscode.Uri.joinPath(lastRunDir, filePathPayload);
+                                } else {
+                                    vscode.window.showErrorMessage(`无法确定文件 ${filePathPayload} 的完整路径。`);
+                                    return;
+                                }
+                            }
+                            else {
+                                // 默认尝试作为项目根路径下的文件
+                                fileToOpenUri = vscode.Uri.joinPath(workspaceRootUri, filePathPayload);
+                            }
+                        }
+
+                        try {
+                            // 检查文件是否存在
+                            await vscode.workspace.fs.stat(fileToOpenUri);
+                            vscode.window.showTextDocument(fileToOpenUri);
+                        } catch (error) {
+                            console.error(`Error opening file ${fileToOpenUri.fsPath}:`, error);
+                            // 如果 .codewiki/xxx.yml 不存在，尝试作为项目根目录下的文件
+                            if ((filePathPayload.endsWith('.yml') || filePathPayload.endsWith('.yaml')) && !filePathPayload.includes('/')) {
+                                try {
+                                    const rootFileUri = vscode.Uri.joinPath(workspaceRootUri, filePathPayload);
+                                    await vscode.workspace.fs.stat(rootFileUri);
+                                    vscode.window.showTextDocument(rootFileUri);
+                                    return;
+                                } catch (rootError) {
+                                    vscode.window.showErrorMessage(`文件 "${filePathPayload}" 未在 .codewiki/ 或项目根目录中找到。`);
+                                }
+                            } else {
+                                vscode.window.showErrorMessage(`无法打开文件: ${filePathPayload}. 文件可能不存在或路径不正确。`);
+                            }
+                        }
+                    } else {
+                        vscode.window.showWarningMessage('请先打开一个工作区以查看文件。');
+                    }
+                } else {
+                    vscode.window.showErrorMessage('无效的文件路径。');
+                }
                 break;
             }
         }
