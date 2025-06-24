@@ -432,13 +432,7 @@ export class AgentRunBlock {
         let contentHtml;
 
         if (resultClass === 'completed') {
-            const output = this.agentResult.finalOutput;
-            if (typeof output === 'string' && (output.endsWith('.md') || output.endsWith('.txt') || output.includes('/'))) {
-                const fileName = output.includes('/') ? output.substring(output.lastIndexOf('/') + 1) : output;
-                contentHtml = this.renderFileCard(output, fileName);
-            } else {
-                contentHtml = `<p>${typeof output === 'string' ? output : JSON.stringify(output)}</p>`;
-            }
+            contentHtml = '';
         } else {
             contentHtml = `<div class="error-text">${this.agentResult.error}</div>`;
         }
@@ -687,14 +681,7 @@ export class AgentRunBlock {
 
         if (resultClass === 'completed') {
             // Display finalOutput as a clickable file card if it looks like a file name, otherwise as text.
-            const output = this.agentResult.finalOutput;
-            if (typeof output === 'string' && (output.endsWith('.md') || output.endsWith('.txt') || output.includes('/'))) {
-                // Try to extract a filename if it's a path, or use it as is if it's just a name
-                const fileName = output.includes('/') ? output.substring(output.lastIndexOf('/') + 1) : output;
-                contentHtml = this.renderFileCard(output, fileName); // Assume output is a path or name for the file card
-            } else {
-                contentHtml = `<p>${typeof output === 'string' ? output : JSON.stringify(output)}</p>`;
-            }
+            contentHtml = '';
         } else {
             contentHtml = `<div class="error-text">${this.agentResult.error}</div>`;
         }

@@ -67,7 +67,10 @@ export class ProjectDocumentationOrchestrator {
             const finalDoc = await this.runSynthesisPhase(runId, plan, moduleDocs);
 
             await this.saveFinalDocument(finalDoc);
-            logger.onAgentEnd({ runId, status: 'completed', finalOutput: finalDoc });
+            
+            // --- 修改点 1: 简化 agent 最终结果 ---
+            // 不再发送完整的文档内容，只发送一个简单的成功消息。
+            logger.onAgentEnd({ runId, status: 'completed', finalOutput: "执行成功" });
 
         } catch (error: any) {
             logger.onAgentEnd({ runId, status: 'failed', error: error.message });
@@ -309,10 +312,19 @@ export class ProjectDocumentationOrchestrator {
             Buffer.from(finalDoc, 'utf8')
         );
 
-        logger.onStepUpdate({ runId, taskId, type: 'output', data: { name: "最终项目文档", content: finalDoc }, metadata: { type: 'markdown' } });
-        // highlight-start
+        // 1. 获取最终文档的路径
+        const finalDocPath = await this.getFinalDocPath();
+
+        // 2. 发送 StepUpdate，其中 metadata 指向文件路径，data.content 可以是简短描述
+        logger.onStepUpdate({ 
+            runId, 
+            taskId, 
+            type: 'output', 
+            data: { name: "最终项目文档", content: `文档已生成: ${path.basename(finalDocPath.fsPath)}` },
+            metadata: { type: 'file', path: finalDocPath.fsPath } // <-- 这是关键
+        });
+
         logger.onStepEnd({ runId, taskId, stepName, status: 'completed' });
-        // highlight-end
         return finalDoc;
     }
 
