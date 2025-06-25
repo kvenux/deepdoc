@@ -47,7 +47,7 @@ export class MapReduceExecutor {
     constructor(private readonly context: AgentContext) {}
 
     public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<string> {
-        const { logger, llmService, modelConfig, runDir } = this.context;
+        const { logger, llmService, modelConfig, runDir, statsTracker } = this.context; // <-- 获取 statsTracker
         let tokenizer: Tiktoken | null = null;
         
         try {
@@ -105,6 +105,10 @@ export class MapReduceExecutor {
                     const response = await llmService.scheduleLlmCall(() => llm.invoke([new SystemMessage(actionPrompt.map_prompt_template.system), new HumanMessage(humanPrompt)]));
                     const responseContent = response.content as string;
 
+                    // 在 Map 阶段的 LLM 调用后记录 Token
+                    const fullMapPrompt = actionPrompt.map_prompt_template.system + "\n" + humanPrompt; // 估算，或者从 Langchain 内部获取更准确的
+                    statsTracker.add(fullMapPrompt, responseContent);
+
                     logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'output', data: { name: "批次摘要", content: responseContent } });
                     logger.onStepEnd({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'completed' }); // 修正: 添加 stepName
                     return responseContent;
@@ -141,6 +145,9 @@ export class MapReduceExecutor {
                 finalContent += chunkContent;
                 // logger.onStreamChunk({ runId, taskId: reduceTaskId, content: chunkContent });
             }
+
+            const fullReducePrompt = actionPrompt.reduce_prompt_template.system + "\n" + humanReducePrompt; // 估算
+            statsTracker.add(fullReducePrompt, finalContent);
 
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'output', data: { name: "最终文档", content: finalContent }, metadata: { type: 'markdown' } });
             logger.onStepEnd({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'completed' }); // 修正: 添加 stepName
