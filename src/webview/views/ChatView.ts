@@ -172,12 +172,13 @@ export class ChatView {
                 switch (command) {
                     case 'agent:stepStart':
                         console.log('[ChatView] Received agent:stepStart:', payload);
-                        this.activeAgentRunBlock.updateStep(payload as StepExecution); // Explicit cast
+                        this.activeAgentRunBlock.updateStepExecutionStatus(payload as StepExecution); // Changed method
                         return;
                     case 'agent:stepEnd': 
                         console.log('[ChatView] Received agent:stepEnd:', payload);
-                        this.activeAgentRunBlock.updateStep(payload as StepResult); // Explicit cast
+                        this.activeAgentRunBlock.updateStepExecutionStatus(payload as StepResult); // Changed method
                         return;
+                    // ... rest of cases for addStepLog, appendStreamChunk, setAgentResult remain the same
                     case 'agent:stepUpdate':
                         this.activeAgentRunBlock.addStepLog(payload);
                         return;
@@ -750,7 +751,7 @@ export class ChatView {
             // 更稳健的类型检查和派发，修复了原有逻辑错误
             if ('stepName' in event && 'status' in event && 'runId' in event) {
                 // 这是 StepExecution 事件
-                agentBlock.updateStep(event as StepExecution);
+                agentBlock.updateStepExecutionStatus(event as StepExecution | StepResult); 
             } else if ('status' in event && 'runId' in event && !('stepName' in event)) {
                 // 这是 AgentResult 事件
                  agentBlock.setAgentResult(event as AgentResult);

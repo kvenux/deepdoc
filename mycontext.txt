@@ -17,6 +17,7 @@ src
 │   ├── services
 │   │   ├── AgentService.ts
 │   │   ├── LLMService.ts
+│   │   ├── StatsTracker.ts
 │   │   ├── ToolRegistry.ts
 │   │   └── logging.ts
 │   ├── tools
@@ -181,6 +182,14 @@ export interface AgentResult {
     status: 'completed' | 'failed' | 'cancelled';
     finalOutput?: any;
     error?: string;
+    // highlight-start
+    stats?: {
+        duration: string;
+        totalTokens: number;
+        promptTokens: number;
+        completionTokens: number;
+    };
+    // highlight-end
 }
 
 --------------------------------------------------------------------------------
@@ -849,10 +858,11 @@ export class StateManager {
 --- file_path: extension/agents/AgentContext.ts ---
 // src/extension/agents/AgentContext.ts (修改后完整文件)
 
-import * as vscode from 'vscode'; // <-- 新增 import
+import * as vscode from 'vscode';
 import { ModelConfig } from '../../common/types';
 import { LLMService } from '../services/LLMService';
 import { AgentLogger } from '../services/logging';
+import { StatsTracker } from '../services/StatsTracker'; // <-- 新增 import
 import { ToolRegistry } from '../services/ToolRegistry';
 
 /**
@@ -864,8 +874,8 @@ export interface AgentContext {
     toolRegistry: ToolRegistry;
     logger: AgentLogger;
     modelConfig: ModelConfig;
-    
-    // --- 新增 ---
+    statsTracker: StatsTracker; // <-- 新增
+
     // 可选的运行目录，用于记录详细的过程文件。
     // 如果提供了这个目录，执行器等组件可以将其中间产物写入文件。
     runDir?: vscode.Uri; 
@@ -1182,7 +1192,7 @@ export class ToolChainExecutor {
     constructor(private readonly context: AgentContext) {}
 
     public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<string> {
-        const { logger, llmService, toolRegistry, modelConfig, runDir } = this.context;
+        const { logger, llmService, toolRegistry, modelConfig, runDir, statsTracker } = this.context;
         let finalResult = '';
 
         try {
@@ -1241,6 +1251,7 @@ export class ToolChainExecutor {
                 finalResult += chunk;
                 // logger.onStreamChunk({ runId, taskId: llmTaskId, content: chunk as string });
             }
+            statsTracker.add(humanMessageContent, finalResult);
             
             logger.onStepUpdate({ runId, taskId: llmTaskId, type: 'output', data: { name: "LLM响应", content: finalResult }, metadata: { type: 'markdown' } });
             if (runDir) {
@@ -1330,7 +1341,7 @@ interface PromptsCollection {
 }
 
 export class ProjectDocumentationOrchestrator {
-    private readonly MAX_TOKENS_FOR_DIRECT_ANALYSIS = 32000;
+    private readonly MAX_TOKENS_FOR_DIRECT_ANALYSIS = 64000;
     private tokenizer!: Tiktoken;
     private runDir!: vscode.Uri;
 
@@ -1350,31 +1361,28 @@ export class ProjectDocumentationOrchestrator {
             throw new Error("请先打开一个工作区文件夹。");
         }
 
-        try {
-            const runFolderName = `doc-gen_${new Date().toISOString().replace(/[:.]/g, '-')}`;
-            this.runDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki', 'runs', runFolderName);
-            await vscode.workspace.fs.createDirectory(this.runDir);
-            logger.info(`日志和结果将保存在: ${this.runDir.fsPath}`);
+        // 移除 try/catch, 让错误向上冒泡到 AgentService
+        const runFolderName = `doc-gen_${new Date().toISOString().replace(/[:.]/g, '-')}`;
+        this.runDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki', 'runs', runFolderName);
+        await vscode.workspace.fs.createDirectory(this.runDir);
+        logger.info(`日志和结果将保存在: ${this.runDir.fsPath}`);
 
-            const plan = await this.runPlanningPhase(runId);
-            const moduleDocs = await this.runModuleAnalysisPhase(runId, plan);
-            const finalDoc = await this.runSynthesisPhase(runId, plan, moduleDocs);
+        const plan = await this.runPlanningPhase(runId);
+        const moduleDocs = await this.runModuleAnalysisPhase(runId, plan);
+        const finalDoc = await this.runSynthesisPhase(runId, plan, moduleDocs);
 
-            await this.saveFinalDocument(finalDoc);
-            logger.onAgentEnd({ runId, status: 'completed', finalOutput: finalDoc });
+        await this.saveFinalDocument(finalDoc);
 
-        } catch (error: any) {
-            logger.onAgentEnd({ runId, status: 'failed', error: error.message });
-            vscode.window.showErrorMessage(`文档生成失败: ${error.message}`);
-        } finally {
-            if (this.tokenizer) { 
-               this.tokenizer.free();
-            }
+        // 移除 onAgentEnd 调用。AgentService 将负责此事
+        // logger.onAgentEnd({ runId, status: 'completed', finalOutput: "执行成功" });
+
+        if (this.tokenizer) { 
+            this.tokenizer.free();
         }
     }
 
     private async runPlanningPhase(runId: string): Promise<PlannerOutput> {
-        const { logger, toolRegistry, llmService, modelConfig } = this.context;
+        const { logger, toolRegistry, llmService, modelConfig, statsTracker } = this.context; // <-- 添加 statsTracker
         const taskId = uuidv4();
         const stepName = "规划: 分析项目结构"; // This is the stepName
         logger.onStepStart({ runId, taskId, stepName, status: 'running' });
@@ -1395,6 +1403,8 @@ export class ProjectDocumentationOrchestrator {
 
         const response = await llmService.scheduleLlmCall(() => plannerLlm.invoke([new HumanMessage(prompt)]));
         const responseContent = response.content as string;
+
+        statsTracker.add(prompt, responseContent); // 记录 Token
 
         await vscode.workspace.fs.writeFile(
             vscode.Uri.joinPath(this.runDir, '01_planning_response.txt'),
@@ -1569,7 +1579,7 @@ export class ProjectDocumentationOrchestrator {
     }
 
     private async runSynthesisPhase(runId: string, plan: PlannerOutput, moduleDocs: ModuleDoc[]): Promise<string> {
-        const { logger, llmService, modelConfig } = this.context;
+        const { logger, llmService, modelConfig, statsTracker } = this.context; // <-- 添加 statsTracker
         const taskId = uuidv4();
         const stepName = "综合: 生成最终文档";
         logger.onStepStart({ runId, taskId, stepName, status: 'running' });
@@ -1598,15 +1608,26 @@ export class ProjectDocumentationOrchestrator {
             // logger.onStreamChunk({ runId, taskId, content: chunkContent });
         }
 
+        statsTracker.add(prompt, finalDoc); // 记录 Token
+
         await vscode.workspace.fs.writeFile(
             vscode.Uri.joinPath(this.runDir, '03_synthesis_response.txt'),
             Buffer.from(finalDoc, 'utf8')
         );
 
-        logger.onStepUpdate({ runId, taskId, type: 'output', data: { name: "最终项目文档", content: finalDoc }, metadata: { type: 'markdown' } });
-        // highlight-start
+        // 1. 获取最终文档的路径
+        const finalDocPath = await this.getFinalDocPath();
+
+        // 2. 发送 StepUpdate，其中 metadata 指向文件路径，data.content 可以是简短描述
+        logger.onStepUpdate({ 
+            runId, 
+            taskId, 
+            type: 'output', 
+            data: { name: "最终项目文档", content: `文档已生成: ${path.basename(finalDocPath.fsPath)}` },
+            metadata: { type: 'file', path: finalDocPath.fsPath } // <-- 这是关键
+        });
+
         logger.onStepEnd({ runId, taskId, stepName, status: 'completed' });
-        // highlight-end
         return finalDoc;
     }
 
@@ -1786,6 +1807,7 @@ import { MapReduceExecutor } from '../agents/executors/MapReduceExecutor';
 import { AgentLogger, VscodeOutputChannelLogger, WebviewLogger } from './logging';
 import { LLMService } from './LLMService';
 import { ToolRegistry } from './ToolRegistry';
+import { StatsTracker } from './StatsTracker'; 
 
 // 在文件顶部或一个新文件中定义Agent元数据
 /**
@@ -1887,12 +1909,16 @@ export class AgentService {
                 param.value = userInputs[param.name];
             }
         });
+
+        const statsTracker = new StatsTracker();
         
         const context: AgentContext = {
             logger,
             llmService: this.llmService,
             toolRegistry: this.toolRegistry,
             modelConfig,
+            statsTracker // 注入到上下文中
+
         };
         
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri;
@@ -1900,6 +1926,9 @@ export class AgentService {
             logger.onAgentEnd({ runId, status: 'failed', error: 'No workspace folder open.' });
             return;
         }
+
+        // --- 核心逻辑重构 ---
+        let finalOutput: any = "执行成功"; // 默认成功消息
 
         try {
             switch (agentId) {
@@ -1911,13 +1940,13 @@ export class AgentService {
                         synthesisPrompt: await loadPromptFile(workspaceRoot, 'project_synthesis.yml'),
                     };
                     const orchestrator = new ProjectDocumentationOrchestrator(context, projPrompts);
+                    // Orchestrator 只负责执行，不负责上报最终状态
                     await orchestrator.run(runId);
                     break;
                 }
                 
                 case 'docgen-module-direct': {
                     const directPromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_direct.yml');
-                    // 从填充好的 plan 的 parameters 中查找 'module_path' 参数的值
                     const modulePathParam = agentPlan.parameters.find(p => p.name === 'module_path');
                     if (!modulePathParam || !modulePathParam.value) {
                          throw new Error("Missing required parameter: module_path");
@@ -1925,14 +1954,13 @@ export class AgentService {
                     const directInputs = { module_path: modulePathParam.value };
 
                     const toolchainExecutor = new ToolChainExecutor(context);
-                    const directResult = await toolchainExecutor.run(runId, directPromptYaml, directInputs);
-                    logger.onAgentEnd({ runId, status: 'completed', finalOutput: directResult });
+                    // 捕获执行器的结果作为 finalOutput
+                    finalOutput = await toolchainExecutor.run(runId, directPromptYaml, directInputs);
                     break;
                 }
 
                 case 'docgen-module-mapreduce': {
                     const mapreducePromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_mapreduce.yml');
-                    // 同样，从填充好的 plan 的 parameters 中查找 'module_path' 参数的值
                     const modulePathParam = agentPlan.parameters.find(p => p.name === 'module_path');
                     if (!modulePathParam || !modulePathParam.value) {
                          throw new Error("Missing required parameter: module_path");
@@ -1940,16 +1968,23 @@ export class AgentService {
                     const mapreduceInputs = { module_path: modulePathParam.value };
 
                     const mapReduceExecutor = new MapReduceExecutor(context);
-                    const mapreduceResult = await mapReduceExecutor.run(runId, mapreducePromptYaml, mapreduceInputs);
-                    logger.onAgentEnd({ runId, status: 'completed', finalOutput: mapreduceResult });
+                     // 捕获执行器的结果作为 finalOutput
+                    finalOutput = await mapReduceExecutor.run(runId, mapreducePromptYaml, mapreduceInputs);
                     break;
                 }
 
                 default:
-                    logger.onAgentEnd({ runId, status: 'failed', error: `Execution for agent "${agentId}" is not yet implemented.` });
+                    throw new Error(`Execution for agent "${agentId}" is not yet implemented.`);
             }
+            
+            // 如果成功执行到这里，计算最终统计数据并发送成功事件
+            const finalStats = statsTracker.getFinalStats();
+            logger.onAgentEnd({ runId, status: 'completed', finalOutput, stats: finalStats });
+
         } catch (error: any) {
-            logger.onAgentEnd({ runId, status: 'failed', error: error.message });
+            // 如果任何步骤失败，计算统计数据并发送失败事件
+            const finalStats = statsTracker.getFinalStats();
+            logger.onAgentEnd({ runId, status: 'failed', error: error.message, stats: finalStats });
         }
     }
 
@@ -1965,23 +2000,26 @@ export class AgentService {
         webview: vscode.Webview
     ) {
         const logger = new WebviewLogger(webview);
+        const statsTracker = new StatsTracker(); // <-- 为 webview action 也创建 tracker
         const context: AgentContext = {
             logger,
             llmService: this.llmService,
             toolRegistry: this.toolRegistry,
-            modelConfig
+            modelConfig,
+            statsTracker,
         };
         const runId = uuidv4();
 
         try {
             const executor = new ToolChainExecutor(context);
-            // 修正：传入 runId, yaml, 和 userInputs
             const result = await executor.run(runId, yamlContent, userInputs);
-            logger.onAgentEnd({ runId, status: 'completed', finalOutput: result });
+            const finalStats = statsTracker.getFinalStats();
+            logger.onAgentEnd({ runId, status: 'completed', finalOutput: result, stats: finalStats });
 
         } catch (error: any) {
             if (!(error as any).__logged) {
-                logger.onAgentEnd({ runId, status: 'failed', error: error.message });
+                 const finalStats = statsTracker.getFinalStats();
+                 logger.onAgentEnd({ runId, status: 'failed', error: error.message, stats: finalStats });
             }
         }
     }
@@ -2217,6 +2255,72 @@ export class LLMService {
         if (this._abortController) {
             this._abortController.abort();
         }
+    }
+}
+
+--------------------------------------------------------------------------------
+
+--- file_path: extension/services/StatsTracker.ts ---
+// src/extension/services/StatsTracker.ts
+import { get_encoding, Tiktoken } from "tiktoken";
+
+export interface AgentRunStats {
+    duration: string;
+    totalTokens: number;
+    promptTokens: number;
+    completionTokens: number;
+}
+
+/**
+ * 在单次 Agent 运行期间跟踪和计算统计信息。
+ */
+export class StatsTracker {
+    private startTime: number;
+    private totalPromptTokens: number = 0;
+    private totalCompletionTokens: number = 0;
+    private tokenizer: Tiktoken;
+
+    constructor() {
+        this.startTime = Date.now();
+        // 使用一个通用的编码器来估算，cl100k_base 适用于大多数现代 OpenAI 模型
+        this.tokenizer = get_encoding("cl100k_base");
+    }
+
+    /**
+     * 记录一次LLM调用的Token消耗。
+     * @param prompt - 发送给模型的完整提示文本。
+     * @param completion - 从模型接收到的完整响应文本。
+     */
+    public add(prompt: string, completion: string): void {
+        try {
+            const promptTokens = this.tokenizer.encode(prompt).length;
+            const completionTokens = this.tokenizer.encode(completion).length;
+            
+            this.totalPromptTokens += promptTokens;
+            this.totalCompletionTokens += completionTokens;
+        } catch (e) {
+            console.error("Token counting failed:", e);
+        }
+    }
+
+    /**
+     * 计算并返回最终的统计数据。
+     * @returns {AgentRunStats} 最终的统计对象。
+     */
+    public getFinalStats(): AgentRunStats {
+        const endTime = Date.now();
+        const durationMs = endTime - this.startTime;
+        const durationSec = (durationMs / 1000).toFixed(2);
+        
+        // 释放 tokenizer 资源
+        this.tokenizer.free();
+
+        return {
+            duration: `${durationSec}s`,
+            promptTokens: this.totalPromptTokens,
+            completionTokens: this.totalCompletionTokens,
+            totalTokens: this.totalPromptTokens + this.totalCompletionTokens,
+        };
     }
 }
 
@@ -3395,19 +3499,42 @@ export class AgentRunBlock {
         const resultClass = this.agentResult.status;
         const icon = resultClass === 'completed' ? '<i class="codicon codicon-check-all"></i>' : '<i class="codicon codicon-error"></i>';
         const title = resultClass === 'completed' ? 'Agent Execution Completed' : 'Agent Execution Failed';
-        let contentHtml;
+        let contentHtml = '';
 
-        if (resultClass === 'completed') {
-            const output = this.agentResult.finalOutput;
-            if (typeof output === 'string' && (output.endsWith('.md') || output.endsWith('.txt') || output.includes('/'))) {
-                const fileName = output.includes('/') ? output.substring(output.lastIndexOf('/') + 1) : output;
-                contentHtml = this.renderFileCard(output, fileName);
-            } else {
-                contentHtml = `<p>${typeof output === 'string' ? output : JSON.stringify(output)}</p>`;
-            }
-        } else {
-            contentHtml = `<div class="error-text">${this.agentResult.error}</div>`;
+        if (resultClass === 'completed' && this.agentResult.stats) {
+            // highlight-start
+            // 如果执行成功并且有统计数据，则渲染统计信息
+            const stats = this.agentResult.stats;
+            contentHtml = `
+                <div class="result-stats">
+                    <div class="stat-item">
+                        <i class="codicon codicon-clock"></i>
+                        <span>耗时</span>
+                        <strong>${stats.duration}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-symbol-event"></i>
+                        <span>总 Tokens</span>
+                        <strong>${stats.totalTokens.toLocaleString()}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-arrow-right"></i>
+                        <span>输入 Tokens</span>
+                        <strong>${stats.promptTokens.toLocaleString()}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-arrow-left"></i>
+                        <span>输出 Tokens</span>
+                        <strong>${stats.completionTokens.toLocaleString()}</strong>
+                    </div>
+                </div>
+            `;
+            // highlight-end
+        } else if (resultClass !== 'completed') {
+            // 对于失败状态，依然显示错误信息
+            contentHtml = `<div class="error-text">${this.agentResult.error || '未知错误'}</div>`;
         }
+
         return `<div class="agent-final-result ${resultClass} ${animationClass}"><div class="result-header">${icon}<span>${title}</span></div><div class="result-content">${contentHtml}</div></div>`;
     }
 
@@ -3649,20 +3776,36 @@ export class AgentRunBlock {
         const resultClass = this.agentResult.status;
         const icon = resultClass === 'completed' ? '<i class="codicon codicon-check-all"></i>' : '<i class="codicon codicon-error"></i>';
         const title = resultClass === 'completed' ? 'Agent Execution Completed' : 'Agent Execution Failed';
-        let contentHtml;
+        let contentHtml = '';
 
-        if (resultClass === 'completed') {
-            // Display finalOutput as a clickable file card if it looks like a file name, otherwise as text.
-            const output = this.agentResult.finalOutput;
-            if (typeof output === 'string' && (output.endsWith('.md') || output.endsWith('.txt') || output.includes('/'))) {
-                // Try to extract a filename if it's a path, or use it as is if it's just a name
-                const fileName = output.includes('/') ? output.substring(output.lastIndexOf('/') + 1) : output;
-                contentHtml = this.renderFileCard(output, fileName); // Assume output is a path or name for the file card
-            } else {
-                contentHtml = `<p>${typeof output === 'string' ? output : JSON.stringify(output)}</p>`;
-            }
-        } else {
-            contentHtml = `<div class="error-text">${this.agentResult.error}</div>`;
+        if (resultClass === 'completed' && this.agentResult.stats) {
+            const stats = this.agentResult.stats;
+            contentHtml = `
+                <div class="result-stats">
+                    <div class="stat-item">
+                        <i class="codicon codicon-clock"></i>
+                        <span>耗时</span>
+                        <strong>${stats.duration}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-symbol-event"></i>
+                        <span>总 Tokens</span>
+                        <strong>${stats.totalTokens.toLocaleString()}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-arrow-right"></i>
+                        <span>输入 Tokens</span>
+                        <strong>${stats.promptTokens.toLocaleString()}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-arrow-left"></i>
+                        <span>输出 Tokens</span>
+                        <strong>${stats.completionTokens.toLocaleString()}</strong>
+                    </div>
+                </div>
+            `;
+        } else if (resultClass !== 'completed') {
+            contentHtml = `<div class="error-text">${this.agentResult.error || '未知错误'}</div>`;
         }
         return `<div class="agent-final-result ${resultClass} ${finalResultAnimationClass}"><div class="result-header">${icon}<span>${title}</span></div><div class="result-content">${contentHtml}</div></div>`;
     }
@@ -5355,6 +5498,50 @@ button:hover {
 .codicon-spin:before { /* 直接针对 :before 伪元素应用动画 */
     animation: codicon-spin-animation 0.6s linear infinite; /* 时长可以调整 */
     display: inline-block; /* 有时需要确保伪元素是块级或行内块级才能应用 transform */
+}
+
+.result-content {
+    padding: 12px;
+    background-color: var(--vscode-editor-background);
+}
+.result-content .error-text {
+    color: var(--vscode-errorForeground);
+    white-space: pre-wrap;
+}
+
+/* highlight-start */
+.result-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    padding: 5px;
+}
+
+.stat-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background-color: var(--vscode-sideBar-sectionHeader-background);
+    padding: 8px 12px;
+    border-radius: 5px;
+    border-left: 2px solid var(--vscode-focusBorder);
+}
+
+.stat-item .codicon {
+    font-size: 1.2em;
+    color: var(--vscode-descriptionForeground);
+}
+
+.stat-item span {
+    flex-grow: 1;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.9em;
+}
+
+.stat-item strong {
+    font-size: 1em;
+    font-weight: 600;
+    color: var(--vscode-editor-foreground);
 }
 
 --------------------------------------------------------------------------------
