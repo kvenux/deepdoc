@@ -1241,3 +1241,47 @@ button:hover {
     animation: codicon-spin-animation 0.6s linear infinite; /* 时长可以调整 */
     display: inline-block; /* 有时需要确保伪元素是块级或行内块级才能应用 transform */
 }
+
+.result-content {
+    padding: 12px;
+    background-color: var(--vscode-editor-background);
+}
+.result-content .error-text {
+    color: var(--vscode-errorForeground);
+    white-space: pre-wrap;
+}
+
+/* highlight-start */
+.result-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    padding: 5px;
+}
+
+.stat-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background-color: var(--vscode-sideBar-sectionHeader-background);
+    padding: 8px 12px;
+    border-radius: 5px;
+    border-left: 2px solid var(--vscode-focusBorder);
+}
+
+.stat-item .codicon {
+    font-size: 1.2em;
+    color: var(--vscode-descriptionForeground);
+}
+
+.stat-item span {
+    flex-grow: 1;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.9em;
+}
+
+.stat-item strong {
+    font-size: 1em;
+    font-weight: 600;
+    color: var(--vscode-editor-foreground);
+}

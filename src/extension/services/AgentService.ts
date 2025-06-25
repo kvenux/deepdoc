@@ -10,6 +10,7 @@ import { MapReduceExecutor } from '../agents/executors/MapReduceExecutor';
 import { AgentLogger, VscodeOutputChannelLogger, WebviewLogger } from './logging';
 import { LLMService } from './LLMService';
 import { ToolRegistry } from './ToolRegistry';
+import { StatsTracker } from './StatsTracker'; 
 
 // 在文件顶部或一个新文件中定义Agent元数据
 /**
@@ -111,12 +112,16 @@ export class AgentService {
                 param.value = userInputs[param.name];
             }
         });
+
+        const statsTracker = new StatsTracker();
         
         const context: AgentContext = {
             logger,
             llmService: this.llmService,
             toolRegistry: this.toolRegistry,
             modelConfig,
+            statsTracker // 注入到上下文中
+
         };
         
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri;
@@ -124,6 +129,9 @@ export class AgentService {
             logger.onAgentEnd({ runId, status: 'failed', error: 'No workspace folder open.' });
             return;
         }
+
+        // --- 核心逻辑重构 ---
+        let finalOutput: any = "执行成功"; // 默认成功消息
 
         try {
             switch (agentId) {
@@ -135,13 +143,13 @@ export class AgentService {
                         synthesisPrompt: await loadPromptFile(workspaceRoot, 'project_synthesis.yml'),
                     };
                     const orchestrator = new ProjectDocumentationOrchestrator(context, projPrompts);
+                    // Orchestrator 只负责执行，不负责上报最终状态
                     await orchestrator.run(runId);
                     break;
                 }
                 
                 case 'docgen-module-direct': {
                     const directPromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_direct.yml');
-                    // 从填充好的 plan 的 parameters 中查找 'module_path' 参数的值
                     const modulePathParam = agentPlan.parameters.find(p => p.name === 'module_path');
                     if (!modulePathParam || !modulePathParam.value) {
                          throw new Error("Missing required parameter: module_path");
@@ -149,14 +157,13 @@ export class AgentService {
                     const directInputs = { module_path: modulePathParam.value };
 
                     const toolchainExecutor = new ToolChainExecutor(context);
-                    const directResult = await toolchainExecutor.run(runId, directPromptYaml, directInputs);
-                    logger.onAgentEnd({ runId, status: 'completed', finalOutput: directResult });
+                    // 捕获执行器的结果作为 finalOutput
+                    finalOutput = await toolchainExecutor.run(runId, directPromptYaml, directInputs);
                     break;
                 }
 
                 case 'docgen-module-mapreduce': {
                     const mapreducePromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_mapreduce.yml');
-                    // 同样，从填充好的 plan 的 parameters 中查找 'module_path' 参数的值
                     const modulePathParam = agentPlan.parameters.find(p => p.name === 'module_path');
                     if (!modulePathParam || !modulePathParam.value) {
                          throw new Error("Missing required parameter: module_path");
@@ -164,16 +171,23 @@ export class AgentService {
                     const mapreduceInputs = { module_path: modulePathParam.value };
 
                     const mapReduceExecutor = new MapReduceExecutor(context);
-                    const mapreduceResult = await mapReduceExecutor.run(runId, mapreducePromptYaml, mapreduceInputs);
-                    logger.onAgentEnd({ runId, status: 'completed', finalOutput: mapreduceResult });
+                     // 捕获执行器的结果作为 finalOutput
+                    finalOutput = await mapReduceExecutor.run(runId, mapreducePromptYaml, mapreduceInputs);
                     break;
                 }
 
                 default:
-                    logger.onAgentEnd({ runId, status: 'failed', error: `Execution for agent "${agentId}" is not yet implemented.` });
+                    throw new Error(`Execution for agent "${agentId}" is not yet implemented.`);
             }
+            
+            // 如果成功执行到这里，计算最终统计数据并发送成功事件
+            const finalStats = statsTracker.getFinalStats();
+            logger.onAgentEnd({ runId, status: 'completed', finalOutput, stats: finalStats });
+
         } catch (error: any) {
-            logger.onAgentEnd({ runId, status: 'failed', error: error.message });
+            // 如果任何步骤失败，计算统计数据并发送失败事件
+            const finalStats = statsTracker.getFinalStats();
+            logger.onAgentEnd({ runId, status: 'failed', error: error.message, stats: finalStats });
         }
     }
 
@@ -189,23 +203,26 @@ export class AgentService {
         webview: vscode.Webview
     ) {
         const logger = new WebviewLogger(webview);
+        const statsTracker = new StatsTracker(); // <-- 为 webview action 也创建 tracker
         const context: AgentContext = {
             logger,
             llmService: this.llmService,
             toolRegistry: this.toolRegistry,
-            modelConfig
+            modelConfig,
+            statsTracker,
         };
         const runId = uuidv4();
 
         try {
             const executor = new ToolChainExecutor(context);
-            // 修正：传入 runId, yaml, 和 userInputs
             const result = await executor.run(runId, yamlContent, userInputs);
-            logger.onAgentEnd({ runId, status: 'completed', finalOutput: result });
+            const finalStats = statsTracker.getFinalStats();
+            logger.onAgentEnd({ runId, status: 'completed', finalOutput: result, stats: finalStats });
 
         } catch (error: any) {
             if (!(error as any).__logged) {
-                logger.onAgentEnd({ runId, status: 'failed', error: error.message });
+                 const finalStats = statsTracker.getFinalStats();
+                 logger.onAgentEnd({ runId, status: 'failed', error: error.message, stats: finalStats });
             }
         }
     }

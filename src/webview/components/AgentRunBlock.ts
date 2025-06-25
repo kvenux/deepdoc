@@ -429,13 +429,42 @@ export class AgentRunBlock {
         const resultClass = this.agentResult.status;
         const icon = resultClass === 'completed' ? '<i class="codicon codicon-check-all"></i>' : '<i class="codicon codicon-error"></i>';
         const title = resultClass === 'completed' ? 'Agent Execution Completed' : 'Agent Execution Failed';
-        let contentHtml;
+        let contentHtml = '';
 
-        if (resultClass === 'completed') {
-            contentHtml = '';
-        } else {
-            contentHtml = `<div class="error-text">${this.agentResult.error}</div>`;
+        if (resultClass === 'completed' && this.agentResult.stats) {
+            // highlight-start
+            // 如果执行成功并且有统计数据，则渲染统计信息
+            const stats = this.agentResult.stats;
+            contentHtml = `
+                <div class="result-stats">
+                    <div class="stat-item">
+                        <i class="codicon codicon-clock"></i>
+                        <span>耗时</span>
+                        <strong>${stats.duration}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-symbol-event"></i>
+                        <span>总 Tokens</span>
+                        <strong>${stats.totalTokens.toLocaleString()}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-arrow-right"></i>
+                        <span>输入 Tokens</span>
+                        <strong>${stats.promptTokens.toLocaleString()}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-arrow-left"></i>
+                        <span>输出 Tokens</span>
+                        <strong>${stats.completionTokens.toLocaleString()}</strong>
+                    </div>
+                </div>
+            `;
+            // highlight-end
+        } else if (resultClass !== 'completed') {
+            // 对于失败状态，依然显示错误信息
+            contentHtml = `<div class="error-text">${this.agentResult.error || '未知错误'}</div>`;
         }
+
         return `<div class="agent-final-result ${resultClass} ${animationClass}"><div class="result-header">${icon}<span>${title}</span></div><div class="result-content">${contentHtml}</div></div>`;
     }
 
@@ -677,13 +706,36 @@ export class AgentRunBlock {
         const resultClass = this.agentResult.status;
         const icon = resultClass === 'completed' ? '<i class="codicon codicon-check-all"></i>' : '<i class="codicon codicon-error"></i>';
         const title = resultClass === 'completed' ? 'Agent Execution Completed' : 'Agent Execution Failed';
-        let contentHtml;
+        let contentHtml = '';
 
-        if (resultClass === 'completed') {
-            // Display finalOutput as a clickable file card if it looks like a file name, otherwise as text.
-            contentHtml = '';
-        } else {
-            contentHtml = `<div class="error-text">${this.agentResult.error}</div>`;
+        if (resultClass === 'completed' && this.agentResult.stats) {
+            const stats = this.agentResult.stats;
+            contentHtml = `
+                <div class="result-stats">
+                    <div class="stat-item">
+                        <i class="codicon codicon-clock"></i>
+                        <span>耗时</span>
+                        <strong>${stats.duration}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-symbol-event"></i>
+                        <span>总 Tokens</span>
+                        <strong>${stats.totalTokens.toLocaleString()}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-arrow-right"></i>
+                        <span>输入 Tokens</span>
+                        <strong>${stats.promptTokens.toLocaleString()}</strong>
+                    </div>
+                    <div class="stat-item">
+                        <i class="codicon codicon-arrow-left"></i>
+                        <span>输出 Tokens</span>
+                        <strong>${stats.completionTokens.toLocaleString()}</strong>
+                    </div>
+                </div>
+            `;
+        } else if (resultClass !== 'completed') {
+            contentHtml = `<div class="error-text">${this.agentResult.error || '未知错误'}</div>`;
         }
         return `<div class="agent-final-result ${resultClass} ${finalResultAnimationClass}"><div class="result-header">${icon}<span>${title}</span></div><div class="result-content">${contentHtml}</div></div>`;
     }

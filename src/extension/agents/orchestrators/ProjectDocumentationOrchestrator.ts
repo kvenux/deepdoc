@@ -36,7 +36,7 @@ interface PromptsCollection {
 }
 
 export class ProjectDocumentationOrchestrator {
-    private readonly MAX_TOKENS_FOR_DIRECT_ANALYSIS = 32000;
+    private readonly MAX_TOKENS_FOR_DIRECT_ANALYSIS = 64000;
     private tokenizer!: Tiktoken;
     private runDir!: vscode.Uri;
 
@@ -56,34 +56,28 @@ export class ProjectDocumentationOrchestrator {
             throw new Error("请先打开一个工作区文件夹。");
         }
 
-        try {
-            const runFolderName = `doc-gen_${new Date().toISOString().replace(/[:.]/g, '-')}`;
-            this.runDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki', 'runs', runFolderName);
-            await vscode.workspace.fs.createDirectory(this.runDir);
-            logger.info(`日志和结果将保存在: ${this.runDir.fsPath}`);
+        // 移除 try/catch, 让错误向上冒泡到 AgentService
+        const runFolderName = `doc-gen_${new Date().toISOString().replace(/[:.]/g, '-')}`;
+        this.runDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki', 'runs', runFolderName);
+        await vscode.workspace.fs.createDirectory(this.runDir);
+        logger.info(`日志和结果将保存在: ${this.runDir.fsPath}`);
 
-            const plan = await this.runPlanningPhase(runId);
-            const moduleDocs = await this.runModuleAnalysisPhase(runId, plan);
-            const finalDoc = await this.runSynthesisPhase(runId, plan, moduleDocs);
+        const plan = await this.runPlanningPhase(runId);
+        const moduleDocs = await this.runModuleAnalysisPhase(runId, plan);
+        const finalDoc = await this.runSynthesisPhase(runId, plan, moduleDocs);
 
-            await this.saveFinalDocument(finalDoc);
-            
-            // --- 修改点 1: 简化 agent 最终结果 ---
-            // 不再发送完整的文档内容，只发送一个简单的成功消息。
-            logger.onAgentEnd({ runId, status: 'completed', finalOutput: "执行成功" });
+        await this.saveFinalDocument(finalDoc);
 
-        } catch (error: any) {
-            logger.onAgentEnd({ runId, status: 'failed', error: error.message });
-            vscode.window.showErrorMessage(`文档生成失败: ${error.message}`);
-        } finally {
-            if (this.tokenizer) { 
-               this.tokenizer.free();
-            }
+        // 移除 onAgentEnd 调用。AgentService 将负责此事
+        // logger.onAgentEnd({ runId, status: 'completed', finalOutput: "执行成功" });
+
+        if (this.tokenizer) { 
+            this.tokenizer.free();
         }
     }
 
     private async runPlanningPhase(runId: string): Promise<PlannerOutput> {
-        const { logger, toolRegistry, llmService, modelConfig } = this.context;
+        const { logger, toolRegistry, llmService, modelConfig, statsTracker } = this.context; // <-- 添加 statsTracker
         const taskId = uuidv4();
         const stepName = "规划: 分析项目结构"; // This is the stepName
         logger.onStepStart({ runId, taskId, stepName, status: 'running' });
@@ -104,6 +98,8 @@ export class ProjectDocumentationOrchestrator {
 
         const response = await llmService.scheduleLlmCall(() => plannerLlm.invoke([new HumanMessage(prompt)]));
         const responseContent = response.content as string;
+
+        statsTracker.add(prompt, responseContent); // 记录 Token
 
         await vscode.workspace.fs.writeFile(
             vscode.Uri.joinPath(this.runDir, '01_planning_response.txt'),
@@ -278,7 +274,7 @@ export class ProjectDocumentationOrchestrator {
     }
 
     private async runSynthesisPhase(runId: string, plan: PlannerOutput, moduleDocs: ModuleDoc[]): Promise<string> {
-        const { logger, llmService, modelConfig } = this.context;
+        const { logger, llmService, modelConfig, statsTracker } = this.context; // <-- 添加 statsTracker
         const taskId = uuidv4();
         const stepName = "综合: 生成最终文档";
         logger.onStepStart({ runId, taskId, stepName, status: 'running' });
@@ -306,6 +302,8 @@ export class ProjectDocumentationOrchestrator {
             finalDoc += chunkContent;
             // logger.onStreamChunk({ runId, taskId, content: chunkContent });
         }
+
+        statsTracker.add(prompt, finalDoc); // 记录 Token
 
         await vscode.workspace.fs.writeFile(
             vscode.Uri.joinPath(this.runDir, '03_synthesis_response.txt'),

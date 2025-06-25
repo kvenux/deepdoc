@@ -130,4 +130,12 @@ export interface AgentResult {
     status: 'completed' | 'failed' | 'cancelled';
     finalOutput?: any;
     error?: string;
+    // highlight-start
+    stats?: {
+        duration: string;
+        totalTokens: number;
+        promptTokens: number;
+        completionTokens: number;
+    };
+    // highlight-end
 }

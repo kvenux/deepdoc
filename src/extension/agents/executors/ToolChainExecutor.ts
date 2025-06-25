@@ -16,7 +16,7 @@ export class ToolChainExecutor {
     constructor(private readonly context: AgentContext) {}
 
     public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<string> {
-        const { logger, llmService, toolRegistry, modelConfig, runDir } = this.context;
+        const { logger, llmService, toolRegistry, modelConfig, runDir, statsTracker } = this.context;
         let finalResult = '';
 
         try {
@@ -75,6 +75,7 @@ export class ToolChainExecutor {
                 finalResult += chunk;
                 // logger.onStreamChunk({ runId, taskId: llmTaskId, content: chunk as string });
             }
+            statsTracker.add(humanMessageContent, finalResult);
             
             logger.onStepUpdate({ runId, taskId: llmTaskId, type: 'output', data: { name: "LLM响应", content: finalResult }, metadata: { type: 'markdown' } });
             if (runDir) {
