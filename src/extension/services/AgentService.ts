@@ -43,7 +43,7 @@ const AGENT_DEFINITIONS: Record<string, AgentPlan> = {
         agentId: 'docgen-module-mapreduce',
         agentName: '模块级文档 (摘要总结)',
         steps: [
-            { name: "准备: 文件分批", description: "扫描指定路径下的所有文件并根据Token限制进行分批。" },
+            { name: "解析与准备", description: "扫描指定路径下的所有文件并根据Token限制进行分批。" },
             { name: "Map阶段: 并行分析", description: "并行调用LLM为每个文件批次生成摘要。", promptFiles: ['module_analysis_mapreduce.yml'] },
             { name: "Reduce阶段: 综合摘要", description: "将所有批次的摘要合并，并由LLM生成最终的模块文档。" }
         ],
