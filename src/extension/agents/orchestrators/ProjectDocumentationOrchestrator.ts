@@ -24,6 +24,19 @@ interface PlannerOutput {
     modules: Module[];
 }
 
+// 为规划器YML文件定义一个更明确的接口
+interface PlannerPromptFile {
+    title: string;
+    description: string;
+    config?: {
+        max_tokens_for_direct_analysis?: number;
+    };
+    llm_prompt_template: {
+        system: string;
+        human: string;
+    };
+}
+
 interface ModuleDoc extends Module {
     content: string;
 }
@@ -36,7 +49,7 @@ interface PromptsCollection {
 }
 
 export class ProjectDocumentationOrchestrator {
-    private readonly MAX_TOKENS_FOR_DIRECT_ANALYSIS = 64000;
+    private maxTokensForDirectAnalysis: number = 18000;
     private tokenizer!: Tiktoken;
     private runDir!: vscode.Uri;
 
@@ -81,6 +94,13 @@ export class ProjectDocumentationOrchestrator {
         const taskId = uuidv4();
         const stepName = "规划: 分析项目结构"; // This is the stepName
         logger.onStepStart({ runId, taskId, stepName, status: 'running' });
+
+        // 解析 YAML 文件并读取配置
+        const plannerPromptFile = yaml.load(this.prompts.plannerPrompt) as PlannerPromptFile;
+        if (plannerPromptFile.config?.max_tokens_for_direct_analysis) {
+            this.maxTokensForDirectAnalysis = plannerPromptFile.config.max_tokens_for_direct_analysis;
+            logger.info(`从 project_planner.yml 加载配置: max_tokens_for_direct_analysis = ${this.maxTokensForDirectAnalysis}`);
+        }
 
         const treeTool = toolRegistry.getTool('get_directory_tree')!;
         const fileTree = await treeTool.call({ path: '.', language: 'unknown' }) as string;
@@ -243,17 +263,32 @@ export class ProjectDocumentationOrchestrator {
         let promptYaml: string;
         let strategy: string;
 
-        if (tokenCount <= this.MAX_TOKENS_FOR_DIRECT_ANALYSIS) {
+        let strategyLogContent = `模块路径: ${module.path}\n`;
+        
+        if (tokenCount <= this.maxTokensForDirectAnalysis) {
             strategy = "直接分析 (ToolChain)";
             executor = new ToolChainExecutor(moduleContext);
             promptYaml = this.prompts.directAnalysisPrompt;
+            strategyLogContent += `Token总数: ${tokenCount.toLocaleString()} 未超出最大Token数 ${this.maxTokensForDirectAnalysis.toLocaleString()} 限制\n`;
+            strategyLogContent += `采用全量分析策略，请稍后...`;
         } else {
             strategy = "Map-Reduce分析";
             executor = new MapReduceExecutor(moduleContext);
+            const estimatedBatches = Math.ceil(tokenCount / this.maxTokensForDirectAnalysis);
             promptYaml = this.prompts.mapReduceAnalysisPrompt;
+            strategyLogContent += `Token总数: ${tokenCount.toLocaleString()} 超出最大Token数 ${this.maxTokensForDirectAnalysis} 限制\n`;
+            strategyLogContent += `采用Map-Reduce分析策略，预计分 ${estimatedBatches} 个批次，因涉及多个迭代，分析时间稍长，请稍后...`;
         }
-        logger.onStepUpdate({ runId, taskId, type: 'input', data: { name: "分析策略", content: strategy, "Token数": tokenCount } });
-
+        
+        logger.onStepUpdate({ 
+            runId, 
+            taskId, 
+            type: 'input', 
+            data: { 
+                name: "分析策略", 
+                content: strategyLogContent
+            } 
+        });
         try {
             const docContent = await executor.run(runId, promptYaml, { module_path: module.path, language, task_description: module.description });
 
