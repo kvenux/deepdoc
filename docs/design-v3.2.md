@@ -17,3 +17,5 @@ Step2卡片有，内容空。预期 Step2 Map阶段: 并行分析，
 应当以子卡片形式，展示每次的LLM request 和 llm返回的结果
 每个子步骤（如 "分析批次 1/M"）应有自己的状态（running, completed, failed）。
 每个子步骤内部可以折叠/展开，显示其对应的 LLM 请求（type: 'llm-request'）和 LLM 响应（type: 'output'，这里指批次摘要）。
+
+当前ProjectDocumentationOrchestrator是调用两个子agent的。运行是嵌套，前端输出也应该包含清楚子流程。当前后端事件 和 前端流程如何抽象成标准的langchain agent流程，使得前端的agentblock不用太多adhoc的适配就能支持呢？给出设计思路，全程用中文交流

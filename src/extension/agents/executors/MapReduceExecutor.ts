@@ -72,7 +72,6 @@ export class MapReduceExecutor {
                 return { path: path.relative(workspaceRoot.fsPath, uri.fsPath).replace(/\\/g, '/'), content, tokenCount: tokenizer.encode(content).length };
             });
             const allFiles = await Promise.all(fileDataPromises);
-            logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "文件列表", content: `当前模块包含 ${allFiles.length} 个文件` } });
             const totalTokensInModule = allFiles.reduce((sum, file) => sum + file.tokenCount, 0);
 
             const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || 12000;
@@ -86,7 +85,7 @@ export class MapReduceExecutor {
                 currentBatchTokens += file.tokenCount;
             }
             if (currentBatch.length > 0) { batches.push(currentBatch); }
-            logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "批次信息", content: `当前模块包含 ${totalTokensInModule} 个token，超过阈值 ${MAX_TOKENS_PER_BATCH}，创建 ${batches.length} 个批次迭代分析` } });
+            logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "文件清单Token分析", content: `当前模块包含 ${allFiles.length} 个文件 ${totalTokensInModule} 个token，超过阈值 ${MAX_TOKENS_PER_BATCH}，创建 ${batches.length} 个批次迭代分析` } });
             logger.onStepEnd({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'completed' }); // 修正: 添加 stepName
 
             const mapStepName = "Map阶段: 并行分析";

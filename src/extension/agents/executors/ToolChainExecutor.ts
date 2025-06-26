@@ -21,21 +21,15 @@ export class ToolChainExecutor {
 
         try {
             const parseTaskId = uuidv4();
-            const parseStepName = "解析YAML配置";
-            logger.onStepStart({ runId, taskId: parseTaskId, stepName: parseStepName, status: 'running' });
-            
             const actionPrompt = yaml.load(yamlContent) as ActionPrompt;
-
             if (!actionPrompt.tool_chain || !actionPrompt.llm_prompt_template) {
                 throw new Error("无效的Action Prompt YAML格式。缺少 'tool_chain' 或 'llm_prompt_template'。");
             }
-            logger.onStepEnd({ runId, taskId: parseTaskId, stepName: parseStepName, status: 'completed' }); // 修正: 添加 stepName
-
             const executionContext: Record<string, any> = { ...userInputs };
 
             for (const step of actionPrompt.tool_chain) { 
                 const toolTaskId = uuidv4();
-                const toolStepName = `执行工具: ${step.tool}`; // 使用这个作为 stepName
+                const toolStepName = `执行工具`; // 使用这个作为 stepName
                 logger.onStepStart({ runId, taskId: toolTaskId, stepName: toolStepName, status: 'running' });
 
                 const tool = toolRegistry.getTool(step.tool);
@@ -44,13 +38,13 @@ export class ToolChainExecutor {
                 }
                 
                 const toolInput = this.resolveInput(step.input, executionContext);
-                logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'input', data: { name: "工具输入", content: toolInput } });
+                logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'input', data: { name: `工具输入 ${step.tool} `, content: toolInput } });
                 
                 const toolOutputString = await tool.call(toolInput) as string; 
                 const toolOutputParsed = this.parseToolOutput(toolOutputString);
                 executionContext[step.output_variable] = toolOutputParsed;
                 
-                logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'output', data: { name: "工具输出", content: toolOutputString } });
+                logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'output', data: { name: `工具输出 ${step.tool} `, content: toolOutputString } });
                 logger.onStepEnd({ runId, taskId: toolTaskId, stepName: toolStepName, status: 'completed' }); // 修正: 添加 stepName
             }
             

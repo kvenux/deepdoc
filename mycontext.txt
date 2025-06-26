@@ -1016,10 +1016,10 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { get_encoding, Tiktoken } from 'tiktoken';
-import { v4 as uuidv4 } from 'uuid';
+import { v4 as uuidv4 } from 'uuid'; // 修正: 添加 import
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { AgentContext } from '../AgentContext';
-import { StringOutputParser } from '@langchain/core/output_parsers';
+import { StringOutputParser } from '@langchain/core/output_parsers'; // 修正: 添加 import
 
 // 接口定义
 interface MapReducePrompt {
@@ -1044,12 +1044,11 @@ async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
     for (const [name, type] of entries) {
         const entryUri = vscode.Uri.joinPath(dirUri, name);
         if (type === vscode.FileType.File) {
-            if (!name.startsWith('.') && !['node_modules', 'dist', 'out', 'target', 'build', '.git', '.vscode', 'bin'].some(part => entryUri.path.toLowerCase().includes(`/${part.toLowerCase()}/`)) &&
-                !['.lock', '.sum', '.md', '.txt', '.json', '.log', '.test.ts', '.spec.ts', '_test.go'].some(ext => name.toLowerCase().endsWith(ext))) { // 更严格的文件过滤
+            if (!name.startsWith('.') && !['node_modules', 'dist', 'out'].some(part => entryUri.path.includes(`/${part}/`))) {
                 files.push(entryUri);
             }
         } else if (type === vscode.FileType.Directory) {
-            if (!name.startsWith('.') && !['node_modules', 'dist', 'out', 'target', 'build', '.git', '.vscode', 'bin'].includes(name.toLowerCase())) {
+            if (!name.startsWith('.') && !['node_modules', 'dist', 'out'].includes(name)) {
                 files = files.concat(await getAllFilePaths(entryUri));
             }
         }
@@ -1061,167 +1060,91 @@ export class MapReduceExecutor {
     constructor(private readonly context: AgentContext) {}
 
     public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<string> {
-        const { logger, llmService, modelConfig, runDir, statsTracker } = this.context;
+        const { logger, llmService, modelConfig, runDir, statsTracker } = this.context; // <-- 获取 statsTracker
         let tokenizer: Tiktoken | null = null;
         
-        // --- "解析与准备" 步骤 ---
-        const prepStepName = "解析与准备";
-        const prepTaskId = uuidv4(); // 给这个步骤一个 taskId，以便前端可以唯一地跟踪它
-        logger.onStepStart({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'running' });
-        
         try {
+            const prepTaskId = uuidv4(); 
+            const prepStepName = "解析与准备";
+            logger.onStepStart({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'running' });
+            
             const actionPrompt = yaml.load(yamlContent) as MapReducePrompt;
-            const modulePath = userInputs['module_path']; // e.g., "src/common"
+            const modulePath = userInputs['module_path'];
             const workspaceFolders = vscode.workspace.workspaceFolders;
             if (!workspaceFolders) throw new Error("未打开工作区文件夹。");
             
             const workspaceRoot = workspaceFolders[0].uri;
             const absoluteModulePath = vscode.Uri.joinPath(workspaceRoot, modulePath);
-
-            logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'input', data: { name: "扫描文件夹", content: modulePath } });
-
             const fileUris = await getAllFilePaths(absoluteModulePath);
-            if (!fileUris || fileUris.length === 0) {
-                const msg = `在路径 "${modulePath}" 下没有找到符合条件的可分析文件。`;
-                logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "扫描结果", content: msg }});
-                logger.onStepEnd({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'failed', error: msg });
-                throw new Error(msg);
-            }
-            logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "文件列表", content: `找到 ${fileUris.length} 个文件。` }});
-            
             tokenizer = get_encoding("cl100k_base");
             
-            let totalTokenCount = 0;
             const fileDataPromises = fileUris.map(async (uri): Promise<FileData> => {
                 if (!tokenizer) throw new Error("Tokenizer not initialized.");
                 const contentBytes = await vscode.workspace.fs.readFile(uri);
                 const content = Buffer.from(contentBytes).toString('utf-8');
-                const tokenCount = tokenizer.encode(content).length;
-                totalTokenCount += tokenCount;
-                return { path: path.relative(workspaceRoot.fsPath, uri.fsPath).replace(/\\/g, '/'), content, tokenCount };
+                return { path: path.relative(workspaceRoot.fsPath, uri.fsPath).replace(/\\/g, '/'), content, tokenCount: tokenizer.encode(content).length };
             });
-            const allFilesData = await Promise.all(fileDataPromises);
-            
-            const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || 12000; // e.g. 12k for a 16k model with some buffer
+            const allFiles = await Promise.all(fileDataPromises);
+            const totalTokensInModule = allFiles.reduce((sum, file) => sum + file.tokenCount, 0);
 
-            let prepSummary = `模块总 Token 数: ${totalTokenCount.toLocaleString()}. `;
-            if (totalTokenCount > MAX_TOKENS_PER_BATCH) {
-                prepSummary += `(超过单批次阈值 ${MAX_TOKENS_PER_BATCH.toLocaleString()}). `;
-            }
-
-
+            const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || 12000;
             const batches: FileData[][] = [];
             let currentBatch: FileData[] = [];
             let currentBatchTokens = 0;
-
-            for (const file of allFilesData) {
-                // 如果单个文件就超过了批次限制，并且批次中已经有其他文件，则先将当前批次保存
-                if (currentBatch.length > 0 && file.tokenCount > MAX_TOKENS_PER_BATCH) {
-                    batches.push(currentBatch);
-                    currentBatch = [];
-                    currentBatchTokens = 0;
-                }
-                // 如果单个文件超限，则单独成批 (或跳过，取决于策略)
-                if (file.tokenCount > MAX_TOKENS_PER_BATCH) {
-                    logger.warn(`文件 ${file.path} (Tokens: ${file.tokenCount}) 超过单批次最大Token数 ${MAX_TOKENS_PER_BATCH}，将单独处理或可能被截断。当前策略：单独成批（若适用）或跳过。`);
-                    //  简单策略：如果单个文件就超限，可以考虑将其拆分或跳过。这里我们先允许它单独成批，LLM调用时可能会出错。
-                    //  更稳健的策略是拆分超大文件。
-                    if (currentBatch.length > 0) { // 如果之前有文件，先保存之前的批次
-                        batches.push(currentBatch);
-                        currentBatch = [];
-                        currentBatchTokens = 0;
-                    }
-                    batches.push([file]); // 超大文件单独一批
-                    continue; // 处理下一个文件
-                }
-
-                if (currentBatchTokens + file.tokenCount > MAX_TOKENS_PER_BATCH) {
-                    batches.push(currentBatch);
-                    currentBatch = [];
-                    currentBatchTokens = 0;
-                }
+            for (const file of allFiles) {
+                if (file.tokenCount > MAX_TOKENS_PER_BATCH) { continue; }
+                if (currentBatchTokens + file.tokenCount > MAX_TOKENS_PER_BATCH) { batches.push(currentBatch); currentBatch = []; currentBatchTokens = 0; }
                 currentBatch.push(file);
                 currentBatchTokens += file.tokenCount;
             }
-            if (currentBatch.length > 0) {
-                batches.push(currentBatch);
-            }
+            if (currentBatch.length > 0) { batches.push(currentBatch); }
+            logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "文件清单Token分析", content: `当前模块包含 ${allFiles.length} 个文件 ${totalTokensInModule} 个token，超过阈值 ${MAX_TOKENS_PER_BATCH}，创建 ${batches.length} 个批次迭代分析` } });
+            logger.onStepEnd({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'completed' }); // 修正: 添加 stepName
 
-            prepSummary += `已分批为 ${batches.length} 个批次。`;
-            logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "准备摘要", content: prepSummary }});
-            logger.onStepEnd({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'completed' });
-
-            // --- "Map阶段: 并行分析" 父步骤 ---
             const mapStepName = "Map阶段: 并行分析";
-            // Map阶段父步骤也需要一个 taskId，用于前端正确地找到它并渲染子步骤
-            const mapParentTaskId = uuidv4();
-            logger.onStepStart({ runId, taskId: mapParentTaskId, stepName: mapStepName, status: 'running' });
+            logger.onStepStart({ runId, stepName: mapStepName, status: 'running' }); // 这个是父步骤的开始
 
             const llm = await llmService.createModel({ modelConfig, temperature: 0.1, streaming: false });
             const mapAnalysisPromises = batches.map(async (batch, i) => {
-                const mapSubTaskId = uuidv4(); // 每个子任务有自己的 taskId
-                const mapSubTaskName = `分析批次 ${i + 1}/${batches.length}`;
-                // 子任务的 stepName 应该是唯一的，包含了批次信息
-                logger.onStepStart({ runId, taskId: mapSubTaskId, stepName: mapSubTaskName, status: 'running' });
+                const mapTaskId = uuidv4(); 
+                const mapTaskName = `分析批次 ${i + 1}/${batches.length}`;
+                logger.onStepStart({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'running' });
                 
                 try {
-                    const batchFilePaths = batch.map(f => f.path).join(', ');
                     const batchContent = batch.map(f => `--- FILE: ${f.path} ---\n${f.content}`).join('\n\n');
-                    
                     const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
-                    // metadata.stepNameHint 可以帮助前端关联日志到正确的父步骤，如果 taskId 不够用或逻辑复杂
-                    logger.onStepUpdate({ 
-                        runId, 
-                        taskId: mapSubTaskId, // 日志与子任务关联
-                        type: 'llm-request', 
-                        data: { 
-                            name: `LLM请求 (批次 ${i + 1})`, 
-                            content: `System: ${actionPrompt.map_prompt_template.system}\nHuman: ${humanPrompt.substring(0, 300)}... (Files: ${batchFilePaths})` // 简短描述
-                        },
-                        metadata: { stepNameHint: mapSubTaskName } // 指向子任务名
-                    });
+                    logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'llm-request', data: { system: actionPrompt.map_prompt_template.system, human: humanPrompt } });
                     
                     const response = await llmService.scheduleLlmCall(() => llm.invoke([new SystemMessage(actionPrompt.map_prompt_template.system), new HumanMessage(humanPrompt)]));
                     const responseContent = response.content as string;
 
-                    const fullMapPrompt = actionPrompt.map_prompt_template.system + "\n" + humanPrompt;
+                    // 在 Map 阶段的 LLM 调用后记录 Token
+                    const fullMapPrompt = actionPrompt.map_prompt_template.system + "\n" + humanPrompt; // 估算，或者从 Langchain 内部获取更准确的
                     statsTracker.add(fullMapPrompt, responseContent);
 
-                    logger.onStepUpdate({ 
-                        runId, 
-                        taskId: mapSubTaskId, // 日志与子任务关联
-                        type: 'output', 
-                        data: { name: "批次摘要", content: responseContent },
-                        metadata: { stepNameHint: mapSubTaskName } // 指向子任务名
-                    });
-                    logger.onStepEnd({ runId, taskId: mapSubTaskId, stepName: mapSubTaskName, status: 'completed' });
+                    logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'output', data: { name: "批次摘要", content: responseContent } });
+                    logger.onStepEnd({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'completed' }); // 修正: 添加 stepName
                     return responseContent;
                 } catch (e: any) {
-                    logger.onStepEnd({ runId, taskId: mapSubTaskId, stepName: mapSubTaskName, status: 'failed', error: e.message });
-                    throw e; // 让 Promise.all 捕获
+                    logger.onStepEnd({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'failed', error: e.message }); // 修正: 添加 stepName
+                    throw e;
                 }
             });
+            const mapResults = await Promise.all(mapAnalysisPromises);
+            logger.onStepEnd({ runId, stepName: mapStepName, status: 'completed' }); // 修正: 父步骤的结束, 添加 stepName
 
-            const mapResults = await Promise.all(mapAnalysisPromises); // 等待所有 Map 子任务完成
-            // Map 阶段父步骤完成
-            logger.onStepEnd({ runId, taskId: mapParentTaskId, stepName: mapStepName, status: 'completed' });
-
-            // --- "Reduce阶段: 综合摘要" 步骤 ---
+            const reduceTaskId = uuidv4(); 
             const reduceStepName = "Reduce阶段: 综合摘要";
-            const reduceTaskId = uuidv4();
             logger.onStepStart({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'running' });
 
-            const combinedMarkdownSummaries = mapResults.join("\n\n---\n"); // 用分隔符更清晰
-            logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'input', data: { name: "所有批次摘要合并结果", content: combinedMarkdownSummaries } });
+            const combinedMarkdownSummaries = mapResults.join("\n\n");
+            logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'input', data: { name: "所有摘要", content: combinedMarkdownSummaries } });
             
-            const reduceLlm = await llmService.createModel({ modelConfig, temperature: 0.5, streaming: true }); // Reduce 阶段可以用流式
+            const reduceLlm = await llmService.createModel({ modelConfig, temperature: 0.5, streaming: true });
             let humanReducePrompt = actionPrompt.reduce_prompt_template.human;
-            for (const key in userInputs) { // 替换用户可能输入的其他参数，如 {language}
-                if (key !== 'module_path') { // module_path 已被用于文件扫描
-                    humanReducePrompt = humanReducePrompt.replace(new RegExp(`\\{${key}\\}`, 'g'), userInputs[key]);
-                }
+            for (const key in userInputs) {
+                humanReducePrompt = humanReducePrompt.replace(new RegExp(`\\{${key}\\}`, 'g'), userInputs[key]);
             }
-            humanReducePrompt = humanReducePrompt.replace('{module_name}', path.basename(modulePath)); // 添加模块名给 Reduce prompt
             humanReducePrompt = humanReducePrompt.replace('{combined_markdown_summaries}', combinedMarkdownSummaries);
             
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'llm-request', data: { system: actionPrompt.reduce_prompt_template.system, human: humanReducePrompt } });
@@ -1233,25 +1156,19 @@ export class MapReduceExecutor {
             for await (const chunk of stream) {
                 const chunkContent = chunk as string; 
                 finalContent += chunkContent;
+                // logger.onStreamChunk({ runId, taskId: reduceTaskId, content: chunkContent });
             }
 
-            const fullReducePrompt = actionPrompt.reduce_prompt_template.system + "\n" + humanReducePrompt;
+            const fullReducePrompt = actionPrompt.reduce_prompt_template.system + "\n" + humanReducePrompt; // 估算
             statsTracker.add(fullReducePrompt, finalContent);
-            
+
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'output', data: { name: "最终文档", content: finalContent }, metadata: { type: 'markdown' } });
-            logger.onStepEnd({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'completed' });
+            logger.onStepEnd({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'completed' }); // 修正: 添加 stepName
             
             return finalContent;
 
         } catch (error: any) {
             const err = error instanceof Error ? error : new Error(String(error));
-            // 如果错误发生在 "解析与准备" 之外的阶段，确保 "解析与准备" 步骤已结束 (如果它成功了)
-            // 但如果 "解析与准备" 自身失败，其 onStepEnd(failed) 已在上面处理。
-            // AgentService 会捕获此处的 throw 并发送 onAgentEnd(failed)
-            if (prepStepName && !(err.message.includes("没有找到符合条件的可分析文件"))) { // 避免重复发送 failed 状态
-                // Check if prep step completed, if not, it means it failed earlier
-                // This logic might be tricky, AgentService should handle top-level failure reporting
-            }
             throw err;
         } finally {
             if (tokenizer) {
@@ -1287,21 +1204,15 @@ export class ToolChainExecutor {
 
         try {
             const parseTaskId = uuidv4();
-            const parseStepName = "解析YAML配置";
-            logger.onStepStart({ runId, taskId: parseTaskId, stepName: parseStepName, status: 'running' });
-            
             const actionPrompt = yaml.load(yamlContent) as ActionPrompt;
-
             if (!actionPrompt.tool_chain || !actionPrompt.llm_prompt_template) {
                 throw new Error("无效的Action Prompt YAML格式。缺少 'tool_chain' 或 'llm_prompt_template'。");
             }
-            logger.onStepEnd({ runId, taskId: parseTaskId, stepName: parseStepName, status: 'completed' }); // 修正: 添加 stepName
-
             const executionContext: Record<string, any> = { ...userInputs };
 
             for (const step of actionPrompt.tool_chain) { 
                 const toolTaskId = uuidv4();
-                const toolStepName = `执行工具: ${step.tool}`; // 使用这个作为 stepName
+                const toolStepName = `执行工具`; // 使用这个作为 stepName
                 logger.onStepStart({ runId, taskId: toolTaskId, stepName: toolStepName, status: 'running' });
 
                 const tool = toolRegistry.getTool(step.tool);
@@ -1310,13 +1221,13 @@ export class ToolChainExecutor {
                 }
                 
                 const toolInput = this.resolveInput(step.input, executionContext);
-                logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'input', data: { name: "工具输入", content: toolInput } });
+                logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'input', data: { name: `工具输入 ${step.tool} `, content: toolInput } });
                 
                 const toolOutputString = await tool.call(toolInput) as string; 
                 const toolOutputParsed = this.parseToolOutput(toolOutputString);
                 executionContext[step.output_variable] = toolOutputParsed;
                 
-                logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'output', data: { name: "工具输出", content: toolOutputString } });
+                logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'output', data: { name: `工具输出 ${step.tool} `, content: toolOutputString } });
                 logger.onStepEnd({ runId, taskId: toolTaskId, stepName: toolStepName, status: 'completed' }); // 修正: 添加 stepName
             }
             
@@ -1919,7 +1830,7 @@ const AGENT_DEFINITIONS: Record<string, AgentPlan> = {
         agentId: 'docgen-module-direct',
         agentName: '模块级文档 (直接分析)',
         steps: [
-            { name: "执行工具链", description: "按顺序执行文件读取和分析工具。", promptFiles: ['module_analysis_direct.yml'] },
+            { name: "执行工具", description: "按顺序执行文件读取和分析工具。", promptFiles: ['module_analysis_direct.yml'] },
             { name: "生成最终响应", description: "使用LLM整合工具输出，生成模块文档。" }
         ],
         parameters: [
@@ -3160,7 +3071,7 @@ export function createFileSelectorLLMTool(llm: BaseLanguageModel, llmService: LL
 --- file_path: webview/components/AgentRunBlock.ts ---
 // --- file_path: webview/components/AgentRunBlock.ts ---
 
-import { AgentPlan, AgentResult, StepExecution, StepUpdate, StreamChunk, AgentPlanStep, StepResult as CommonStepResultType } from '../../common/types';
+import { AgentPlan, AgentResult, StepExecution, StepUpdate, StreamChunk, AgentPlanStep, StepResult as CommonStepResultType } from '../../common/types'; // Renamed to avoid conflict
 import { marked } from 'marked';
 import { vscode } from '../vscode';
 
@@ -3178,11 +3089,11 @@ export class AgentRunBlock {
     private plan: AgentPlan;
     private onExecute: (params: Record<string, any>) => void;
     private status: AgentStatus = 'planning';
-    private executionState: Map<string, ExecutionStepState> = new Map(); // Keyed by taskId or stepName (for plan steps without taskId initially)
+    private executionState: Map<string, ExecutionStepState> = new Map();
     private agentResult: AgentResult | null = null;
     private animatedStepIds: Set<string> = new Set();
-    private stepElementsCache: Map<string, HTMLElement> = new Map(); // Keyed by taskId or stepName
-    private executionStepsOuterContainer: HTMLElement | null = null;
+    private stepElementsCache: Map<string, HTMLElement> = new Map();
+    private executionStepsOuterContainer: HTMLElement | null = null; // Cache this
 
     constructor(
         container: HTMLElement,
@@ -3193,118 +3104,93 @@ export class AgentRunBlock {
         this.plan = plan;
         this.onExecute = onExecute;
         this.element.className = 'agent-run-block';
-        this.render();
+
+        this.render(); // Initial render
         this.setupEventListeners();
     }
 
+    // Called by ChatView when agent:stepStart or agent:stepEnd is received
     public updateStepExecutionStatus(stepEventData: StepExecution | CommonStepResultType) {
-        const stepKey = stepEventData.taskId || stepEventData.stepName; // Prefer taskId if available
+        const stepKey = stepEventData.taskId || stepEventData.stepName;
         let stepState = this.executionState.get(stepKey);
-        const isNewToState = !stepState;
+        const isNewStepInState = !stepState;
 
-        if (isNewToState) {
-            // Ensure we are dealing with StepExecution for new entries
-            if (!('runId' in stepEventData && 'stepName' in stepEventData && 'status' in stepEventData)) {
-                console.error("Attempted to create new step state with incompatible data:", stepEventData);
-                return;
-            }
+        if (isNewStepInState) {
+            // This is a StepExecution event for a new step/task
             stepState = { ...(stepEventData as StepExecution), logs: [], isCollapsed: false, streamedContent: '' };
         } else {
-            stepState!.status = stepEventData.status; // Update status for existing
+            // This is an update for an existing step (either StepExecution or StepResult)
+            stepState!.status = stepEventData.status;
         }
         
         if (stepEventData.status === 'failed' && 'error' in stepEventData && stepEventData.error) {
             stepState!.error = stepEventData.error;
         }
         this.executionState.set(stepKey, stepState!);
-        
-        // Determine if this is a sub-step (e.g., "分析批次 X/Y")
-        // A MapReduce sub-task's stepName will be like "分析批次 1/3"
-        const isMapReduceSubStep = stepState!.stepName.startsWith("分析批次");
 
-        if (isNewToState) { // A new step/task has started
-            if (isMapReduceSubStep) {
-                // Find the parent "Map阶段: 并行分析" step
-                const parentMapStep = Array.from(this.executionState.values()).find(
-                    s => s.stepName === "Map阶段: 并行分析" && s.runId === stepState!.runId
-                );
-                if (parentMapStep) {
-                    const parentKey = parentMapStep.taskId || parentMapStep.stepName;
-                    const parentElement = this.stepElementsCache.get(parentKey);
-                    if (parentElement) {
-                        const subStepsContainer = parentElement.querySelector('.sub-steps-container') as HTMLElement;
-                        if (subStepsContainer) {
-                            // Add or update this specific sub-step in the container
-                            this.renderOrUpdateSingleSubStep(subStepsContainer, stepState!);
-                            return; // Handled locally for the new sub-step
+        const isSubStep = stepState!.stepName.startsWith("分析模块:"); // Heuristic for sub-steps
+
+        if (isNewStepInState) {
+            // New step appearing in the execution flow
+            if (isSubStep) {
+                // Try to update parent's sub-step container directly
+                const parentPlanStep = this.plan.steps.find(p => p.name === "分析: 并行处理模块"); // More robust way to find parent needed
+                if (parentPlanStep) {
+                    const parentStepState = Array.from(this.executionState.values()).find(
+                        s => s.stepName === parentPlanStep.name && s.runId === stepState!.runId
+                    );
+                    if (parentStepState) {
+                        const parentKey = parentStepState.taskId || parentStepState.stepName;
+                        const parentElement = this.stepElementsCache.get(parentKey);
+                        if (parentElement) {
+                            const subStepsContainer = parentElement.querySelector('.sub-steps-container') as HTMLElement;
+                            if (subStepsContainer) {
+                                this.updateSubStepsContainerRendering(subStepsContainer, parentStepState);
+                                return; // Handled locally
+                            }
                         }
                     }
                 }
             }
-            // For new top-level steps or if parent rendering failed, do a full render of execution view
-            this.render(); // This will call renderExecutingViewContents
+            // Fallback to full render if sub-step parent not found/rendered, or if it's a new top-level step
+            this.render();
         } else {
-            // Status update for an existing, rendered step (top-level or sub-step)
+            // Status update for an existing, rendered step
             const stepElement = this.stepElementsCache.get(stepKey);
             if (stepElement) {
                 this.updateElementHeaderAndError(stepElement, stepState!);
-            } else {
-                // Element not cached, might need a broader re-render if it's a sub-step whose parent needs to show it now
-                 if (isMapReduceSubStep) this.render(); 
             }
         }
     }
 
+
     public addStepLog(update: StepUpdate) {
-        // 首先，检查 update.type 是否是 'status'。如果是，则这个方法不应该处理它。
-        // 状态更新应该由 updateStepExecutionStatus 处理。
-        if (update.type === 'status') {
-            // console.warn("[AgentRunBlock] addStepLog received a 'status' update. This should be handled by updateStepExecutionStatus. Ignoring.", update);
-            // 或者，如果确实需要通过 addStepLog 触发状态更新的某些副作用（不推荐），
-            // 你可以在这里调用一个专门处理状态的辅助方法，但通常 addStepLog 只关心日志内容。
-            return; 
-        }
+        const stepKey = update.taskId ||
+            (this.plan.steps.find(s => s.name === update.metadata?.stepNameHint)?.name) ||
+            'global_logs';
 
-        // 现在 update.type 肯定是 'input', 'output', 或 'llm-request'
-        const stepKey = update.taskId || 
-                        (update.metadata?.stepNameHint && this.executionState.has(update.metadata.stepNameHint) ? update.metadata.stepNameHint : null) ||
-                        update.metadata?.stepNameHint ||
-                        this.plan.steps.find(s => s.name === update.metadata?.stepNameHint)?.name ||
-                        'global_logs';
+        const stepState = this.executionState.get(stepKey) || Array.from(this.executionState.values()).find(s => s.stepName === stepKey);
 
-        const stepState = this.executionState.get(stepKey);
-
-        if (stepState) {
-            // 构造要添加到 logs 数组的对象，确保类型匹配
-            const logEntryToAdd: { type: 'input' | 'output' | 'llm-request', data: any, metadata?: Record<string, any> } = {
-                type: update.type, // 此时 type 已经是 'input', 'output', 或 'llm-request' 之一
-                data: update.data,
-                metadata: update.metadata
-            };
-            stepState.logs.push(logEntryToAdd);
+        if (stepState && (update.type === 'input' || update.type === 'output' || update.type === 'llm-request')) {
+            stepState.logs.push({ type: update.type, data: update.data, metadata: update.metadata });
 
             const stepElement = this.stepElementsCache.get(stepKey);
             if (stepElement) {
                 const contentWrapper = stepElement.querySelector(stepElement.classList.contains('sub-step') ? '.sub-step-content-wrapper' : '.step-content-wrapper') as HTMLElement;
                 if (contentWrapper) {
-                    let logsContainer = contentWrapper.querySelector('.logs-wrapper') as HTMLElement;
-                    if (!logsContainer) {
-                        logsContainer = document.createElement('div');
-                        logsContainer.className = 'logs-wrapper';
-                        if (contentWrapper.firstChild) {
-                            contentWrapper.insertBefore(logsContainer, contentWrapper.firstChild);
-                        } else {
-                            contentWrapper.appendChild(logsContainer);
-                        }
+                    const logsContainer = contentWrapper.querySelector('.logs-wrapper') as HTMLElement;
+                    if (logsContainer) {
+                        const newLogElement = this.renderLogItem({ type: update.type, data: update.data, metadata: update.metadata });
+                        logsContainer.appendChild(newLogElement);
+                        // Potentially scroll the logs container if needed
+                        logsContainer.scrollTop = logsContainer.scrollHeight;
+                    } else {
+                        // Logs container doesn't exist, might need to re-render step internals for this step
+                        // This case should be rare if renderStepInternals always creates it.
+                        contentWrapper.innerHTML = this.renderStepInternals(stepState);
                     }
-                    // 使用 logEntryToAdd (它已经是正确的类型) 来渲染元素
-                    const newLogElement = this.renderLogItemToElement(logEntryToAdd); 
-                    logsContainer.appendChild(newLogElement);
-                    logsContainer.scrollTop = logsContainer.scrollHeight;
                 }
             }
-        } else {
-            console.warn(`[AgentRunBlock] addStepLog: Could not find step state for key '${stepKey}'. Log for:`, update.data?.name, update);
         }
     }
 
@@ -3314,30 +3200,27 @@ export class AgentRunBlock {
             console.warn('AgentRunBlock: StreamChunk received without taskId.', chunk);
             return;
         }
+
         const stepState = this.executionState.get(stepKey);
         if (stepState) {
             stepState.streamedContent += chunk.content;
+
             const stepElement = this.stepElementsCache.get(stepKey);
             if (stepElement) {
                 const contentWrapper = stepElement.querySelector(stepElement.classList.contains('sub-step') ? '.sub-step-content-wrapper' : '.step-content-wrapper') as HTMLElement;
                 if (contentWrapper) {
                     let streamWrapper = contentWrapper.querySelector('.stream-wrapper') as HTMLElement;
                     if (!streamWrapper) {
-                        streamWrapper = document.createElement('div');
-                        streamWrapper.className = 'stream-wrapper';
-                        // Append after logs-wrapper if it exists, otherwise as first child
-                        const logsWrapper = contentWrapper.querySelector('.logs-wrapper');
-                        if (logsWrapper && logsWrapper.nextSibling) {
-                            contentWrapper.insertBefore(streamWrapper, logsWrapper.nextSibling);
-                        } else if (logsWrapper) {
-                            contentWrapper.appendChild(streamWrapper);
-                        } else if (contentWrapper.firstChild) {
-                            contentWrapper.insertBefore(streamWrapper, contentWrapper.firstChild);
-                        } else {
-                            contentWrapper.appendChild(streamWrapper);
-                        }
+                        // If stream wrapper doesn't exist, create it (e.g. by re-rendering internals for this step)
+                        // This is a fallback; ideally, renderStepInternals would have set it up.
+                        // A simpler approach for now is to just re-render the step's internals fully if the stream wrapper isn't found.
+                        // However, a more robust way is to ensure renderStepInternals always creates these wrappers.
+                        contentWrapper.innerHTML = this.renderStepInternals(stepState); //This will create the stream-wrapper
+                        streamWrapper = contentWrapper.querySelector('.stream-wrapper') as HTMLElement; // Re-query
                     }
-                    streamWrapper.innerHTML = this.renderStreamedContentToString(stepState.streamedContent);
+                    if (streamWrapper) {
+                        streamWrapper.innerHTML = this.renderStreamedContent(stepState.streamedContent); // renderStreamedContent returns HTML for the content *inside* the wrapper
+                    }
                 }
             }
         } else {
@@ -3348,11 +3231,11 @@ export class AgentRunBlock {
     public setAgentResult(result: AgentResult) {
         this.status = result.status;
         this.agentResult = result;
-        this.render(); // Full render of exec view is fine for final result
+        // This is a major state change, a full re-render of the execution view part is acceptable.
+        this.render();
     }
 
     private render() {
-        // ... (renderPlanningView logic remains the same) ...
         const isPlanningReadOnly = this.status !== 'planning' && this.status !== 'validating';
 
         const planningViewContainer = this.element.querySelector('.planning-view-container');
@@ -3366,6 +3249,8 @@ export class AgentRunBlock {
         if (isPlanningReadOnly) {
             if (!executingViewContainer.classList.contains('active')) {
                 this.animatedStepIds.clear();
+                // Do NOT clear stepElementsCache here if we want to preserve elements across minor re-renders
+                // this.stepElementsCache.clear(); 
                 executingViewContainer.classList.add('active');
             }
             this.renderExecutingViewContents(executingViewContainer);
@@ -3375,9 +3260,9 @@ export class AgentRunBlock {
         }
         this.postRender();
     }
-    
+
     private renderExecutingViewContents(container: HTMLElement) {
-        const statusClassMapping: Record<AgentStatus, string> = { planning: 'planning', validating: 'planning', executing: 'executing', completed: 'completed', failed: 'failed', cancelled: 'failed'};
+        const statusClassMapping: Record<AgentStatus, string> = { /* ... */ planning: 'planning', validating: 'planning', executing: 'executing', completed: 'completed', failed: 'failed', cancelled: 'failed'};
         const statusClass = statusClassMapping[this.status] || 'executing';
         const statusText = this.status.charAt(0).toUpperCase() + this.status.slice(1);
 
@@ -3399,105 +3284,51 @@ export class AgentRunBlock {
                 badge.textContent = statusText;
             }
         }
-        if (!this.executionStepsOuterContainer) return;
-
-        // 获取当前所有在 executionState 中的顶级步骤的 key (taskId 或 stepName)
-        const activeTopLevelStepKeys = new Set<string>();
-        Array.from(this.executionState.values()).forEach(state => {
-            // 如果这个 state 对应 plan 中的一个步骤，并且它不是一个已知的子任务模式
-            if (this.plan.steps.some(ps => ps.name === state.stepName) && !state.stepName.startsWith("分析批次")) {
-                activeTopLevelStepKeys.add(state.taskId || state.stepName);
-            }
-        });
         
-        // 确保所有 plan.steps 都有机会被渲染，如果它们有对应的 activeTopLevelStepKeys
-        // 或者，如果它们是刚刚启动且在 executionState 中（即使 plan.steps 中没有定义 taskId）
-        const stepsToRenderOrUpdate = new Map<string, ExecutionStepState>();
-
-        // 优先处理 plan.steps 中定义的步骤
-        this.plan.steps.forEach(planStep => {
-            // 尝试通过 planStep.name 找到 state，或者通过 taskId (如果 plan 中有 taskId 且 state 中也有)
-            // 这是一个启发式方法，因为 planStep 通常没有 taskId
-            const matchingState = Array.from(this.executionState.values()).find(
-                s => s.stepName === planStep.name && !s.stepName.startsWith("分析批次")
-            );
-            if (matchingState) {
-                const key = matchingState.taskId || matchingState.stepName;
-                stepsToRenderOrUpdate.set(key, matchingState);
-            }
-        });
-
-        // 确保所有在 executionState 中标记为顶级步骤的都被包含进来，即使它们的名字可能不在 plan.steps 中（不太可能，但为了健壮性）
-        activeTopLevelStepKeys.forEach(key => {
-            if (!stepsToRenderOrUpdate.has(key) && this.executionState.has(key)) {
-                stepsToRenderOrUpdate.set(key, this.executionState.get(key)!);
-            }
-        });
+        // Ensure executionStepsOuterContainer is defined
+        if (!this.executionStepsOuterContainer) {
+             this.executionStepsOuterContainer = container.querySelector('.execution-steps-outer-container') as HTMLElement;
+             if (!this.executionStepsOuterContainer) return; // Should not happen
+        }
 
 
-        // 清理掉 executionStepsOuterContainer 中不再活动的顶级步骤的 DOM 元素
-        const existingDOMElements = new Map<string, HTMLElement>();
-        this.executionStepsOuterContainer.querySelectorAll<HTMLElement>('.execution-step:not(.sub-step)').forEach(el => {
-            const key = el.dataset.taskId || el.dataset.stepName;
-            if (key) existingDOMElements.set(key, el);
-        });
+        this.plan.steps.forEach((planStep, index) => {
+            const executionStepState = Array.from(this.executionState.values())
+                .find(s => s.stepName === planStep.name && !s.stepName.startsWith("分析模块:")); // Find top-level steps
 
-        existingDOMElements.forEach((el, key) => {
-            if (!stepsToRenderOrUpdate.has(key)) {
-                el.remove();
-                this.stepElementsCache.delete(key);
-                this.animatedStepIds.delete(key);
-            }
-        });
-        
-        // 现在迭代 stepsToRenderOrUpdate 来渲染或更新
-        // 为了保持 plan.steps 的顺序，我们最好还是基于 plan.steps 的顺序来追加元素
-        let elementIndex = 0;
-        this.plan.steps.forEach((planStep, indexInPlan) => {
-            const executionStepState = Array.from(stepsToRenderOrUpdate.values()).find(s => s.stepName === planStep.name);
-
-            if (executionStepState) {
-                const stepMapKey = executionStepState.taskId || executionStepState.stepName;
-                let stepElement = this.stepElementsCache.get(stepMapKey);
-
-                if (!stepElement) { // Create new element
-                    // ... (创建元素的逻辑不变) ...
-                    let animationClass = '';
-                    if (!this.animatedStepIds.has(stepMapKey)) {
-                        animationClass = 'needs-animation';
-                        this.animatedStepIds.add(stepMapKey);
-                    }
-                    const isParallel = planStep.name === "Map阶段: 并行分析";
-                    const stepHtml = isParallel
-                        ? this.getParallelAnalysisStepHtml(planStep, indexInPlan, executionStepState, animationClass)
-                        : this.getExecutionStepHtml(executionStepState, planStep, indexInPlan, animationClass);
-
-                    const tempDiv = document.createElement('div');
-                    tempDiv.innerHTML = stepHtml.trim();
-                    stepElement = tempDiv.firstChild as HTMLElement;
-
-                    if (stepElement) {
-                        // 插入到正确的位置，而不是总是追加
-                        if (this.executionStepsOuterContainer!.children[elementIndex]) {
-                            this.executionStepsOuterContainer!.insertBefore(stepElement, this.executionStepsOuterContainer!.children[elementIndex]);
-                        } else {
-                            this.executionStepsOuterContainer!.appendChild(stepElement);
-                        }
-                        this.stepElementsCache.set(stepMapKey, stepElement);
-                    }
-                } else { // Update existing element
-                    // 确保元素在 DOM 中的顺序正确
-                    if (this.executionStepsOuterContainer!.children[elementIndex] !== stepElement) {
-                        stepElement.remove(); // 从旧位置移除
-                        if (this.executionStepsOuterContainer!.children[elementIndex]) {
-                            this.executionStepsOuterContainer!.insertBefore(stepElement, this.executionStepsOuterContainer!.children[elementIndex]);
-                        } else {
-                            this.executionStepsOuterContainer!.appendChild(stepElement);
-                        }
-                    }
-                    this.updateStepElement(stepElement, executionStepState, planStep, planStep.name === "Map阶段: 并行分析", indexInPlan);
+            if (!executionStepState) {
+                const existingEl = this.stepElementsCache.get(planStep.name); // Key by planStep.name for top-level
+                if (existingEl) {
+                    existingEl.remove();
+                    this.stepElementsCache.delete(planStep.name);
                 }
-                if (stepElement) elementIndex++; // 只有当元素被渲染或更新时才增加索引
+                return;
+            }
+
+            const stepMapKey = executionStepState.taskId || executionStepState.stepName;
+            let stepElement = this.stepElementsCache.get(stepMapKey);
+
+            if (!stepElement) {
+                let animationClass = '';
+                if (!this.animatedStepIds.has(stepMapKey)) {
+                    animationClass = 'needs-animation';
+                    this.animatedStepIds.add(stepMapKey);
+                }
+                const isParallel = planStep.name === "分析: 并行处理模块"; // Heuristic
+                const stepHtml = isParallel
+                    ? this.getParallelAnalysisStepHtml(planStep, index, executionStepState, animationClass)
+                    : this.getExecutionStepHtml(executionStepState, planStep, index, animationClass);
+
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = stepHtml.trim();
+                stepElement = tempDiv.firstChild as HTMLElement;
+
+                if (stepElement) {
+                    this.executionStepsOuterContainer!.appendChild(stepElement);
+                    this.stepElementsCache.set(stepMapKey, stepElement);
+                }
+            } else {
+                this.updateStepElement(stepElement, executionStepState, planStep, planStep.name === "分析: 并行处理模块", index);
             }
         });
 
@@ -3510,229 +3341,188 @@ export class AgentRunBlock {
     }
 
     private updateStepElement(element: HTMLElement, stepState: ExecutionStepState, planStep: AgentPlanStep, isParallel: boolean, index: number) {
-        this.updateElementHeaderAndError(element, stepState);
+        this.updateElementHeaderAndError(element, stepState); // Update header and error
 
         const contentWrapper = element.querySelector('.step-content-wrapper') as HTMLElement;
         if (contentWrapper) {
-            contentWrapper.style.maxHeight = stepState.isCollapsed ? '0' : (isParallel ? '5000px' : '2000px'); // Consider dynamic height
+            contentWrapper.style.maxHeight = stepState.isCollapsed ? '0' : (isParallel ? '5000px' : '2000px');
             contentWrapper.style.padding = stepState.isCollapsed ? '0 15px' : '10px 15px';
 
-            if (isParallel) { // Specifically for "Map阶段: 并行分析"
+            if (isParallel) {
                 const subStepsContainer = contentWrapper.querySelector('.sub-steps-container') as HTMLElement;
                 if (subStepsContainer) {
-                     this.renderOrUpdateSubStepsInContainer(subStepsContainer, stepState); // Pass parent step state
+                    this.updateSubStepsContainerRendering(subStepsContainer, stepState);
                 }
             } else {
-                // For simple steps, only populate content if it's not already managed by targeted updates
+                // Only set innerHTML for content if the wrapper is empty (initial population)
+                // OR if there are logs/stream/error to display and it wasn't populated before.
+                // This prevents re-rendering content if it's managed by targeted updates.
                 const needsContentPopulation = !contentWrapper.querySelector('.logs-wrapper') && !contentWrapper.querySelector('.stream-wrapper');
                 if (needsContentPopulation && (stepState.logs.length > 0 || stepState.streamedContent || stepState.error)) {
-                    contentWrapper.innerHTML = this.renderStepInternalsToString(stepState);
+                    contentWrapper.innerHTML = this.renderStepInternals(stepState);
+                } else if (contentWrapper.children.length === 0 && (stepState.logs.length > 0 || stepState.streamedContent || stepState.error)) {
+                    // Fallback if specific wrappers are not used and content is empty
+                    contentWrapper.innerHTML = this.renderStepInternals(stepState);
                 }
+                // If content exists, assume addStepLog/appendStreamChunk will handle it.
             }
         }
     }
     
-    // New method to render or update all sub-steps within a given container
-    private renderOrUpdateSubStepsInContainer(container: HTMLElement, parentStepState: ExecutionStepState) {
-        const subStepStates = Array.from(this.executionState.values()).filter(s =>
-            s.stepName.startsWith("分析批次") && s.runId === parentStepState.runId // Filter by runId
-        );
-
-        const currentSubStepElements = new Map<string, HTMLElement>();
-        container.querySelectorAll<HTMLElement>('.sub-step').forEach(el => {
-            if (el.dataset.taskId) currentSubStepElements.set(el.dataset.taskId, el);
-        });
-
-        const newSubStepKeys = new Set<string>();
-
-        subStepStates.forEach(subState => {
-            const subKey = subState.taskId!;
-            newSubStepKeys.add(subKey);
-            let subElement = this.stepElementsCache.get(subKey) || currentSubStepElements.get(subKey);
-
-            if (!subElement) { // New sub-step
-                let animationClass = '';
-                if (!this.animatedStepIds.has(subKey)) {
-                    animationClass = 'needs-animation';
-                    this.animatedStepIds.add(subKey);
-                }
-                const subHtml = this.getSubStepHtml(subState, animationClass);
-                const tempDiv = document.createElement('div');
-                tempDiv.innerHTML = subHtml.trim();
-                subElement = tempDiv.firstChild as HTMLElement;
-                if (subElement) {
-                    container.appendChild(subElement);
-                    this.stepElementsCache.set(subKey, subElement);
-                }
-            } else { // Existing sub-step, update it
-                this.updateElementHeaderAndError(subElement, subState); // Update header
-                // Update content if necessary (e.g. if it was empty and now has logs)
-                 const subContentWrapper = subElement.querySelector('.sub-step-content-wrapper') as HTMLElement;
-                 if (subContentWrapper) {
-                    subContentWrapper.style.maxHeight = subState.isCollapsed ? '0' : '1000px';
-                    subContentWrapper.style.padding = subState.isCollapsed ? '0 10px' : '5px 10px';
-                    // Only populate content if it was empty and now has data.
-                    // Assumes addStepLog/appendStreamChunk handle ongoing updates.
-                    const needsContent = !subContentWrapper.querySelector('.logs-wrapper') && !subContentWrapper.querySelector('.stream-wrapper');
-                    if (needsContent && (subState.logs.length > 0 || subState.streamedContent || subState.error)) {
-                        subContentWrapper.innerHTML = this.renderStepInternalsToString(subState);
-                    }
-                 }
-            }
-        });
-
-        // Remove sub-step elements that are no longer in subStepStates (should be rare)
-        currentSubStepElements.forEach((el, key) => {
-            if (!newSubStepKeys.has(key)) {
-                el.remove();
-                this.stepElementsCache.delete(key);
-                this.animatedStepIds.delete(key);
-            }
-        });
-         if (subStepStates.length === 0 && (parentStepState.status === 'running' || parentStepState.status === 'waiting')) {
-            if (!container.querySelector('.sub-step-placeholder')) {
-                 container.innerHTML = '<div class="sub-step-placeholder">等待模块分析任务启动...</div>';
-            }
-        } else if (subStepStates.length > 0 && container.querySelector('.sub-step-placeholder')) {
-             container.querySelector('.sub-step-placeholder')?.remove();
-        }
-    }
-
-    // New: Renders a single sub-step (add or update) within its parent container
-    private renderOrUpdateSingleSubStep(container: HTMLElement, subStepState: ExecutionStepState) {
-        const subKey = subStepState.taskId!;
-        let subElement = this.stepElementsCache.get(subKey) || container.querySelector(`.sub-step[data-task-id="${subKey}"]`) as HTMLElement;
-
-        const placeholder = container.querySelector('.sub-step-placeholder');
-        if (placeholder) placeholder.remove();
-
-        if (!subElement) { // Create new
-            let animationClass = '';
-            if (!this.animatedStepIds.has(subKey)) {
-                animationClass = 'needs-animation';
-                this.animatedStepIds.add(subKey);
-            }
-            const subHtml = this.getSubStepHtml(subStepState, animationClass);
-            const tempDiv = document.createElement('div');
-            tempDiv.innerHTML = subHtml.trim();
-            subElement = tempDiv.firstChild as HTMLElement;
-            if (subElement) {
-                container.appendChild(subElement);
-                this.stepElementsCache.set(subKey, subElement);
-            }
-        } else { // Update existing
-            this.updateElementHeaderAndError(subElement, subStepState);
-            const contentWrapper = subElement.querySelector('.sub-step-content-wrapper') as HTMLElement;
-            if (contentWrapper) {
-                 contentWrapper.style.maxHeight = subStepState.isCollapsed ? '0' : '1000px';
-                 contentWrapper.style.padding = subStepState.isCollapsed ? '0 10px' : '5px 10px';
-                 // Potentially re-render internals if they were empty
-                 if (!contentWrapper.querySelector('.logs-wrapper') && (subStepState.logs.length > 0 || subStepState.streamedContent)) {
-                    contentWrapper.innerHTML = this.renderStepInternalsToString(subStepState);
-                 }
-            }
-        }
-    }
-
-
+    // New helper to specifically update header and error parts of a step element
     private updateElementHeaderAndError(element: HTMLElement, stepState: ExecutionStepState) {
         const baseClass = element.classList.contains('sub-step') ? 'sub-step' : 'execution-step';
-        element.className = `${baseClass} ${stepState.status}`;
-        if (this.animatedStepIds.has(stepState.taskId || stepState.stepName) && !element.classList.contains('needs-animation')) {
-            // If it was animated, keep it that way unless we re-evaluate 'needs-animation'
-        } else if (!this.animatedStepIds.has(stepState.taskId || stepState.stepName) && element.classList.contains('needs-animation')) {
-            // If it shouldn't be animated but is, remove class (though this is tricky with CSS animations)
-        }
-
+        element.className = `${baseClass} ${stepState.status}`; // Animation might be re-added if logic desires
 
         const statusIconEl = element.querySelector('.status-icon');
         if (statusIconEl) statusIconEl.innerHTML = this.getIconForStatus(stepState.status);
         
-        const stepStatusEl = element.querySelector('.step-status');
+        const stepStatusEl = element.querySelector('.step-status'); // For top-level steps
         if (stepStatusEl) stepStatusEl.textContent = stepState.status;
 
-        // Error handling
-        const contentWrapperForError = element.querySelector(baseClass === 'sub-step' ? '.sub-step-content-wrapper' : '.step-content-wrapper') as HTMLElement;
-        if (contentWrapperForError) {
-            let errorWrapper = contentWrapperForError.querySelector('.step-error-wrapper') as HTMLElement;
-            if (stepState.error) {
-                if (!errorWrapper) {
+        // Update error message
+        let errorWrapper = element.querySelector('.step-error-wrapper') as HTMLElement;
+        if (stepState.error) {
+            if (!errorWrapper) {
+                // Find content wrapper to append error to
+                const contentWrapper = element.querySelector(baseClass === 'sub-step' ? '.sub-step-content-wrapper' : '.step-content-wrapper') as HTMLElement;
+                if (contentWrapper) {
                     errorWrapper = document.createElement('div');
                     errorWrapper.className = 'step-error-wrapper';
-                    contentWrapperForError.appendChild(errorWrapper);
+                    contentWrapper.appendChild(errorWrapper); // Append, not replace all content
                 }
-                errorWrapper.innerHTML = `<div class="step-error">${stepState.error}</div>`;
-            } else {
-                if (errorWrapper) errorWrapper.innerHTML = '';
             }
+            if (errorWrapper) errorWrapper.innerHTML = `<div class="step-error">${stepState.error}</div>`;
+        } else {
+            if (errorWrapper) errorWrapper.innerHTML = ''; // Clear error
         }
     }
 
-    // Renamed from renderStepInternals to clarify it returns a string for innerHTML
-    private renderStepInternalsToString(stepState: ExecutionStepState): string {
-        const logsHtml = stepState.logs.map(log => this.renderLogItemToString(log)).join('');
+
+    private updateSubStepsContainerRendering(container: HTMLElement, parentStepState: ExecutionStepState) {
+        const subStepStates = Array.from(this.executionState.values()).filter(s =>
+            s.stepName.startsWith("分析模块:") && s.runId === parentStepState.runId
+        );
+
+        const existingSubStepElements = new Map<string, HTMLElement>();
+        container.querySelectorAll<HTMLElement>('.sub-step').forEach(el => {
+            if (el.dataset.taskId) existingSubStepElements.set(el.dataset.taskId, el);
+        });
         
-        let waitingPlaceholderHtml = '';
-        const hasLlmRequest = stepState.logs.some(log => log.type === 'llm-request');
-        const hasLlmResponseOrError = !!stepState.streamedContent || stepState.logs.some(log => log.type === 'output') || !!stepState.error;
-        if (hasLlmRequest && !hasLlmResponseOrError && stepState.status === 'running') {
-            waitingPlaceholderHtml = `
-                <div class="log-item llm-waiting-placeholder">
-                    <div class="log-header">
-                        <i class="codicon codicon-sync codicon-spin"></i>
-                        <span>等待 LLM 响应<span class="loading-dots"></span></span>
-                    </div>
-                </div>
-            `;
+        let newHtmlForSubSteps = '';
+        if (subStepStates.length > 0) {
+            newHtmlForSubSteps = subStepStates.map(subState => {
+                 const subStepKey = subState.taskId!;
+                 let animationClass = '';
+                 // Check if this sub-step was already animated or if it's new to this render pass
+                 if (!this.animatedStepIds.has(subStepKey) && !existingSubStepElements.has(subStepKey)) {
+                     animationClass = 'needs-animation';
+                     // this.animatedStepIds.add(subStepKey); // Add when actually appended
+                 }
+                const existingElement = existingSubStepElements.get(subStepKey);
+                if (existingElement) {
+                     // If exists, we might want to preserve it and update, but for now, full re-render of sub-step list
+                     // For more granular, we'd call updateStepElement on existingElement here.
+                    // For simplicity in this pass, this method will still use innerHTML for the whole sub-steps list.
+                    // A truly granular update would diff this list.
+                }
+                 return this.getSubStepHtml(subState, animationClass);
+             }).join('');
+        } else if (parentStepState.status === 'running') {
+            newHtmlForSubSteps = '<div class="sub-step-placeholder">等待模块分析任务启动...</div>';
         }
         
-        const streamRendered = this.renderStreamedContentToString(stepState.streamedContent);
-        const errorHtml = stepState.error ? `<div class="step-error">${stepState.error}</div>` : ''; // This is now handled by error-wrapper
+        container.innerHTML = newHtmlForSubSteps;
+
+        // After setting innerHTML, re-query and add new animated IDs
+        container.querySelectorAll<HTMLElement>('.sub-step.needs-animation').forEach(el => {
+            if (el.dataset.taskId) this.animatedStepIds.add(el.dataset.taskId);
+        });
+        // Also update cache for new sub-steps
+        subStepStates.forEach(subState => {
+            const subStepKey = subState.taskId!;
+            if (!this.stepElementsCache.has(subStepKey)) {
+                const newEl = container.querySelector(`.sub-step[data-task-id="${subStepKey}"]`) as HTMLElement;
+                if (newEl) this.stepElementsCache.set(subStepKey, newEl);
+            }
+        });
+    }
+
+    private renderStepInternals(stepState: ExecutionStepState): string {
+        // Ensure this method creates the distinct wrappers
+        const logsHtml = stepState.logs.map(log => this.renderLogItemToString(log)).join(''); // Temporarily back to string
+        let waitingPlaceholderHtml = '';
+        // ... (waiting placeholder logic) ...
+        const streamRendered = this.renderStreamedContent(stepState.streamedContent); // This returns HTML for *inside* the stream wrapper
+        const errorHtml = stepState.error ? `<div class="step-error">${stepState.error}</div>` : '';
 
         return `
             <div class="logs-wrapper">${logsHtml}</div>
             ${waitingPlaceholderHtml}
             <div class="stream-wrapper">${streamRendered}</div>
-            <div class="step-error-wrapper">${stepState.error ? `<div class="step-error">${stepState.error}</div>` : ''}</div>
+            <div class="step-error-wrapper">${errorHtml}</div>
         `;
     }
     
-    // Renders a single log item to an HTMLElement (for targeted DOM appends)
-    private renderLogItemToElement(log: { type: string, data: any, metadata?: Record<string, any> }): HTMLElement {
-        const logItemElement = document.createElement('div');
+    // New: Renders a single log item to an HTML string for renderStepInternals
+    private renderLogItemToString(log: { type: string, data: any, metadata?: Record<string, any> }): string {
+        // ... (logic from original renderLogItem to build HTML string for one log) ...
+        let content = '';
+        const logDataName = log.data && typeof log.data === 'object' && 'name' in log.data ? log.data.name : '';
+        const logContent = log.data && typeof log.data === 'object' && 'content' in log.data
+            ? (typeof log.data.content === 'string' ? log.data.content : JSON.stringify(log.data.content, null, 2))
+            : (typeof log.data === 'string' ? log.data : JSON.stringify(log.data, null, 2));
+
+        if (log.metadata?.type === 'file') {
+            content = this.renderFileCard(log.metadata.path, logDataName);
+        } else {
+            content = `<pre><code>${logContent}</code></pre>`;
+        }
+        const iconHtml = this.getIconForLogType(log.type);
+        const titleText = `${log.type.toUpperCase()}${logDataName ? ': ' + logDataName : ''}`;
+        const isLargeInput = log.type === 'input' && logContent.length > 500 && logContent.includes('\n');
+        const collapsedClass = isLargeInput ? 'collapsed' : '';
+
+        return `<div class="log-item log-${log.type} ${collapsedClass}"><div class="log-header">${iconHtml}<span>${titleText}</span></div><div class="log-content-wrapper">${content}</div></div>`;
+    }
+
+    // Changed: renderLogItem now returns HTMLElement for direct DOM append
+    private renderLogItem(log: { type: string, data: any, metadata?: Record<string, any> }): HTMLElement {
+        let content = '';
         const logDataName = log.data && typeof log.data === 'object' && 'name' in log.data ? log.data.name : '';
         const logContentText = log.data && typeof log.data === 'object' && 'content' in log.data
             ? (typeof log.data.content === 'string' ? log.data.content : JSON.stringify(log.data.content, null, 2))
             : (typeof log.data === 'string' ? log.data : JSON.stringify(log.data, null, 2));
 
-        let contentHtml = '';
         if (log.metadata?.type === 'file') {
-            contentHtml = this.renderFileCard(log.metadata.path, logDataName);
+            content = this.renderFileCard(log.metadata.path, logDataName);
         } else {
-            contentHtml = `<pre><code>${logContentText.replace(/</g, "<").replace(/>/g, ">")}</code></pre>`; // Basic XSS prevention
+            content = `<pre><code>${logContentText}</code></pre>`;
         }
-        
         const iconHtml = this.getIconForLogType(log.type);
         const titleText = `${log.type.toUpperCase()}${logDataName ? ': ' + logDataName : ''}`;
         const isLargeInput = log.type === 'input' && logContentText.length > 500 && logContentText.includes('\n');
         const collapsedClass = isLargeInput ? 'collapsed' : '';
         
+        const logItemElement = document.createElement('div');
         logItemElement.className = `log-item log-${log.type} ${collapsedClass}`;
-        logItemElement.innerHTML = `
-            <div class="log-header">${iconHtml}<span>${titleText}</span></div>
-            <div class="log-content-wrapper">${contentHtml}</div>
-        `;
+        logItemElement.innerHTML = `<div class="log-header">${iconHtml}<span>${titleText}</span></div><div class="log-content-wrapper">${content}</div>`;
         return logItemElement;
     }
 
-    // Renamed from renderStreamedContent to clarify it returns a string for innerHTML
-    private renderStreamedContentToString(content: string): string {
+
+    private renderStreamedContent(content: string): string {
+        // This method returns the HTML string for the *content* of the stream wrapper
         if (!content) return '';
         const htmlContent = marked.parse(content, { gfm: true, breaks: true });
-        return `<div class="markdown-body">${htmlContent}</div>`;
+        // The class 'markdown-body' should be on the wrapper if specific styling is needed
+        return `<div class="markdown-body">${htmlContent}</div>`; 
     }
 
-    private getExecutionStepHtml(stepState: ExecutionStepState, planStep: AgentPlanStep, index: number, animationClass: string): string {
+    // --- Other methods (getExecutionStepHtml, getParallelAnalysisStepHtml, getSubStepHtml, renderPlanningView, etc.) largely remain the same for initial HTML string generation ---
+    // Make sure they call renderStepInternals when creating content.
+
+    private getExecutionStepHtml(stepState: ExecutionStepState, planStep: { name: string }, index: number, animationClass: string): string {
         const state = stepState.status;
         const taskIdAttr = stepState.taskId ? `data-task-id="${stepState.taskId}"` : '';
         return `
@@ -3743,7 +3533,7 @@ export class AgentRunBlock {
                     <span class="step-status">${state}</span>
                 </div>
                 <div class="step-content-wrapper">
-                    ${this.renderStepInternalsToString(stepState)}
+                    ${this.renderStepInternals(stepState)}
                 </div>
             </div>
         `;
@@ -3752,16 +3542,8 @@ export class AgentRunBlock {
     private getParallelAnalysisStepHtml(planStep: AgentPlanStep, index: number, parentStepState: ExecutionStepState, animationClass: string): string {
         const state = parentStepState.status;
         const taskIdAttr = parentStepState.taskId ? `data-task-id="${parentStepState.taskId}"` : '';
-        // For initial creation, sub-steps are rendered based on current executionState
-        let subStepsHtml = '';
-        const subStepStates = Array.from(this.executionState.values()).filter(s =>
-            s.stepName.startsWith("分析批次") && s.runId === parentStepState.runId
-        );
-        if (subStepStates.length > 0) {
-            subStepsHtml = subStepStates.map(sub => this.getSubStepHtml(sub, '')).join(''); // No animation for sub-steps on parent's initial render
-        } else if (parentStepState.status === 'running' || parentStepState.status === 'waiting') {
-            subStepsHtml = '<div class="sub-step-placeholder">等待模块分析任务启动...</div>';
-        }
+        // Initial sub-steps rendering (likely empty or placeholder if just started)
+        const subStepsHtml = this.renderSubStepsContainerInitial(parentStepState);
 
         return `
             <div class="execution-step ${state} ${animationClass}" data-step-name="${planStep.name}" ${taskIdAttr}>
@@ -3774,49 +3556,45 @@ export class AgentRunBlock {
                      <div class="sub-steps-container">
                         ${subStepsHtml}
                     </div>
-                    ${this.renderStepInternalsToString(parentStepState)} 
-                </div>
-            </div>
-        `;
-    }
-
-    private getSubStepHtml(subStep: ExecutionStepState, animationClass: string): string {
-        const taskIdAttr = subStep.taskId ? `data-task-id="${subStep.taskId}"` : ''; // Sub-steps MUST have taskId
-        return `
-            <div class="sub-step ${subStep.status} ${animationClass}" ${taskIdAttr}>
-                 <div class="sub-step-header">
-                    <span class="status-icon">${this.getIconForStatus(subStep.status)}</span>
-                    <span class="step-name">${subStep.stepName}</span>
-                </div>
-                <div class="sub-step-content-wrapper">
-                    ${this.renderStepInternalsToString(subStep)}
+                    ${this.renderStepInternals(parentStepState)} 
                 </div>
             </div>
         `;
     }
     
-    private renderLogItemToString(log: { type: string, data: any, metadata?: Record<string, any> }): string {
-        let content = '';
-        const logDataName = log.data && typeof log.data === 'object' && 'name' in log.data ? log.data.name : '';
-        const logContentText = log.data && typeof log.data === 'object' && 'content' in log.data
-            ? (typeof log.data.content === 'string' ? log.data.content : JSON.stringify(log.data.content, null, 2))
-            : (typeof log.data === 'string' ? log.data : JSON.stringify(log.data, null, 2));
-
-        if (log.metadata?.type === 'file') {
-            content = this.renderFileCard(log.metadata.path, logDataName);
-        } else {
-             // Basic XSS prevention for direct HTML injection from string
-            content = `<pre><code>${logContentText.replace(/</g, "<").replace(/>/g, ">")}</code></pre>`;
+    // Renders the initial HTML for the sub-steps container (used during creation of parent step)
+    private renderSubStepsContainerInitial(parentStepState: ExecutionStepState): string {
+        const subSteps = Array.from(this.executionState.values()).filter(s =>
+            s.stepName.startsWith("分析模块:") && s.runId === parentStepState.runId
+        );
+        if (subSteps.length > 0) {
+            return subSteps.map(sub => {
+                const subStepMapKey = sub.taskId || sub.stepName;
+                let subAnimationClass = ''; // No animation on initial parent render for existing sub-steps
+                return this.getSubStepHtml(sub, subAnimationClass);
+            }).join('');
+        } else if (parentStepState.status === 'running' || parentStepState.status === 'waiting') {
+            return '<div class="sub-step-placeholder">等待模块分析任务启动...</div>';
         }
-        const iconHtml = this.getIconForLogType(log.type);
-        const titleText = `${log.type.toUpperCase()}${logDataName ? ': ' + logDataName : ''}`;
-        const isLargeInput = log.type === 'input' && logContentText.length > 500 && logContentText.includes('\n');
-        const collapsedClass = isLargeInput ? 'collapsed' : '';
-
-        return `<div class="log-item log-${log.type} ${collapsedClass}"><div class="log-header">${iconHtml}<span>${titleText}</span></div><div class="log-content-wrapper">${content}</div></div>`;
+        return '';
     }
-    // ... other rendering helpers (renderPlanningView, renderStepCard, renderParameterInput, etc.) remain as they are ...
-    // ... event listeners (setupEventListeners, postRender) remain as they are ...
+
+
+    private getSubStepHtml(subStep: ExecutionStepState, animationClass: string): string {
+        return `
+            <div class="sub-step ${subStep.status} ${animationClass}" data-task-id="${subStep.taskId}">
+                 <div class="sub-step-header">
+                    <span class="status-icon">${this.getIconForStatus(subStep.status)}</span>
+                    <span class="step-name">${subStep.stepName}</span>
+                </div>
+                <div class="sub-step-content-wrapper">
+                    ${this.renderStepInternals(subStep)}
+                </div>
+            </div>
+        `;
+    }
+    
+    // renderPlanningView, renderStepCard, renderParameterInput, getIconForStatus, renderFinalResult, setupEventListeners, postRender remain the same
     private renderPlanningView(isReadOnly: boolean): string {
         const badgeClass = this.status === 'planning' || this.status === 'validating' ? 'planning' : 'completed';
         const badgeText = this.status === 'planning' || this.status === 'validating' ? '待执行' : '规划已锁定';
@@ -3895,7 +3673,7 @@ export class AgentRunBlock {
             default: return '';
         }
     }
-    private renderOrUpdateFinalResult(container: HTMLElement) {
+    private renderOrUpdateFinalResult(container: HTMLElement) { // Was renderFinalResult()
         if (!this.agentResult) {
             container.innerHTML = '';
             this.stepElementsCache.delete('__agent_final_result__');
@@ -3944,6 +3722,7 @@ export class AgentRunBlock {
                 } else if (!isCompleted) {
                     newContentHtml = `<div class="error-text">${this.agentResult.error || '未知错误'}</div>`;
                 }
+                // Only update if different to avoid flicker
                 if (contentEl.innerHTML !== newContentHtml) {
                      contentEl.innerHTML = newContentHtml;
                 }
@@ -4030,7 +3809,7 @@ export class AgentRunBlock {
                 if (stepElement instanceof HTMLElement) {
                     const stepName = stepElement.dataset.stepName;
                     const taskId = stepElement.dataset.taskId;
-                    const key = taskId || stepName; // Prefer taskId
+                    const key = taskId || stepName;
                     if (key) {
                         const state = this.executionState.get(key);
                         if (state) {
@@ -4038,11 +3817,8 @@ export class AgentRunBlock {
                             const contentWrapper = stepElement.querySelector('.step-content-wrapper, .sub-step-content-wrapper') as HTMLElement;
                             if (contentWrapper) {
                                 const isParallel = stepElement.classList.contains('execution-step') && !!stepElement.querySelector('.sub-steps-container');
-                                contentWrapper.style.maxHeight = state.isCollapsed ? '0' : (isParallel ? '5000px' : (stepElement.classList.contains('sub-step') ? '1000px' : '2000px'));
+                                contentWrapper.style.maxHeight = state.isCollapsed ? '0' : (isParallel ? '5000px' : '2000px');
                                 contentWrapper.style.padding = state.isCollapsed ? '0 15px' : '10px 15px';
-                                if (stepElement.classList.contains('sub-step') && !state.isCollapsed) { // For sub-steps
-                                     contentWrapper.style.padding = '5px 10px';
-                                }
                             }
                         }
                     }
@@ -4052,7 +3828,6 @@ export class AgentRunBlock {
         });
     }
     private postRender() { /* For future use */ }
-
 }
 
 --------------------------------------------------------------------------------

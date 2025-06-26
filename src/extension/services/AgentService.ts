@@ -32,7 +32,7 @@ const AGENT_DEFINITIONS: Record<string, AgentPlan> = {
         agentId: 'docgen-module-direct',
         agentName: '模块级文档 (直接分析)',
         steps: [
-            { name: "执行工具链", description: "按顺序执行文件读取和分析工具。", promptFiles: ['module_analysis_direct.yml'] },
+            { name: "执行工具", description: "按顺序执行文件读取和分析工具。", promptFiles: ['module_analysis_direct.yml'] },
             { name: "生成最终响应", description: "使用LLM整合工具输出，生成模块文档。" }
         ],
         parameters: [
