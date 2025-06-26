@@ -75,32 +75,40 @@ export class MapReduceExecutor {
             const totalTokensInModule = allFiles.reduce((sum, file) => sum + file.tokenCount, 0);
 
             const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || 12000;
-            const batches: FileData[][] = [];
+            const batches: { files: FileData[], tokenCount: number }[] = [];
             let currentBatch: FileData[] = [];
             let currentBatchTokens = 0;
             for (const file of allFiles) {
                 if (file.tokenCount > MAX_TOKENS_PER_BATCH) { continue; }
-                if (currentBatchTokens + file.tokenCount > MAX_TOKENS_PER_BATCH) { batches.push(currentBatch); currentBatch = []; currentBatchTokens = 0; }
+                if (currentBatchTokens + file.tokenCount > MAX_TOKENS_PER_BATCH) {
+                    batches.push({ files: currentBatch, tokenCount: currentBatchTokens });
+                    currentBatch = []; 
+                    currentBatchTokens = 0; 
+                }
                 currentBatch.push(file);
                 currentBatchTokens += file.tokenCount;
             }
-            if (currentBatch.length > 0) { batches.push(currentBatch); }
+            if (currentBatch.length > 0) {
+                batches.push({ files: currentBatch, tokenCount: currentBatchTokens });
+            }
             logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "文件清单Token分析", content: `当前模块包含 ${allFiles.length} 个文件 ${totalTokensInModule} 个token，超过阈值 ${MAX_TOKENS_PER_BATCH}，创建 ${batches.length} 个批次迭代分析` } });
             logger.onStepEnd({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'completed' }); // 修正: 添加 stepName
 
+            const mapAllTaskId = uuidv4(); 
             const mapStepName = "Map阶段: 并行分析";
-            logger.onStepStart({ runId, stepName: mapStepName, status: 'running' }); // 这个是父步骤的开始
+            logger.onStepStart({ runId, taskId: mapAllTaskId, stepName: mapStepName, status: 'running' });
+
 
             const llm = await llmService.createModel({ modelConfig, temperature: 0.1, streaming: false });
-            const mapAnalysisPromises = batches.map(async (batch, i) => {
-                const mapTaskId = uuidv4(); 
+            const mapAnalysisPromises = batches.map(async (batchInfo, i) => {
                 const mapTaskName = `分析批次 ${i + 1}/${batches.length}`;
-                logger.onStepStart({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'running' });
+                // 现在可以访问每个批次的token数，并在日志中显示
+                logger.onStepUpdate({ runId, taskId: mapAllTaskId, type: 'input', data: { name: `${mapTaskName} `, content: `包含 ${batchInfo.files.length} 个文件，共 ${batchInfo.tokenCount} tokens.` } });
                 
                 try {
-                    const batchContent = batch.map(f => `--- FILE: ${f.path} ---\n${f.content}`).join('\n\n');
+                    const batchContent = batchInfo.files.map(f => `--- FILE: ${f.path} ---\n${f.content}`).join('\n\n');
                     const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
-                    logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'llm-request', data: { system: actionPrompt.map_prompt_template.system, human: humanPrompt } });
+                    // logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'llm-request', data: { system: actionPrompt.map_prompt_template.system, human: humanPrompt } });
                     
                     const response = await llmService.scheduleLlmCall(() => llm.invoke([new SystemMessage(actionPrompt.map_prompt_template.system), new HumanMessage(humanPrompt)]));
                     const responseContent = response.content as string;
@@ -109,16 +117,16 @@ export class MapReduceExecutor {
                     const fullMapPrompt = actionPrompt.map_prompt_template.system + "\n" + humanPrompt; // 估算，或者从 Langchain 内部获取更准确的
                     statsTracker.add(fullMapPrompt, responseContent);
 
-                    logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'output', data: { name: "批次摘要", content: responseContent } });
-                    logger.onStepEnd({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'completed' }); // 修正: 添加 stepName
+                    logger.onStepUpdate({ runId, taskId: mapAllTaskId, type: 'output', data: { name: `${mapTaskName} 摘要结果`, content: responseContent } });
+                    // logger.onStepEnd({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'completed' }); // 修正: 添加 stepName
                     return responseContent;
                 } catch (e: any) {
-                    logger.onStepEnd({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'failed', error: e.message }); // 修正: 添加 stepName
+                    // logger.onStepEnd({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'failed', error: e.message }); // 修正: 添加 stepName
                     throw e;
                 }
             });
             const mapResults = await Promise.all(mapAnalysisPromises);
-            logger.onStepEnd({ runId, stepName: mapStepName, status: 'completed' }); // 修正: 父步骤的结束, 添加 stepName
+            logger.onStepEnd({ runId, taskId: mapAllTaskId, stepName: mapStepName, status: 'completed' });
 
             const reduceTaskId = uuidv4(); 
             const reduceStepName = "Reduce阶段: 综合摘要";
