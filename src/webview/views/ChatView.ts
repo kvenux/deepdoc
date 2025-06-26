@@ -5,7 +5,7 @@ import { MessageBlock } from "../components/MessageBlock";
 import { AtCommandMenu } from "../components/AtCommandMenu";
 // 在文件顶部添加新的 import
 import { AgentRunBlock } from "../components/AgentRunBlock";
-import { Conversation, ChatMessage, ModelConfig, Prompt, AgentPlan, StepExecution, StepUpdate, StepResult, StreamChunk, AgentResult } from "../../common/types"; // 确保 Agent 相关类型被导入
+import { Conversation, ChatMessage, ModelConfig, Prompt, AgentPlan, StepExecution, StepUpdate, StepResult, StreamChunk, AgentResult, TextChatMessage, AgentRunChatMessage, AgentRunRecord } from "../../common/types";
 
 interface CommandLeaf {
     id: string;
@@ -15,6 +15,7 @@ interface CommandLeaf {
 }
 
 export class ChatView {
+    private activeConversationId: string | null = null;
     private messages: ChatMessage[] = [];
     private modelConfigs: ModelConfig[] = [];
     private prompts: Prompt[] = [];
@@ -53,7 +54,9 @@ export class ChatView {
 
     public setConversations(conversations: Conversation[]) {
         if (conversations.length > 0) {
-            this.messages = conversations[conversations.length - 1].messages;
+            const activeConversation = conversations[conversations.length - 1];
+            this.messages = activeConversation.messages;
+            this.activeConversationId = activeConversation.id;
         } else {
             this.messages = [];
         }
@@ -203,17 +206,36 @@ export class ChatView {
                             this.activeAgentRunBlock.appendStreamChunk(payload);
                             return;
                         case 'agent:end':
-                           // 首先，更新卡片本身的UI，显示最终结果
-                            this.activeAgentRunBlock.setAgentResult(payload);
+                            this.activeAgentRunBlock.setAgentResult(payload as AgentResult);
                             
-                            // 然后，重置ChatView自身的状态
+                            // highlight-start
+                            // 如果成功，将运行记录保存到对话中
+                            if (payload.status === 'completed') {
+                                const runRecord = this.activeAgentRunBlock.getSerializableState();
+                                if (runRecord) {
+                                    const agentMessage: AgentRunChatMessage = {
+                                        type: 'agent_run',
+                                        role: 'assistant',
+                                        run: runRecord
+                                    };
+                                    // AgentRunBlock 已经渲染在页面上，我们只需要将其替换为
+                                    // 消息数组中的一个正式条目，以便保存。
+                                    // 我们不立即重渲染，而是将状态更新到 this.messages
+                                    // 并保存整个对话。
+                                    // 当对话被重新加载时，这个 agent_run 消息将被正确渲染。
+                                    this.messages.push(agentMessage);
+                                    this.saveCurrentConversation();
+                                }
+                            }
+                             // highlight-end
+
                             this.isAgentRunning = false;
                             this.activeAgentRunId = null;
                             this.activeAgentRunBlock = null; 
                             this.activeAgentRunContainer = null;
                             
-                            // 最后，更新主聊天窗口的发送/停止按钮
                             this.updateSendButtonState();
+
                             return;
                     }
                 }
@@ -251,6 +273,24 @@ export class ChatView {
         });
     }
 
+    private saveCurrentConversation() {
+        if (this.activeConversationId) {
+            // 这是向后端发送更新后对话的请求
+            // 后端 StateManager.saveConversation 会处理它
+            vscode.postMessage({
+                command: 'saveConversation',
+                payload: {
+                    id: this.activeConversationId,
+                    messages: this.messages,
+                    // 其他字段（如 title, createdAt）将由后端保留
+                }
+            });
+        } else {
+             // 如果是新对话，第一个Agent运行也可能触发保存
+            console.warn("Attempted to save conversation, but no activeConversationId is set.");
+        }
+    }
+
     private handleSendOrSave() {
         if (this.isAgentRunning && this.activeAgentRunId) {
             vscode.postMessage({ command: 'agent:cancel', payload: { runId: this.activeAgentRunId } });
@@ -285,7 +325,7 @@ export class ChatView {
             return;
         }
 
-        const message: ChatMessage = { role: 'user', content: prompt };
+        const message: TextChatMessage = { type: 'text', role: 'user', content: prompt };
         this.messages.push(message);
         this.renderMessages();
 
@@ -294,8 +334,18 @@ export class ChatView {
     }
 
     private handleCopy(index: number) {
-        navigator.clipboard.writeText(this.messages[index].content);
-        vscode.postMessage({ command: 'info', payload: 'Copied to clipboard!' });
+        const message = this.messages[index];
+        // highlight-start
+        if (message.type === 'text') {
+            navigator.clipboard.writeText(message.content);
+            vscode.postMessage({ command: 'info', payload: 'Copied to clipboard!' });
+        } else {
+            // 对于 Agent 运行，可以复制其最终结果或摘要
+            const summary = JSON.stringify(message.run.result, null, 2);
+            navigator.clipboard.writeText(summary);
+             vscode.postMessage({ command: 'info', payload: 'Copied agent result summary to clipboard!' });
+        }
+        // highlight-end
     }
 
     private handleRegenerate(index: number) {
@@ -304,13 +354,20 @@ export class ChatView {
 
     private handleEnterEditMode(index: number) {
         if (this.editingMessageIndex === index) return;
+        // highlight-start
+        const message = this.messages[index];
+        if (message.type !== 'text') {
+             vscode.postMessage({ command: 'info', payload: 'Agent runs cannot be edited.' });
+            return; // 不允许编辑 Agent 运行
+        }
+        // highlight-end
 
         if (this.editingMessageIndex !== null) {
             this.handleCancelEdit();
         }
 
         this.editingMessageIndex = index;
-        this.originalMessageContent = this.messages[index].content;
+        this.originalMessageContent = message.content;
 
         if (this.inputBox) {
             this.inputBox.innerText = this.originalMessageContent;
@@ -321,11 +378,13 @@ export class ChatView {
         this.updateSendButtonState();
     }
 
+
     private handleCancelEdit() {
         if (this.editingMessageIndex === null) return;
 
-        if (this.originalMessageContent !== null) {
-            this.messages[this.editingMessageIndex].content = this.originalMessageContent;
+        const message = this.messages[this.editingMessageIndex];
+        if (this.originalMessageContent !== null && message.type === 'text') {
+            message.content = this.originalMessageContent;
         }
 
         this.editingMessageIndex = null;
@@ -342,8 +401,9 @@ export class ChatView {
     private handleSaveEdit(index: number) {
         if (!this.inputBox) return;
         const newContent = this.inputBox.innerText.trim();
-        if (newContent) {
-            this.messages[index].content = newContent;
+        const message = this.messages[index];
+        if (newContent && message.type === 'text') {
+            message.content = newContent;
             vscode.postMessage({ command: 'editMessage', payload: { messageIndex: index, content: newContent } });
         }
 
@@ -358,7 +418,9 @@ export class ChatView {
 
     private beginStream() {
         this.isStreaming = true;
-        const assistantMessage: ChatMessage = { role: 'assistant', content: '' };
+        // highlight-start
+        const assistantMessage: TextChatMessage = { type: 'text', role: 'assistant', content: '' };
+        // highlight-end
         this.messages.push(assistantMessage);
         this.renderMessages();
         this.updateSendButtonState();
@@ -366,16 +428,19 @@ export class ChatView {
 
     private appendStreamData(chunk: string) {
         const lastMessage = this.messages[this.messages.length - 1];
-        if (lastMessage?.role === 'assistant') {
+        // highlight-start
+        if (lastMessage?.type === 'text' && lastMessage?.role === 'assistant') {
             lastMessage.content += chunk;
             this.renderMessages();
         }
+        // highlight-end
     }
+
 
     private finalizeStream(stopped = false) {
         this.isStreaming = false;
         const lastMessage = this.messages[this.messages.length - 1];
-        if (stopped && lastMessage?.role === 'assistant') {
+        if (stopped && lastMessage?.type === 'text' && lastMessage?.role === 'assistant') {
             lastMessage.content += ' (Stopped)';
         }
         this.renderMessages();
@@ -389,7 +454,7 @@ export class ChatView {
 
         this.renderMessages();
 
-        if (lastUserMessage) {
+        if (lastUserMessage && lastUserMessage.type === 'text') {
             if (this.inputBox) this.inputBox.innerText = lastUserMessage.content;
         }
 
@@ -430,12 +495,29 @@ export class ChatView {
     private renderMessages() {
         this.messageContainer.innerHTML = '';
         this.messages.forEach((msg, index) => {
-            const element = new MessageBlock(msg, index).render();
-            if (this.editingMessageIndex === index) {
-                element.classList.add('editing');
+            // highlight-start
+            if (msg.type === 'agent_run') {
+                // 渲染一个 AgentRunBlock
+                const agentContainer = document.createElement('div');
+                this.messageContainer.appendChild(agentContainer);
+                // 使用 AgentRunBlock 的构造函数从历史记录中恢复
+                new AgentRunBlock(agentContainer, msg.run);
+            } else {
+                // 渲染一个标准的 MessageBlock
+                const element = new MessageBlock(msg, index).render();
+                if (this.editingMessageIndex === index) {
+                    element.classList.add('editing');
+                }
+                this.messageContainer.appendChild(element);
             }
-            this.messageContainer.appendChild(element);
+            // highlight-end
         });
+        
+        // 如果当前有正在运行但尚未保存到 messages 数组的 Agent，它的容器也需要被处理
+        if (this.activeAgentRunContainer && !this.messageContainer.contains(this.activeAgentRunContainer)) {
+             this.messageContainer.appendChild(this.activeAgentRunContainer);
+        }
+
         this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
     }
 

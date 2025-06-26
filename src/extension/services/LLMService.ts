@@ -1,7 +1,9 @@
 // src/extension/services/LLMService.ts (修改后完整文件)
 
 import vscode from 'vscode';
-import { ChatMessage, ModelConfig } from '../../common/types';
+// highlight-start
+import { ChatMessage, ModelConfig, TextChatMessage } from '../../common/types';
+// highlight-end
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, AIMessage, BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -15,7 +17,6 @@ export interface CreateModelOptions {
     streaming?: boolean;
 }
 
-// highlight-start
 /**
  * 定义一个可以放入队列的LLM任务。
  * 它包含一个返回Promise的函数，以及用于解决该Promise的resolver和rejecter。
@@ -25,7 +26,6 @@ type LlmTask<T> = {
     resolve: (value: T) => void;
     reject: (reason?: any) => void;
 };
-// highlight-end
 
 async function getGoogleApiKey(): Promise<string | undefined> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -53,7 +53,6 @@ async function getGoogleApiKey(): Promise<string | undefined> {
 export class LLMService {
     private _abortController: AbortController | null = null;
 
-    // highlight-start
     // --- 新的并行速率限制器属性 ---
     private requestQueue: LlmTask<any>[] = [];
     private activeRequests = 0;
@@ -65,8 +64,6 @@ export class LLMService {
     private readonly minInterval = 1100; 
     // 最大并发请求数，防止过多请求同时进行
     private readonly concurrencyLimit = 10; 
-    // --- 结束新的属性 ---
-    // highlight-end
 
     constructor() {}
 
@@ -94,7 +91,6 @@ export class LLMService {
         });
     }
 
-    // highlight-start
     /**
      * 将一个非流式的LLM调用任务加入队列，并由并行的速率限制调度器执行。
      * @param task 一个返回LLM调用Promise的函数，例如 `() => llm.invoke(messages)`
@@ -152,7 +148,6 @@ export class LLMService {
                 
         }, delay);
     }
-    // highlight-end
 
     public async getCompletion(
         messages: ChatMessage[],
@@ -167,7 +162,12 @@ export class LLMService {
 
         try {
             llm = await this.createModel({ modelConfig: config, streaming: true, temperature: 0.7 });
-            const langchainMessages: BaseMessage[] = messages.map(msg => msg.role === 'user' ? new HumanMessage(msg.content) : new AIMessage(msg.content));
+            // highlight-start
+            // Filter for text messages only and then map them
+            const langchainMessages: BaseMessage[] = messages
+                .filter((msg): msg is TextChatMessage => msg.type === 'text')
+                .map(msg => msg.role === 'user' ? new HumanMessage(msg.content) : new AIMessage(msg.content));
+            // highlight-end
             const stream = await llm.stream(langchainMessages, { signal });
             for await (const chunk of stream) {
                 if (chunk.content) {

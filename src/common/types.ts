@@ -1,3 +1,4 @@
+// --- file_path: common/types.ts ---
 /**
  * Defines the structure for messages posted between the Webview and the Extension Host.
  */
@@ -18,14 +19,55 @@ export interface ModelConfig {
     isDefault?: boolean;
 }
 
+// highlight-start
 /**
- * Represents a single message in a conversation, from either the user or the model (assistant).
+ * 新增：代表一个已完成并被持久化的 Agent 运行记录中单个步骤的状态。
+ * 注意：这不包含 runId 或 isCollapsed 等瞬态/UI状态。
  */
-export interface ChatMessage {
+export interface SavedStepState {
+    stepName: string;
+    taskId?: string;
+    status: 'running' | 'completed' | 'failed' | 'waiting';
+    logs: { type: 'input' | 'output' | 'llm-request', data: any, metadata?: Record<string, any> }[];
+    streamedContent: string;
+    error?: string;
+}
+
+
+/**
+ * 新增：代表一个已完成并被持久化的 Agent 运行记录。
+ */
+export interface AgentRunRecord {
+    plan: AgentPlan;
+    // 注意：executionState 的 key 是 stepKey (taskId 或 stepName)
+    executionState: Record<string, SavedStepState>;
+    result: AgentResult;
+}
+
+/**
+ * 代表一个标准的文本消息。
+ */
+export interface TextChatMessage {
+    type: 'text';
     role: 'user' | 'assistant';
     content: string;
-    // Additional metadata can be added here, e.g., timestamps, message ID, etc.
 }
+
+/**
+
+ * 代表一个已完成的 Agent 运行消息。
+ */
+export interface AgentRunChatMessage {
+    type: 'agent_run';
+    role: 'assistant'; // Agent 运行总是被视为 'assistant' 的一部分
+    run: AgentRunRecord;
+}
+
+/**
+ * 代表一个完整的消息，可以是文本或 Agent 运行。
+ */
+export type ChatMessage = TextChatMessage | AgentRunChatMessage;
+// highlight-end
 
 /**
  * Represents a full conversation, including its ID, title, and all messages.
@@ -50,7 +92,7 @@ export interface Prompt {
 
 /**
  * =======================================================================
- * Agent Execution Event & Plan Types (新增)
+ * Agent Execution Event & Plan Types
  * =======================================================================
  */
 
@@ -130,12 +172,10 @@ export interface AgentResult {
     status: 'completed' | 'failed' | 'cancelled';
     finalOutput?: any;
     error?: string;
-    // highlight-start
     stats?: {
         duration: string;
         totalTokens: number;
         promptTokens: number;
         completionTokens: number;
     };
-    // highlight-end
 }

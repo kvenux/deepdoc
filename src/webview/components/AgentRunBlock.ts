@@ -1,6 +1,6 @@
 // --- file_path: webview/components/AgentRunBlock.ts ---
 
-import { AgentPlan, AgentResult, StepExecution, StepUpdate, StreamChunk, AgentPlanStep, StepResult as CommonStepResultType } from '../../common/types'; // Renamed to avoid conflict
+import { AgentPlan, AgentResult, StepExecution, StepUpdate, StreamChunk, AgentPlanStep, StepResult as CommonStepResultType, AgentRunRecord, SavedStepState } from '../../common/types'; 
 import { marked } from 'marked';
 import { vscode } from '../vscode';
 
@@ -13,10 +13,15 @@ interface ExecutionStepState extends StepExecution {
     error?: string;
 }
 
+// 类型守卫，用于区分 AgentPlan 和 AgentRunRecord
+function isAgentRunRecord(data: AgentPlan | AgentRunRecord): data is AgentRunRecord {
+    return (data as AgentRunRecord).result !== undefined;
+}
+
 export class AgentRunBlock {
     private element: HTMLElement;
     private plan: AgentPlan;
-    private onExecute: (params: Record<string, any>) => void;
+    private onExecute: ((params: Record<string, any>) => void) | null = null; // 可为 null
     private status: AgentStatus = 'planning';
     private executionState: Map<string, ExecutionStepState> = new Map();
     private agentResult: AgentResult | null = null;
@@ -27,16 +32,77 @@ export class AgentRunBlock {
 
     constructor(
         container: HTMLElement,
-        plan: AgentPlan,
-        onExecute: (params: Record<string, any>) => void
+        // 构造函数现在可以接收一个 AgentPlan（用于新的运行）或一个 AgentRunRecord（用于从历史恢复）
+        planOrRecord: AgentPlan | AgentRunRecord,
+        onExecute?: (params: Record<string, any>) => void
     ) {
         this.element = container;
-        this.plan = plan;
-        this.onExecute = onExecute;
         this.element.className = 'agent-run-block';
+        
+        if (isAgentRunRecord(planOrRecord)) {
+            // 从历史记录中恢复
+            const record = planOrRecord;
+            this.plan = record.plan;
+            this.agentResult = record.result;
+            this.status = record.result.status as AgentStatus;
+            this.runId = record.result.runId;
+            // 将保存的普通对象转换回 Map
+            this.executionState = new Map(Object.entries(record.executionState).map(([key, value]) => {
+                // 确保每个步骤状态都符合 ExecutionStepState 接口
+                const fullStepState: ExecutionStepState = {
+                    runId: record.result.runId, // 从顶层结果中恢复 runId
+                    stepName: value.stepName,
+                    taskId: value.taskId,
+                    status: value.status,
+                    logs: value.logs || [],
+                    isCollapsed: true, // 从历史记录加载时默认折叠
+                    streamedContent: value.streamedContent || '',
+                    error: value.error,
+                };
+                return [key, fullStepState];
+            }));
+            this.onExecute = null; // 历史记录是只读的
+        } else {
+            // 开始一个新的运行
+            this.plan = planOrRecord;
+            this.onExecute = onExecute || null;
+            this.status = 'planning';
+        }
 
         this.render(); // Initial render
         this.setupEventListeners();
+    }
+    
+    /**
+     * 新增：获取组件当前的可序列化状态，用于保存到历史记录。
+     */
+    public getSerializableState(): AgentRunRecord | null {
+        if (!this.agentResult) {
+            console.error("Cannot serialize state: Agent has not completed.");
+            return null;
+        }
+
+        // highlight-start
+        // 将 Map 转换为普通对象以便 JSON 序列化
+        const serializableExecutionState: Record<string, SavedStepState> = {};
+        this.executionState.forEach((state, key) => {
+            // 从 state 中只选择要保存的字段
+            serializableExecutionState[key] = {
+                stepName: state.stepName,
+                taskId: state.taskId,
+                status: state.status,
+                logs: state.logs,
+                streamedContent: state.streamedContent,
+                error: state.error,
+            };
+        });
+        // highlight-end
+
+        return {
+            plan: this.plan,
+            executionState: serializableExecutionState,
+            result: this.agentResult
+        };
     }
 
     // Called by ChatView when agent:stepStart or agent:stepEnd is received
@@ -178,7 +244,8 @@ export class AgentRunBlock {
     }
 
     private render() {
-        const isPlanningReadOnly = this.status !== 'planning' && this.status !== 'validating';
+        // 如果 onExecute 为 null，说明是从历史记录中恢复的，始终为只读状态
+        const isPlanningReadOnly = (this.status !== 'planning' && this.status !== 'validating') || this.onExecute === null;
 
         const planningViewContainer = this.element.querySelector('.planning-view-container');
         if (!planningViewContainer) {
@@ -233,17 +300,19 @@ export class AgentRunBlock {
              if (!this.executionStepsOuterContainer) return; // Should not happen
         }
 
+        // 清理旧的DOM元素，并根据当前状态重新渲染
+        this.executionStepsOuterContainer.innerHTML = '';
+        this.stepElementsCache.clear();
 
         this.plan.steps.forEach((planStep, index) => {
+            // 从 state 中找到所有与 planStep 匹配的顶级执行步骤
+            // 这很重要，因为从历史恢复时，executionState 是预先填充好的
             const executionStepState = Array.from(this.executionState.values())
-                .find(s => s.stepName === planStep.name && !s.stepName.startsWith("分析模块:")); // Find top-level steps
+                .find(s => s.stepName === planStep.name && !s.stepName.startsWith("分析模块:"));
 
             if (!executionStepState) {
-                const existingEl = this.stepElementsCache.get(planStep.name); // Key by planStep.name for top-level
-                if (existingEl) {
-                    existingEl.remove();
-                    this.stepElementsCache.delete(planStep.name);
-                }
+                // 如果是实时执行，可能会暂时没有状态，直接跳过
+                // 如果是从历史恢复，这里不应该发生
                 return;
             }
 
@@ -252,7 +321,8 @@ export class AgentRunBlock {
 
             if (!stepElement) {
                 let animationClass = '';
-                if (!this.animatedStepIds.has(stepMapKey)) {
+                 // 从历史恢复时，不应用动画
+                if (!isAgentRunRecord(this.plan) && !this.animatedStepIds.has(stepMapKey)) {
                     animationClass = 'needs-animation';
                     this.animatedStepIds.add(stepMapKey);
                 }
@@ -270,6 +340,7 @@ export class AgentRunBlock {
                     this.stepElementsCache.set(stepMapKey, stepElement);
                 }
             } else {
+                 // 理论上，因为我们清理了 outer container，这个分支在当前逻辑下不会被走到
                 this.updateStepElement(stepElement, executionStepState, planStep, planStep.name === "分析: 并行处理模块", index);
             }
         });
@@ -467,6 +538,7 @@ export class AgentRunBlock {
     private getExecutionStepHtml(stepState: ExecutionStepState, planStep: { name: string }, index: number, animationClass: string): string {
         const state = stepState.status;
         const taskIdAttr = stepState.taskId ? `data-task-id="${stepState.taskId}"` : '';
+        const contentWrapperStyle = stepState.isCollapsed ? 'max-height: 0px; padding: 0px 15px;' : 'max-height: 2000px; padding: 10px 15px;';
         return `
             <div class="execution-step ${state} ${animationClass}" data-step-name="${planStep.name}" ${taskIdAttr}>
                 <div class="step-header">
@@ -474,7 +546,7 @@ export class AgentRunBlock {
                     <span class="step-name"><b>Step ${index + 1}:</b> ${planStep.name}</span>
                     <span class="step-status">${state}</span>
                 </div>
-                <div class="step-content-wrapper">
+                <div class="step-content-wrapper" style="${contentWrapperStyle}">
                     ${this.renderStepInternals(stepState)}
                 </div>
             </div>
@@ -486,6 +558,7 @@ export class AgentRunBlock {
         const taskIdAttr = parentStepState.taskId ? `data-task-id="${parentStepState.taskId}"` : '';
         // Initial sub-steps rendering (likely empty or placeholder if just started)
         const subStepsHtml = this.renderSubStepsContainerInitial(parentStepState);
+        const contentWrapperStyle = parentStepState.isCollapsed ? 'max-height: 0px; padding: 0px 15px;' : 'max-height: 5000px; padding: 10px 15px;';
 
         return `
             <div class="execution-step ${state} ${animationClass}" data-step-name="${planStep.name}" ${taskIdAttr}>
@@ -494,7 +567,7 @@ export class AgentRunBlock {
                     <span class="step-name"><b>Step ${index + 1}:</b> ${planStep.name}</span>
                     <span class="step-status">${state}</span>
                 </div>
-                <div class="step-content-wrapper">
+                <div class="step-content-wrapper" style="${contentWrapperStyle}">
                      <div class="sub-steps-container">
                         ${subStepsHtml}
                     </div>
@@ -523,13 +596,14 @@ export class AgentRunBlock {
 
 
     private getSubStepHtml(subStep: ExecutionStepState, animationClass: string): string {
+        const contentWrapperStyle = subStep.isCollapsed ? 'max-height: 0px; padding: 0px 10px;' : 'max-height: 2000px; padding: 10px;';
         return `
             <div class="sub-step ${subStep.status} ${animationClass}" data-task-id="${subStep.taskId}">
                  <div class="sub-step-header">
                     <span class="status-icon">${this.getIconForStatus(subStep.status)}</span>
                     <span class="step-name">${subStep.stepName}</span>
                 </div>
-                <div class="sub-step-content-wrapper">
+                <div class="sub-step-content-wrapper" style="${contentWrapperStyle}">
                     ${this.renderStepInternals(subStep)}
                 </div>
             </div>
@@ -542,6 +616,10 @@ export class AgentRunBlock {
         const badgeText = this.status === 'planning' || this.status === 'validating' ? '待执行' : (this.status === 'executing' ? '运行中' : '规划已锁定');
 
         const renderAgentActions = (status: AgentStatus) => {
+            // 如果 onExecute 为 null (从历史恢复)，则不显示任何操作按钮
+            if (this.onExecute === null) {
+                return '';
+            }
             if (status === 'executing') {
                 return `<button class="stop-btn secondary"><i class="codicon codicon-stop-circle"></i> 停止执行</button>`;
             }
@@ -639,7 +717,8 @@ export class AgentRunBlock {
         let animationClass = '';
 
         if (!resultElement) {
-            if (!this.animatedStepIds.has(resultKey)) {
+            // 从历史恢复时，不应用动画
+            if (!isAgentRunRecord(this.plan) && !this.animatedStepIds.has(resultKey)) {
                 animationClass = 'needs-animation';
                 this.animatedStepIds.add(resultKey);
             }
@@ -723,6 +802,7 @@ export class AgentRunBlock {
                 const stopBtn = target.closest('.stop-btn');
 
                 if (executeBtn) {
+                    if (!this.onExecute) return; // 从历史恢复时，onExecute 为 null
                     const params: Record<string, any> = {};
                     let allValid = true;
                     this.plan.parameters.forEach(p => {

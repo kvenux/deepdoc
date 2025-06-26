@@ -1,7 +1,7 @@
 // src/extension/CodeWikiViewProvider.ts (修改后完整文件)
 
 import * as vscode from 'vscode';
-import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig, AgentPlan } from '../common/types'; // AgentPlan 可能也需要
+import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig, AgentPlan, TextChatMessage } from '../common/types';
 import { StateManager } from './StateManager';
 import { LLMService } from './services/LLMService';
 import { AgentService } from './services/AgentService';
@@ -181,6 +181,23 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     vscode.window.showErrorMessage(data.payload);
                     break;
                 }
+            // highlight-start
+            case 'saveConversation': // 新增 case 处理来自 webview 的保存请求
+                {
+                    const { id, messages } = data.payload;
+                    const allConversations = await this._stateManager.getConversations();
+                    const conversationToUpdate = allConversations.find(c => c.id === id);
+                    if (conversationToUpdate) {
+                        conversationToUpdate.messages = messages;
+                        await this._stateManager.saveConversation(conversationToUpdate);
+                        // 更新内存中的活动对话
+                        if (this._activeConversation && this._activeConversation.id === id) {
+                            this._activeConversation = conversationToUpdate;
+                        }
+                    }
+                    break;
+                }
+            // highlight-end
             case 'sendMessage':
                 {
                     // When a message is sent from either view, clear the input in the other.
@@ -191,8 +208,10 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     }
 
                     const { prompt, config } = data.payload;
-                    const userMessage: ChatMessage = { role: 'user', content: prompt };
-                    let modelMessage: ChatMessage = { role: 'assistant', content: '' };
+                    // highlight-start
+                    const userMessage: TextChatMessage = { type: 'text', role: 'user', content: prompt };
+                    let modelMessage: TextChatMessage = { type: 'text', role: 'assistant', content: '' };
+                    // highlight-end
 
                     // Ensure there is an active conversation
                     if (!this._activeConversation) {
@@ -202,9 +221,15 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                             messages: [],
                             createdAt: new Date().toISOString(),
                         };
+                         // highlight-start
+                        // 首次消息，需要将整个新对话保存起来
+                        this._activeConversation.messages.push(userMessage);
+                        await this._stateManager.saveConversation(this._activeConversation);
+                         // highlight-end
+                    } else {
+                        this._activeConversation.messages.push(userMessage);
                     }
 
-                    this._activeConversation.messages.push(userMessage);
 
                     // Tell the webviews to enter streaming state
                     this._view?.webview.postMessage({ command: 'startStreaming' });
@@ -215,7 +240,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._llmService.getCompletion(
                         this._activeConversation.messages,
                         config,
-                        (chunk: string) => { // <--- 添加类型 : string
+                        (chunk: string) => { 
                             fullReply += chunk;
                             this._view?.webview.postMessage({ command: 'streamData', payload: chunk });
                             this._focusEditorView?.webview.postMessage({ command: 'streamData', payload: chunk });
@@ -236,7 +261,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                             const conversations = await this._stateManager.getConversations();
                             this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
                         },
-                        (error: any) => { // <--- 添加类型 : any 或 : Error
+                        (error: any) => { 
                             const errorPayload = { error: error.message };
                             this._view?.webview.postMessage({ command: 'requestFailed', payload: errorPayload });
                             this._focusEditorView?.webview.postMessage({ command: 'requestFailed', payload: errorPayload });
@@ -284,7 +309,9 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._activeConversation.messages.splice(messageIndex);
 
                     if (data.command === 'editMessage') {
-                        const userMessage: ChatMessage = { role: 'user', content: content };
+                        // highlight-start
+                        const userMessage: TextChatMessage = { type: 'text', role: 'user', content: content };
+                        // highlight-end
                         this._activeConversation.messages.push(userMessage);
                     }
 
@@ -297,7 +324,9 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                         break;
                     }
 
-                    let modelMessage: ChatMessage = { role: 'assistant', content: '' };
+                    // highlight-start
+                    let modelMessage: TextChatMessage = { type: 'text', role: 'assistant', content: '' };
+                    // highlight-end
                     let fullReply = '';
 
                     // Post a message to clear the old response and show a loading state
@@ -308,7 +337,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._llmService.getCompletion(
                         this._activeConversation.messages,
                         defaultConfig,
-                        (chunk: string) => { // <--- 添加类型 : string
+                        (chunk: string) => { 
                             fullReply += chunk;
                             this._view?.webview.postMessage({ command: 'streamData', payload: chunk });
                         },
@@ -326,7 +355,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                             const conversations = await this._stateManager.getConversations();
                             this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
                         },
-                        (error: any) => { // <--- 添加类型 : any 或 : Error
+                        (error: any) => { 
                             this._view?.webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });
                         }
                     );
@@ -349,6 +378,11 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     await this._stateManager.deleteConversation(id);
                     const conversations = await this._stateManager.getConversations();
                     this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
+                    // If the deleted conversation was active, clear the chat view
+                    if (this._activeConversation && this._activeConversation.id === id) {
+                        this._activeConversation = null;
+                        this._view?.webview.postMessage({ command: 'setActiveConversation', payload: null });
+                    }
                     break;
                 }
             case 'saveModelConfigs':
@@ -454,6 +488,23 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     logger.onAgentEnd({ runId: 'init-fail', status: 'failed', error: errorMsg });
                     return;
                 }
+                // highlight-start
+                // 如果当前没有激活的对话，则创建一个新的
+                if (!this._activeConversation) {
+                    const agentPlan = this._agentService.getAgentPlan(agentId);
+                    this._activeConversation = {
+                        id: uuidv4(),
+                        title: `Agent Run: ${agentPlan?.agentName || agentId}`,
+                        messages: [],
+                        createdAt: new Date().toISOString(),
+                    };
+                    await this._stateManager.saveConversation(this._activeConversation);
+                    // 通知 webview 更新历史记录
+                    const conversations = await this._stateManager.getConversations();
+                    this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
+                    this._view?.webview.postMessage({ command: 'setActiveConversation', payload: this._activeConversation });
+                }
+                // highlight-end
 
                 const logger = new WebviewLogger(mainWebview);
 
