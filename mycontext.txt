@@ -1021,6 +1021,12 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { AgentContext } from '../AgentContext';
 import { StringOutputParser } from '@langchain/core/output_parsers'; // 修正: 添加 import
 
+// 定义执行器的统一返回类型
+export interface ExecutorResult {
+    finalContent: string;
+    intermediateFiles?: { name: string; path: string }[];
+}
+
 // 接口定义
 interface MapReducePrompt {
     title?: string;
@@ -1059,7 +1065,7 @@ async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
 export class MapReduceExecutor {
     constructor(private readonly context: AgentContext) {}
 
-    public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<string> {
+    public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<ExecutorResult> {
         const { logger, llmService, modelConfig, runDir, statsTracker } = this.context; // <-- 获取 statsTracker
         let tokenizer: Tiktoken | null = null;
         
@@ -1088,16 +1094,22 @@ export class MapReduceExecutor {
             const totalTokensInModule = allFiles.reduce((sum, file) => sum + file.tokenCount, 0);
 
             const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || 12000;
-            const batches: FileData[][] = [];
+            const batches: { files: FileData[], tokenCount: number }[] = [];
             let currentBatch: FileData[] = [];
             let currentBatchTokens = 0;
             for (const file of allFiles) {
                 if (file.tokenCount > MAX_TOKENS_PER_BATCH) { continue; }
-                if (currentBatchTokens + file.tokenCount > MAX_TOKENS_PER_BATCH) { batches.push(currentBatch); currentBatch = []; currentBatchTokens = 0; }
+                if (currentBatchTokens + file.tokenCount > MAX_TOKENS_PER_BATCH) {
+                    batches.push({ files: currentBatch, tokenCount: currentBatchTokens });
+                    currentBatch = []; 
+                    currentBatchTokens = 0; 
+                }
                 currentBatch.push(file);
                 currentBatchTokens += file.tokenCount;
             }
-            if (currentBatch.length > 0) { batches.push(currentBatch); }
+            if (currentBatch.length > 0) {
+                batches.push({ files: currentBatch, tokenCount: currentBatchTokens });
+            }
             logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "文件清单Token分析", content: `当前模块包含 ${allFiles.length} 个文件 ${totalTokensInModule} 个token，超过阈值 ${MAX_TOKENS_PER_BATCH}，创建 ${batches.length} 个批次迭代分析` } });
             logger.onStepEnd({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'completed' }); // 修正: 添加 stepName
 
@@ -1107,14 +1119,13 @@ export class MapReduceExecutor {
 
 
             const llm = await llmService.createModel({ modelConfig, temperature: 0.1, streaming: false });
-            const mapAnalysisPromises = batches.map(async (batch, i) => {
-                // const mapTaskId = uuidv4(); 
+            const mapAnalysisPromises = batches.map(async (batchInfo, i) => {
                 const mapTaskName = `分析批次 ${i + 1}/${batches.length}`;
-                // logger.onStepStart({ runId, taskId: mapTaskId, stepName: mapTaskName, status: 'running' });
-                logger.onStepUpdate({ runId, taskId: mapAllTaskId, type: 'input', data: { name: `${mapTaskName} `} });
+                // 现在可以访问每个批次的token数，并在日志中显示
+                logger.onStepUpdate({ runId, taskId: mapAllTaskId, type: 'input', data: { name: `${mapTaskName} `, content: `包含 ${batchInfo.files.length} 个文件，共 ${batchInfo.tokenCount} tokens.` } });
                 
                 try {
-                    const batchContent = batch.map(f => `--- FILE: ${f.path} ---\n${f.content}`).join('\n\n');
+                    const batchContent = batchInfo.files.map(f => `--- FILE: ${f.path} ---\n${f.content}`).join('\n\n');
                     const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
                     // logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'llm-request', data: { system: actionPrompt.map_prompt_template.system, human: humanPrompt } });
                     
@@ -1141,6 +1152,29 @@ export class MapReduceExecutor {
             logger.onStepStart({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'running' });
 
             const combinedMarkdownSummaries = mapResults.join("\n\n");
+
+            const intermediateFiles: { name: string; path: string }[] = [];
+
+            // 检查 runDir 是否存在。如果存在，说明是由 Orchestrator 调用的，需要保存中间文件。
+            if (runDir) {
+                const summaryFileName = 'map_phase_combined_summary.md';
+                const summaryFilePath = vscode.Uri.joinPath(runDir, summaryFileName);
+                await vscode.workspace.fs.writeFile(summaryFilePath, Buffer.from(combinedMarkdownSummaries, 'utf8'));
+                
+                // 将文件信息存入数组
+                intermediateFiles.push({ name: 'Map阶段综合摘要', path: summaryFilePath.fsPath });
+            } 
+            
+            logger.onStepUpdate({
+                runId,
+                taskId: reduceTaskId,
+                type: 'input',
+                data: { 
+                    name: "Reduce阶段输入", 
+                    content: `摘要已合并 (长度: ${combinedMarkdownSummaries.length.toLocaleString()})，准备进行最终综合。`
+                }
+            });
+
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'input', data: { name: "所有摘要", content: combinedMarkdownSummaries } });
             
             const reduceLlm = await llmService.createModel({ modelConfig, temperature: 0.5, streaming: true });
@@ -1168,7 +1202,10 @@ export class MapReduceExecutor {
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'output', data: { name: "最终文档", content: finalContent }, metadata: { type: 'markdown' } });
             logger.onStepEnd({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'completed' }); // 修正: 添加 stepName
             
-            return finalContent;
+            return {
+                finalContent,
+                intermediateFiles
+            };
 
         } catch (error: any) {
             const err = error instanceof Error ? error : new Error(String(error));
@@ -1192,6 +1229,8 @@ import { ToolChainStep, LlmPromptTemplate } from '../CustomAgentExecutor';
 import { AgentContext } from '../AgentContext';
 import { SystemMessage, HumanMessage } from '@langchain/core/messages';
 import { StringOutputParser } from '@langchain/core/output_parsers';
+import { ExecutorResult } from './MapReduceExecutor'; // 导入统一的返回类型
+
 
 interface ActionPrompt {
     tool_chain: ToolChainStep[];
@@ -1201,7 +1240,7 @@ interface ActionPrompt {
 export class ToolChainExecutor {
     constructor(private readonly context: AgentContext) {}
 
-    public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<string> {
+    public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<ExecutorResult> {
         const { logger, llmService, toolRegistry, modelConfig, runDir, statsTracker } = this.context;
         let finalResult = '';
 
@@ -1263,7 +1302,10 @@ export class ToolChainExecutor {
             }
             logger.onStepEnd({ runId, taskId: llmTaskId, stepName: llmStepName, status: 'completed' }); // 修正: 添加 stepName
 
-            return finalResult;
+            return {
+                finalContent: finalResult,
+                intermediateFiles: [] // ToolChainExecutor 通常没有需要特别返回的中间文件
+            };
 
         } catch (error: any) {
             const err = error instanceof Error ? error : new Error(String(error));
@@ -1316,7 +1358,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { BaseMessage, HumanMessage } from '@langchain/core/messages';
 import { StringOutputParser } from '@langchain/core/output_parsers';
 import { AgentContext } from '../AgentContext';
-import { MapReduceExecutor } from '../executors/MapReduceExecutor';
+import { MapReduceExecutor, ExecutorResult } from '../executors/MapReduceExecutor';
 import { ToolChainExecutor } from '../executors/ToolChainExecutor';
 
 // 接口定义
@@ -1333,6 +1375,19 @@ interface PlannerOutput {
     modules: Module[];
 }
 
+// 为规划器YML文件定义一个更明确的接口
+interface PlannerPromptFile {
+    title: string;
+    description: string;
+    config?: {
+        max_tokens_for_direct_analysis?: number;
+    };
+    llm_prompt_template: {
+        system: string;
+        human: string;
+    };
+}
+
 interface ModuleDoc extends Module {
     content: string;
 }
@@ -1345,7 +1400,7 @@ interface PromptsCollection {
 }
 
 export class ProjectDocumentationOrchestrator {
-    private readonly MAX_TOKENS_FOR_DIRECT_ANALYSIS = 64000;
+    private maxTokensForDirectAnalysis: number = 18000;
     private tokenizer!: Tiktoken;
     private runDir!: vscode.Uri;
 
@@ -1390,6 +1445,13 @@ export class ProjectDocumentationOrchestrator {
         const taskId = uuidv4();
         const stepName = "规划: 分析项目结构"; // This is the stepName
         logger.onStepStart({ runId, taskId, stepName, status: 'running' });
+
+        // 解析 YAML 文件并读取配置
+        const plannerPromptFile = yaml.load(this.prompts.plannerPrompt) as PlannerPromptFile;
+        if (plannerPromptFile.config?.max_tokens_for_direct_analysis) {
+            this.maxTokensForDirectAnalysis = plannerPromptFile.config.max_tokens_for_direct_analysis;
+            logger.info(`从 project_planner.yml 加载配置: max_tokens_for_direct_analysis = ${this.maxTokensForDirectAnalysis}`);
+        }
 
         const treeTool = toolRegistry.getTool('get_directory_tree')!;
         const fileTree = await treeTool.call({ path: '.', language: 'unknown' }) as string;
@@ -1552,27 +1614,61 @@ export class ProjectDocumentationOrchestrator {
         let promptYaml: string;
         let strategy: string;
 
-        if (tokenCount <= this.MAX_TOKENS_FOR_DIRECT_ANALYSIS) {
+        let strategyLogContent = `模块路径: ${module.path}\n`;
+        
+        if (tokenCount <= this.maxTokensForDirectAnalysis) {
             strategy = "直接分析 (ToolChain)";
             executor = new ToolChainExecutor(moduleContext);
             promptYaml = this.prompts.directAnalysisPrompt;
+            strategyLogContent += `Token总数: ${tokenCount.toLocaleString()} 未超出最大Token数 ${this.maxTokensForDirectAnalysis.toLocaleString()} 限制\n`;
+            strategyLogContent += `采用全量分析策略，请稍后...`;
         } else {
             strategy = "Map-Reduce分析";
             executor = new MapReduceExecutor(moduleContext);
+            const estimatedBatches = Math.ceil(tokenCount / this.maxTokensForDirectAnalysis);
             promptYaml = this.prompts.mapReduceAnalysisPrompt;
+            strategyLogContent += `Token总数: ${tokenCount.toLocaleString()} 超出最大Token数 ${this.maxTokensForDirectAnalysis} 限制\n`;
+            strategyLogContent += `采用Map-Reduce分析策略，预计分 ${estimatedBatches} 个批次，因涉及多个迭代，分析时间稍长，请稍后...`;
         }
-        logger.onStepUpdate({ runId, taskId, type: 'input', data: { name: "分析策略", content: strategy, "Token数": tokenCount } });
-
+        
+        logger.onStepUpdate({ 
+            runId, 
+            taskId, 
+            type: 'input', 
+            data: { 
+                name: "分析策略", 
+                content: strategyLogContent
+            } 
+        });
         try {
-            const docContent = await executor.run(runId, promptYaml, { module_path: module.path, language, task_description: module.description });
-
+            const result: ExecutorResult = await executor.run(runId, promptYaml, { module_path: module.path, language, task_description: module.description });
+            const docContent = result.finalContent;
             const docPath = vscode.Uri.joinPath(this.runDir, `module_${module.name.replace(/[\s\/]/g, '_')}.md`);
             await vscode.workspace.fs.writeFile(docPath, Buffer.from(docContent, 'utf8'));
 
-            logger.onStepUpdate({ runId, taskId, type: 'output', data: { name: "模块文档", content: docContent }, metadata: { type: 'file', path: docPath.fsPath } });
-            // highlight-start
+            
+
+            // 如果有中间文件，也作为输出文件发送
+            if (result.intermediateFiles && result.intermediateFiles.length > 0) {
+                for (const file of result.intermediateFiles) {
+                    logger.onStepUpdate({
+                        runId,
+                        taskId,
+                        type: 'output',
+                        data: { name: file.name, content: `文件已生成: ${path.basename(file.path)}` },
+                        metadata: { type: 'file', path: file.path }
+                    });
+                }
+            }
+             // 将最终文档输出文件发送
+            logger.onStepUpdate({
+                runId,
+                taskId,
+                type: 'output',
+                data: { name: "模块文档", content: `文档已生成: ${path.basename(docPath.fsPath)}` },
+                metadata: { type: 'file', path: docPath.fsPath }
+            });
             logger.onStepEnd({ runId, taskId, stepName, status: 'completed' });
-            // highlight-end
             return { ...module, content: docContent };
         } catch (e: any) {
             // highlight-start
