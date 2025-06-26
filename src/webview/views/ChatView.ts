@@ -29,6 +29,9 @@ export class ChatView {
     private inputBox: HTMLElement; // 从 HTMLTextAreaElement 改为 HTMLElement
     private activeAgentRunContainer: HTMLElement | null = null;
     private activeAgentRunBlock: AgentRunBlock | null = null;
+    private isAgentRunning: boolean = false;
+    private activeAgentRunId: string | null = null;
+
 
     constructor(private readonly parent: HTMLElement) {
         this.parent.innerHTML = this.renderInitialLayout();
@@ -167,50 +170,53 @@ export class ChatView {
         window.addEventListener('message', event => {
             const message = event.data;
             const { command, payload } = message;
-            // 如果存在活动的 AgentRunBlock，则将事件转发给它处理
-            if (this.activeAgentRunBlock) {
-                switch (command) {
-                    case 'agent:stepStart':
-                        console.log('[ChatView] Received agent:stepStart:', payload);
-                        this.activeAgentRunBlock.updateStepExecutionStatus(payload as StepExecution); // Changed method
-                        return;
-                    case 'agent:stepEnd': 
-                        console.log('[ChatView] Received agent:stepEnd:', payload);
-                        this.activeAgentRunBlock.updateStepExecutionStatus(payload as StepResult); // Changed method
-                        return;
-                    // ... rest of cases for addStepLog, appendStreamChunk, setAgentResult remain the same
-                    case 'agent:stepUpdate':
-                        this.activeAgentRunBlock.addStepLog(payload);
-                        return;
-                    case 'agent:streamChunk':
-                        this.activeAgentRunBlock.appendStreamChunk(payload);
-                        return;
-                    case 'agent:end':
-                        this.activeAgentRunBlock.setAgentResult(payload);
-                        this.activeAgentRunBlock = null; 
-                        this.activeAgentRunContainer = null;
-                        return;
+            if (command.startsWith('agent:')) {
+                if (command === 'agent:planGenerated' && this.activeAgentRunContainer) {
+                    const plan: AgentPlan = payload;
+                    const onExecute = (params: Record<string, any>) => {
+                        vscode.postMessage({
+                            command: 'agent:execute',
+                            payload: { agentId: plan.agentId, parameters: params }
+                        });
+                    };
+                    this.activeAgentRunBlock = new AgentRunBlock(this.activeAgentRunContainer, plan, onExecute);
+                    return;
                 }
-            }
-            
-            // 如果没有活动的 AgentRunBlock，则可能是创建新实例的事件
-            if (command === 'agent:planGenerated' && this.activeAgentRunContainer) {
-                const plan: AgentPlan = payload;
-                const onExecute = (params: Record<string, any>) => {
-                    vscode.postMessage({
-                        command: 'agent:execute',
-                        payload: {
-                            agentId: plan.agentId,
-                            parameters: params
-                        }
-                    });
-                };
-                this.activeAgentRunBlock = new AgentRunBlock(
-                    this.activeAgentRunContainer,
-                    plan,
-                    onExecute
-                );
-                return; 
+                
+                if (this.activeAgentRunBlock) {
+                    switch (command) {
+                        case 'agent:stepStart':
+                            if (!this.isAgentRunning) { // 第一个步骤事件，标志着运行开始
+                                this.isAgentRunning = true;
+                                this.activeAgentRunId = payload.runId;
+                                this.updateSendButtonState();
+                            }
+                            this.activeAgentRunBlock.updateStepExecutionStatus(payload as StepExecution);
+                            return;
+                        case 'agent:stepEnd':
+                            this.activeAgentRunBlock.updateStepExecutionStatus(payload as StepResult);
+                            return;
+                        case 'agent:stepUpdate':
+                            this.activeAgentRunBlock.addStepLog(payload);
+                            return;
+                        case 'agent:streamChunk':
+                            this.activeAgentRunBlock.appendStreamChunk(payload);
+                            return;
+                        case 'agent:end':
+                           // 首先，更新卡片本身的UI，显示最终结果
+                            this.activeAgentRunBlock.setAgentResult(payload);
+                            
+                            // 然后，重置ChatView自身的状态
+                            this.isAgentRunning = false;
+                            this.activeAgentRunId = null;
+                            this.activeAgentRunBlock = null; 
+                            this.activeAgentRunContainer = null;
+                            
+                            // 最后，更新主聊天窗口的发送/停止按钮
+                            this.updateSendButtonState();
+                            return;
+                    }
+                }
             }
 
             switch (message.command) {
@@ -246,6 +252,15 @@ export class ChatView {
     }
 
     private handleSendOrSave() {
+        if (this.isAgentRunning && this.activeAgentRunId) {
+            vscode.postMessage({ command: 'agent:cancel', payload: { runId: this.activeAgentRunId } });
+            return;
+        }
+        if (this.isStreaming) {
+            vscode.postMessage({ command: 'stopMessage' });
+            return;
+        }
+        
         if (this.editingMessageIndex !== null) {
             this.handleSaveEdit(this.editingMessageIndex);
         } else {
@@ -565,17 +580,21 @@ export class ChatView {
     }
 
     private updateSendButtonState() {
-        const sendButton = this.bottomPanel.querySelector('button[data-action="send-or-save"]');
+        const sendButton = this.bottomPanel.querySelector<HTMLButtonElement>('button[data-action="send-or-save"]');
         if (sendButton) {
-            if (this.isStreaming) {
-                sendButton.textContent = 'Stop';
+            if (this.isAgentRunning || this.isStreaming) {
+                sendButton.innerHTML = `<i class="codicon codicon-stop-circle"></i> Stop`;
                 sendButton.classList.add('streaming');
-            } else if (this.editingMessageIndex !== null) {
+                sendButton.title = 'Stop Generation';
+            } 
+            else if (this.editingMessageIndex !== null) {
                 sendButton.textContent = 'Save';
                 sendButton.classList.remove('streaming');
+                sendButton.title = 'Save Changes';
             } else {
                 sendButton.textContent = 'Send';
                 sendButton.classList.remove('streaming');
+                sendButton.title = 'Send Message';
             }
         }
     }

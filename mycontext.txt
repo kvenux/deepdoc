@@ -418,7 +418,20 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                             this._focusEditorView?.webview.postMessage({ command: 'streamData', payload: chunk });
                         },
                         async () => {
-                            // ...
+                            modelMessage.content = fullReply;
+                            // Ensure we have an active conversation before proceeding
+                            if (this._activeConversation) {
+                                this._activeConversation.messages.push(modelMessage);
+                                await this._stateManager.saveConversation(this._activeConversation);
+                            }
+                            
+                            // Tell both webviews to end streaming state
+                            this._view?.webview.postMessage({ command: 'streamEnd' });
+                            this._focusEditorView?.webview.postMessage({ command: 'streamEnd' });
+                        
+                            // Update history view in case a new conversation was created
+                            const conversations = await this._stateManager.getConversations();
+                            this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
                         },
                         (error: any) => { // <--- 添加类型 : any 或 : Error
                             const errorPayload = { error: error.message };
@@ -497,7 +510,18 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                             this._view?.webview.postMessage({ command: 'streamData', payload: chunk });
                         },
                         async () => {
-                            // ...
+                            modelMessage.content = fullReply;
+                            if (this._activeConversation) {
+                                this._activeConversation.messages.push(modelMessage);
+                                await this._stateManager.saveConversation(this._activeConversation);
+                            }
+                        
+                            // Tell the main webview to end streaming state
+                            this._view?.webview.postMessage({ command: 'streamEnd' });
+                        
+                            // Update history view
+                            const conversations = await this._stateManager.getConversations();
+                            this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
                         },
                         (error: any) => { // <--- 添加类型 : any 或 : Error
                             this._view?.webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });

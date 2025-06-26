@@ -237,9 +237,7 @@ export class ProjectDocumentationOrchestrator {
             this.analyzeSingleModule(runId, module, plan.language, index + 1, finalModules.length)
         );
         const results = await Promise.all(analysisPromises);
-        // highlight-start
         logger.onStepEnd({ runId, stepName: analysisStepName, status: 'completed' }); // This is the parent step for module analysis
-        // highlight-end
         return results;
     }
 

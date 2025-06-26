@@ -23,6 +23,7 @@ export class AgentRunBlock {
     private animatedStepIds: Set<string> = new Set();
     private stepElementsCache: Map<string, HTMLElement> = new Map();
     private executionStepsOuterContainer: HTMLElement | null = null; // Cache this
+    private runId: string | null = null;
 
     constructor(
         container: HTMLElement,
@@ -40,6 +41,9 @@ export class AgentRunBlock {
 
     // Called by ChatView when agent:stepStart or agent:stepEnd is received
     public updateStepExecutionStatus(stepEventData: StepExecution | CommonStepResultType) {
+        if (!this.runId) {
+            this.runId = stepEventData.runId;
+        }
         const stepKey = stepEventData.taskId || stepEventData.stepName;
         let stepState = this.executionState.get(stepKey);
         const isNewStepInState = !stepState;
@@ -160,7 +164,16 @@ export class AgentRunBlock {
     public setAgentResult(result: AgentResult) {
         this.status = result.status;
         this.agentResult = result;
-        // This is a major state change, a full re-render of the execution view part is acceptable.
+        // 如果Agent被取消或失败，遍历所有正在执行的步骤，并将它们标记为失败。
+        if (result.status === 'cancelled' || result.status === 'failed') {
+            this.executionState.forEach(stepState => {
+                if (stepState.status === 'running' || stepState.status === 'waiting') {
+                    stepState.status = 'failed'; // 将状态强制更新为 'failed'
+                    // 可以添加一条错误信息，解释为什么这个步骤失败了
+                    stepState.error = 'Execution was cancelled or failed.'; 
+                }
+            });
+        }
         this.render();
     }
 
@@ -525,8 +538,21 @@ export class AgentRunBlock {
     
     // renderPlanningView, renderStepCard, renderParameterInput, getIconForStatus, renderFinalResult, setupEventListeners, postRender remain the same
     private renderPlanningView(isReadOnly: boolean): string {
-        const badgeClass = this.status === 'planning' || this.status === 'validating' ? 'planning' : 'completed';
-        const badgeText = this.status === 'planning' || this.status === 'validating' ? '待执行' : '规划已锁定';
+        const badgeClass = this.status === 'planning' || this.status === 'validating' ? 'planning' : (this.status === 'executing' ? 'executing' : 'completed');
+        const badgeText = this.status === 'planning' || this.status === 'validating' ? '待执行' : (this.status === 'executing' ? '运行中' : '规划已锁定');
+
+        const renderAgentActions = (status: AgentStatus) => {
+            if (status === 'executing') {
+                return `<button class="stop-btn secondary"><i class="codicon codicon-stop-circle"></i> 停止执行</button>`;
+            }
+            if (status === 'planning' || status === 'validating') {
+                return `
+                    <button class="execute-btn"><i class="codicon codicon-play"></i> 开始执行</button>
+                    <button class="cancel-btn secondary"><i class="codicon codicon-close"></i> 取消</button>
+                `;
+            }
+            return '';
+        };
 
         return `
             <div class="planning-view ${isReadOnly ? 'read-only' : ''}">
@@ -544,9 +570,8 @@ export class AgentRunBlock {
                         ${this.plan.parameters.map(param => this.renderParameterInput(param, isReadOnly)).join('')}
                     </div>
                 ` : ''}
-                <div class="agent-actions" style="display: ${isReadOnly ? 'none' : 'flex'};">
-                    <button class="execute-btn">开始执行</button>
-                    <button class="cancel-btn secondary">取消</button>
+                <div class="agent-actions" style="display: ${this.status === 'completed' || this.status === 'failed' || this.status === 'cancelled' ? 'none' : 'flex'};">
+                    ${renderAgentActions(this.status)}
                 </div>
             </div>
         `;
@@ -690,9 +715,13 @@ export class AgentRunBlock {
                     return; 
                 }
             }
-            const planningView = target.closest('.planning-view:not(.read-only)');
-            if (planningView) {
+            // Event listener for agent actions (start, stop, cancel)
+            const actionsContainer = target.closest('.agent-actions');
+            if (actionsContainer) {
                 const executeBtn = target.closest('.execute-btn');
+                const cancelBtn = target.closest('.cancel-btn');
+                const stopBtn = target.closest('.stop-btn');
+
                 if (executeBtn) {
                     const params: Record<string, any> = {};
                     let allValid = true;
@@ -700,25 +729,26 @@ export class AgentRunBlock {
                         const input = this.element.querySelector(`#param-${p.name}`) as HTMLInputElement;
                         if (input) {
                             const value = input.value.trim();
-                            if (!value && p.type === 'path') { 
-                                p.error = 'This field is required.';
-                                allValid = false;
-                            } else {
-                                p.error = undefined;
-                                params[p.name] = value;
-                                p.value = value; 
-                            }
+                            if (!value && p.type === 'path') { p.error = 'This field is required.'; allValid = false; }
+                            else { p.error = undefined; params[p.name] = value; p.value = value; }
                         }
                     });
                     this.status = allValid ? 'executing' : 'validating';
                     this.render(); 
-                    if (allValid) {
-                        this.onExecute(params); 
-                    }
+                    if (allValid) this.onExecute(params); 
                     return;
                 }
-                if (target.closest('.cancel-btn')) {
+                if (cancelBtn) {
                     this.element.remove();
+                    return;
+                }
+                if (stopBtn) {
+                    if (this.runId) {
+                        vscode.postMessage({ command: 'agent:cancel', payload: { runId: this.runId } });
+                    } else {
+                        console.warn('Stop button clicked, but no runId is available.');
+                        this.element.remove();
+                    }
                     return;
                 }
             }

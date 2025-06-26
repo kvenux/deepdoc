@@ -467,6 +467,14 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 break;
             }
 
+            case 'agent:cancel': {
+                const { runId } = data.payload;
+                if (runId) {
+                    await this._agentService.cancelAgentRun(runId);
+                }
+                break;
+            }
+
             case 'viewFile': {
                 const filePathPayload = data.payload?.path;
                 if (typeof filePathPayload === 'string') {

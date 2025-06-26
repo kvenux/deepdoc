@@ -71,6 +71,7 @@ async function loadPromptFile(workspaceRoot: vscode.Uri, fileName: string): Prom
  */
 export class AgentService {
     private toolRegistry: ToolRegistry;
+    private activeRuns = new Map<string, { logger: AgentLogger }>();
     
     constructor(private llmService: LLMService) {
         this.toolRegistry = new ToolRegistry(this.llmService);
@@ -89,6 +90,25 @@ export class AgentService {
     public getAgentPlan(agentId: string): AgentPlan | null {
         const plan = AGENT_DEFINITIONS[agentId];
         return plan ? { ...plan } : null; // 返回一个副本以避免意外修改
+    }
+
+    /**
+     * 取消一个正在运行的 Agent。
+     * @param runId 要取消的运行的ID。
+     */
+    public async cancelAgentRun(runId: string) {
+        const run = this.activeRuns.get(runId);
+        if (run) {
+            console.log(`Cancelling agent run ${runId}`);
+            // 发送一个 "cancelled" 状态的最终事件
+            run.logger.onAgentEnd({
+                runId,
+                status: 'cancelled',
+                error: 'Agent run was cancelled by the user.'
+            });
+            // 从活动运行中移除，以防止后续的 'completed' 或 'failed' 事件被发送
+            this.activeRuns.delete(runId);
+        }
     }
 
     public async prepareAndRunAgent(
@@ -134,6 +154,8 @@ export class AgentService {
         let finalOutput: any = "执行成功"; // 默认成功消息
 
         try {
+            this.activeRuns.set(runId, { logger }); // 注册运行
+
             switch (agentId) {
                 case 'docgen-project': {
                     const projPrompts = {
@@ -180,14 +202,20 @@ export class AgentService {
                     throw new Error(`Execution for agent "${agentId}" is not yet implemented.`);
             }
             
-            // 如果成功执行到这里，计算最终统计数据并发送成功事件
-            const finalStats = statsTracker.getFinalStats();
-            logger.onAgentEnd({ runId, status: 'completed', finalOutput, stats: finalStats });
+            // 只有在运行没有被取消的情况下，才发送 'completed' 事件
+            if (this.activeRuns.has(runId)) {
+                const finalStats = statsTracker.getFinalStats();
+                logger.onAgentEnd({ runId, status: 'completed', finalOutput, stats: finalStats });
+            }
 
         } catch (error: any) {
-            // 如果任何步骤失败，计算统计数据并发送失败事件
-            const finalStats = statsTracker.getFinalStats();
-            logger.onAgentEnd({ runId, status: 'failed', error: error.message, stats: finalStats });
+             // 只有在运行没有被取消的情况下，才发送 'failed' 事件
+            if (this.activeRuns.has(runId)) {
+                const finalStats = statsTracker.getFinalStats();
+                logger.onAgentEnd({ runId, status: 'failed', error: error.message, stats: finalStats });
+            }
+        } finally {
+            this.activeRuns.delete(runId); // 确保在所有路径上都取消注册
         }
     }
 
@@ -214,16 +242,30 @@ export class AgentService {
         const runId = uuidv4();
 
         try {
+            // highlight-start
+            this.activeRuns.set(runId, { logger });
+            // highlight-end
             const executor = new ToolChainExecutor(context);
             const result = await executor.run(runId, yamlContent, userInputs);
-            const finalStats = statsTracker.getFinalStats();
-            logger.onAgentEnd({ runId, status: 'completed', finalOutput: result, stats: finalStats });
+            
+            // highlight-start
+            if (this.activeRuns.has(runId)) {
+                const finalStats = statsTracker.getFinalStats();
+                logger.onAgentEnd({ runId, status: 'completed', finalOutput: result, stats: finalStats });
+            }
+            // highlight-end
 
         } catch (error: any) {
-            if (!(error as any).__logged) {
+             // highlight-start
+            if (this.activeRuns.has(runId)) {
                  const finalStats = statsTracker.getFinalStats();
                  logger.onAgentEnd({ runId, status: 'failed', error: error.message, stats: finalStats });
             }
+            // highlight-end
+        } finally {
+            // highlight-start
+            this.activeRuns.delete(runId);
+            // highlight-end
         }
     }
 }

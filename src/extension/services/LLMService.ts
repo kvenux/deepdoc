@@ -1,4 +1,4 @@
-// src/extension/LLMService.ts
+// src/extension/services/LLMService.ts (修改后完整文件)
 
 import vscode from 'vscode';
 import { ChatMessage, ModelConfig } from '../../common/types';
@@ -7,22 +7,15 @@ import { HumanMessage, AIMessage, BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 
-/**
- * 标志位：设置为 true 以使用 Gemini，设置为 false 则使用 settings.json 中的模型配置。
- * 使用 Gemini 前，请确保已安装 `@langchain/google-genai` 并在 `.codewiki/.env` 文件中配置了 GOOGLE_API_KEY。
- */
 const USE_GEMINI = false;
 
-/**
- * 创建模型实例时使用的选项。
- */
 export interface CreateModelOptions {
-    // 当不使用 Gemini 时，需要此配置来创建 OpenAI 或兼容模型
     modelConfig: ModelConfig; 
     temperature?: number;
     streaming?: boolean;
 }
 
+// highlight-start
 /**
  * 定义一个可以放入队列的LLM任务。
  * 它包含一个返回Promise的函数，以及用于解决该Promise的resolver和rejecter。
@@ -32,19 +25,13 @@ type LlmTask<T> = {
     resolve: (value: T) => void;
     reject: (reason?: any) => void;
 };
+// highlight-end
 
-/**
- * 从工作区的 .codewiki/.env 文件中安全地读取 Google API 密钥。
- * @returns {Promise<string | undefined>} 返回 API 密钥或 undefined。
- */
 async function getGoogleApiKey(): Promise<string | undefined> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders) {
-        return undefined;
-    }
+    if (!workspaceFolders) return undefined;
     const workspaceRoot = workspaceFolders[0].uri;
     const envPath = vscode.Uri.joinPath(workspaceRoot, '.codewiki', '.env');
-
     try {
         const contentBytes = await vscode.workspace.fs.readFile(envPath);
         const content = Buffer.from(contentBytes).toString('utf-8');
@@ -63,44 +50,35 @@ async function getGoogleApiKey(): Promise<string | undefined> {
     return undefined;
 }
 
-
-/**
- * 服务类，用于与大语言模型交互。
- * 此类现在是创建模型实例的唯一入口点，整合了 OpenAI 和 Gemini 的逻辑。
- */
 export class LLMService {
     private _abortController: AbortController | null = null;
+
+    // highlight-start
+    // --- 新的并行速率限制器属性 ---
     private requestQueue: LlmTask<any>[] = [];
-    private isProcessingQueue = false;
-    private readonly RATE_LIMIT_DELAY_MS = 1500; // 为1 QPS设置1.5秒延迟，提供安全缓冲
+    private activeRequests = 0;
+    private isProcessing = false;
+    private lastRequestTime = 0;
+
+    // --- 配置 ---
+    // 每秒最多发送1个请求（1 RPS），设置为1100ms以提供缓冲
+    private readonly minInterval = 1100; 
+    // 最大并发请求数，防止过多请求同时进行
+    private readonly concurrencyLimit = 10; 
+    // --- 结束新的属性 ---
+    // highlight-end
 
     constructor() {}
 
-    /**
-     * 统一的模型创建工厂方法。
-     * 根据 USE_GEMINI 标志和传入的选项，创建并返回一个 LLM 实例。
-     * @param options - 创建模型所需的配置，包括温度、是否流式等。
-     * @returns {Promise<BaseChatModel>} 一个配置好的 LangChain 模型实例。
-     */
     public async createModel(options: CreateModelOptions): Promise<BaseChatModel> {
         const { modelConfig, temperature = 0.7, streaming = false } = options;
-
         if (USE_GEMINI) {
             console.log("[LLMService] Creating model using Google Gemini.");
             const apiKey = await getGoogleApiKey();
-            if (!apiKey) {
-                throw new Error("Gemini execution failed: 'GOOGLE_API_KEY' not found in your .codewiki/.env file.");
-            }
-            // Gemini 对温度的支持可能与 OpenAI 不同，这里直接传入
-            return new ChatGoogleGenerativeAI({
-                model: "gemini-2.5-flash", 
-                apiKey: apiKey,
-                temperature,
-                // Gemini 的 streaming 是通过 .stream() 方法控制的，这里设置 streaming 属性可能无效，但为了接口统一保留
-            });
+            if (!apiKey) throw new Error("Gemini execution failed: 'GOOGLE_API_KEY' not found in your .codewiki/.env file.");
+            return new ChatGoogleGenerativeAI({ model: "gemini-1.5-flash-latest", apiKey, temperature });
         }
         
-        // 默认使用 OpenAI 或兼容的代理
         const url = new URL(modelConfig.baseUrl);
         if (!url.pathname.includes('/v1')) {
             url.pathname = ('/v1' + url.pathname).replace(/\/+/g, '/');
@@ -112,15 +90,13 @@ export class LLMService {
             apiKey: modelConfig.apiKey,
             streaming,
             temperature,
-            configuration: {
-                baseURL: finalBaseUrl,
-            }
+            configuration: { baseURL: finalBaseUrl }
         });
     }
 
+    // highlight-start
     /**
-     * 将一个非流式的LLM调用任务加入队列，并由调度器按速率限制执行。
-     * 这是所有Agent和Tool进行非流式调用的新入口点。
+     * 将一个非流式的LLM调用任务加入队列，并由并行的速率限制调度器执行。
      * @param task 一个返回LLM调用Promise的函数，例如 `() => llm.invoke(messages)`
      * @returns 一个在任务完成时解析的Promise
      */
@@ -128,45 +104,56 @@ export class LLMService {
         console.log(`[LLMService] A new call was scheduled. Queue size: ${this.requestQueue.length + 1}`);
         return new Promise<T>((resolve, reject) => {
             this.requestQueue.push({ task, resolve, reject });
+            // 触发处理流程
             this.processQueue();
         });
     }
 
     private async processQueue() {
-        if (this.isProcessingQueue || this.requestQueue.length === 0) {
+        // 如果正在处理或者队列为空，或者已达到并发上限，则返回
+        if (this.isProcessing || this.requestQueue.length === 0 || this.activeRequests >= this.concurrencyLimit) {
             return;
         }
 
-        this.isProcessingQueue = true;
-        const { task, resolve, reject } = this.requestQueue.shift()!;
-        
-        console.log(`[LLMService] Executing call from queue. Remaining: ${this.requestQueue.length}`);
+        this.isProcessing = true;
 
-        try {
-            const result = await task();
-            resolve(result);
-        } catch (error) {
-            console.error("[LLMService] Error executing task from queue:", error);
-            reject(error);
-        } finally {
-            // 在完成（无论成功或失败）后，等待指定的延迟
-            await new Promise(res => setTimeout(res, this.RATE_LIMIT_DELAY_MS));
+        const now = Date.now();
+        const elapsed = now - this.lastRequestTime;
+        const delay = Math.max(0, this.minInterval - elapsed);
+
+        // 使用setTimeout来延迟执行，从而不阻塞当前事件循环
+        setTimeout(() => {
+            // 在延迟后，再次检查条件，以防状态改变
+            if (this.requestQueue.length === 0 || this.activeRequests >= this.concurrencyLimit) {
+                this.isProcessing = false;
+                return;
+            }
+
+            const { task, resolve, reject } = this.requestQueue.shift()!;
             
-            this.isProcessingQueue = false;
-            // 尝试处理队列中的下一个项目
-            this.processQueue();
-        }
+            this.lastRequestTime = Date.now();
+            this.activeRequests++;
+
+            console.log(`[LLMService] Executing call. Active: ${this.activeRequests}, Queue: ${this.requestQueue.length}`);
+
+            // 立即释放锁并尝试调度下一个，实现并行
+            this.isProcessing = false;
+            this.processQueue(); 
+
+            // 异步执行任务
+            task()
+                .then(resolve)
+                .catch(reject)
+                .finally(() => {
+                    this.activeRequests--;
+                    // 任务完成后，再次尝试处理队列，以防有任务因达到并发上限而等待
+                    this.processQueue();
+                });
+                
+        }, delay);
     }
     // highlight-end
 
-    /**
-     * 获取模型的流式补全。
-     * @param messages 聊天消息历史
-     * @param config 选定的模型配置
-     * @param onData 接收到数据块时的回调
-     * @param onEnd 完成时的回调
-     * @param onError 出错时的回调
-     */
     public async getCompletion(
         messages: ChatMessage[],
         config: ModelConfig,
@@ -179,33 +166,19 @@ export class LLMService {
         let llm: BaseChatModel;
 
         try {
-            // 使用新的工厂方法创建模型实例
-            llm = await this.createModel({
-                modelConfig: config,
-                streaming: true,
-                temperature: 0.7 // Standard temperature for chat
-            });
-
-            const langchainMessages: BaseMessage[] = messages.map(msg => {
-                return msg.role === 'user' ? new HumanMessage(msg.content) : new AIMessage(msg.content);
-            });
-
-            const stream = await llm.stream(langchainMessages, {
-                signal: signal,
-            });
-
+            llm = await this.createModel({ modelConfig: config, streaming: true, temperature: 0.7 });
+            const langchainMessages: BaseMessage[] = messages.map(msg => msg.role === 'user' ? new HumanMessage(msg.content) : new AIMessage(msg.content));
+            const stream = await llm.stream(langchainMessages, { signal });
             for await (const chunk of stream) {
                 if (chunk.content) {
                     onData(chunk.content as string);
                 }
             }
-
         } catch (error: any) {
             if (signal.aborted) {
                 console.log('Request aborted by user.');
             } else {
                 console.error("--- LANGCHAIN REQUEST FAILED ---");
-                // 构造错误信息，因为我们不知道是哪个URL
                  if (error instanceof Error) {
                      console.error("Full Error Object:", error);
                      onError(error);
