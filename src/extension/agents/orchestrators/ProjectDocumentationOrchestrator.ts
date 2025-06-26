@@ -7,7 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { BaseMessage, HumanMessage } from '@langchain/core/messages';
 import { StringOutputParser } from '@langchain/core/output_parsers';
 import { AgentContext } from '../AgentContext';
-import { MapReduceExecutor } from '../executors/MapReduceExecutor';
+import { MapReduceExecutor, ExecutorResult } from '../executors/MapReduceExecutor';
 import { ToolChainExecutor } from '../executors/ToolChainExecutor';
 
 // 接口定义
@@ -290,15 +290,34 @@ export class ProjectDocumentationOrchestrator {
             } 
         });
         try {
-            const docContent = await executor.run(runId, promptYaml, { module_path: module.path, language, task_description: module.description });
-
+            const result: ExecutorResult = await executor.run(runId, promptYaml, { module_path: module.path, language, task_description: module.description });
+            const docContent = result.finalContent;
             const docPath = vscode.Uri.joinPath(this.runDir, `module_${module.name.replace(/[\s\/]/g, '_')}.md`);
             await vscode.workspace.fs.writeFile(docPath, Buffer.from(docContent, 'utf8'));
 
-            logger.onStepUpdate({ runId, taskId, type: 'output', data: { name: "模块文档", content: docContent }, metadata: { type: 'file', path: docPath.fsPath } });
-            // highlight-start
+            
+
+            // 如果有中间文件，也作为输出文件发送
+            if (result.intermediateFiles && result.intermediateFiles.length > 0) {
+                for (const file of result.intermediateFiles) {
+                    logger.onStepUpdate({
+                        runId,
+                        taskId,
+                        type: 'output',
+                        data: { name: file.name, content: `文件已生成: ${path.basename(file.path)}` },
+                        metadata: { type: 'file', path: file.path }
+                    });
+                }
+            }
+             // 将最终文档输出文件发送
+            logger.onStepUpdate({
+                runId,
+                taskId,
+                type: 'output',
+                data: { name: "模块文档", content: `文档已生成: ${path.basename(docPath.fsPath)}` },
+                metadata: { type: 'file', path: docPath.fsPath }
+            });
             logger.onStepEnd({ runId, taskId, stepName, status: 'completed' });
-            // highlight-end
             return { ...module, content: docContent };
         } catch (e: any) {
             // highlight-start

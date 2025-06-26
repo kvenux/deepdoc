@@ -8,6 +8,12 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { AgentContext } from '../AgentContext';
 import { StringOutputParser } from '@langchain/core/output_parsers'; // 修正: 添加 import
 
+// 定义执行器的统一返回类型
+export interface ExecutorResult {
+    finalContent: string;
+    intermediateFiles?: { name: string; path: string }[];
+}
+
 // 接口定义
 interface MapReducePrompt {
     title?: string;
@@ -46,7 +52,7 @@ async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
 export class MapReduceExecutor {
     constructor(private readonly context: AgentContext) {}
 
-    public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<string> {
+    public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<ExecutorResult> {
         const { logger, llmService, modelConfig, runDir, statsTracker } = this.context; // <-- 获取 statsTracker
         let tokenizer: Tiktoken | null = null;
         
@@ -133,6 +139,29 @@ export class MapReduceExecutor {
             logger.onStepStart({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'running' });
 
             const combinedMarkdownSummaries = mapResults.join("\n\n");
+
+            const intermediateFiles: { name: string; path: string }[] = [];
+
+            // 检查 runDir 是否存在。如果存在，说明是由 Orchestrator 调用的，需要保存中间文件。
+            if (runDir) {
+                const summaryFileName = 'map_phase_combined_summary.md';
+                const summaryFilePath = vscode.Uri.joinPath(runDir, summaryFileName);
+                await vscode.workspace.fs.writeFile(summaryFilePath, Buffer.from(combinedMarkdownSummaries, 'utf8'));
+                
+                // 将文件信息存入数组
+                intermediateFiles.push({ name: 'Map阶段综合摘要', path: summaryFilePath.fsPath });
+            } 
+            
+            logger.onStepUpdate({
+                runId,
+                taskId: reduceTaskId,
+                type: 'input',
+                data: { 
+                    name: "Reduce阶段输入", 
+                    content: `摘要已合并 (长度: ${combinedMarkdownSummaries.length.toLocaleString()})，准备进行最终综合。`
+                }
+            });
+
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'input', data: { name: "所有摘要", content: combinedMarkdownSummaries } });
             
             const reduceLlm = await llmService.createModel({ modelConfig, temperature: 0.5, streaming: true });
@@ -160,7 +189,10 @@ export class MapReduceExecutor {
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'output', data: { name: "最终文档", content: finalContent }, metadata: { type: 'markdown' } });
             logger.onStepEnd({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'completed' }); // 修正: 添加 stepName
             
-            return finalContent;
+            return {
+                finalContent,
+                intermediateFiles
+            };
 
         } catch (error: any) {
             const err = error instanceof Error ? error : new Error(String(error));

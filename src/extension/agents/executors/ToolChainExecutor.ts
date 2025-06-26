@@ -6,6 +6,8 @@ import { ToolChainStep, LlmPromptTemplate } from '../CustomAgentExecutor';
 import { AgentContext } from '../AgentContext';
 import { SystemMessage, HumanMessage } from '@langchain/core/messages';
 import { StringOutputParser } from '@langchain/core/output_parsers';
+import { ExecutorResult } from './MapReduceExecutor'; // 导入统一的返回类型
+
 
 interface ActionPrompt {
     tool_chain: ToolChainStep[];
@@ -15,7 +17,7 @@ interface ActionPrompt {
 export class ToolChainExecutor {
     constructor(private readonly context: AgentContext) {}
 
-    public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<string> {
+    public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<ExecutorResult> {
         const { logger, llmService, toolRegistry, modelConfig, runDir, statsTracker } = this.context;
         let finalResult = '';
 
@@ -77,7 +79,10 @@ export class ToolChainExecutor {
             }
             logger.onStepEnd({ runId, taskId: llmTaskId, stepName: llmStepName, status: 'completed' }); // 修正: 添加 stepName
 
-            return finalResult;
+            return {
+                finalContent: finalResult,
+                intermediateFiles: [] // ToolChainExecutor 通常没有需要特别返回的中间文件
+            };
 
         } catch (error: any) {
             const err = error instanceof Error ? error : new Error(String(error));
