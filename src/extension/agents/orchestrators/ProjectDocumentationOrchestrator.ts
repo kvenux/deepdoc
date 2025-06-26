@@ -133,14 +133,14 @@ export class ProjectDocumentationOrchestrator {
             const plan = JSON.parse(jsonString) as PlannerOutput;
 
             logger.onStepUpdate({ runId, taskId, type: 'output', data: { name: "项目规划", content: plan } });
-            // highlight-start
+            
             logger.onStepEnd({ runId, taskId, stepName, status: 'completed' });
-            // highlight-end
+            
             return plan;
         } catch (e: any) {
-            // highlight-start
+            
             logger.onStepEnd({ runId, taskId, stepName, status: 'failed', error: e.message });
-            // highlight-end
+            
             throw new Error(`解析规划输出失败: ${e.message}`);
         }
     }
@@ -226,9 +226,9 @@ export class ProjectDocumentationOrchestrator {
         }
 
         logger.onStepUpdate({ runId, taskId: filterTaskId, type: 'output', data: { name: "唯一模块", content: `已过滤，将分析 ${finalModules.length} 个模块。` } });
-        // highlight-start
+        
         logger.onStepEnd({ runId, taskId: filterTaskId, stepName: filterStepName, status: 'completed' });
-        // highlight-end
+        
 
         const analysisStepName = "分析: 并行处理模块";
         logger.info(`[DEBUG] Attempting to start parent step: ${analysisStepName}`);
@@ -318,9 +318,9 @@ export class ProjectDocumentationOrchestrator {
             logger.onStepEnd({ runId, taskId, stepName, status: 'completed' });
             return { ...module, content: docContent };
         } catch (e: any) {
-            // highlight-start
+            
             logger.onStepEnd({ runId, taskId, stepName, status: 'failed', error: e.message });
-            // highlight-end
+            
             throw e; // Re-throw to be caught by the main run() method's try-catch
         }
     }

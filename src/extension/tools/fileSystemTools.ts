@@ -209,10 +209,10 @@ export class GetAllFilesContentTool extends StructuredTool {
             const absolutePath = path.join(workspaceRoot, relativePath);
             const dirUri = vscode.Uri.file(absolutePath);
 
-            // highlight-start
+            
             // 使用新的过滤辅助函数
             const fileUris = await getFilteredFilePathsRecursive(dirUri, language);
-            // highlight-end
+            
 
             if (fileUris.length === 0) {
                 return `在目录 "${relativePath}" 及其子目录中没有找到与语言 '${language}' 相关的任何文件。`;

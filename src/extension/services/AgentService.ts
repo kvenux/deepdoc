@@ -242,30 +242,30 @@ export class AgentService {
         const runId = uuidv4();
 
         try {
-            // highlight-start
+            
             this.activeRuns.set(runId, { logger });
-            // highlight-end
+            
             const executor = new ToolChainExecutor(context);
             const result = await executor.run(runId, yamlContent, userInputs);
             
-            // highlight-start
+            
             if (this.activeRuns.has(runId)) {
                 const finalStats = statsTracker.getFinalStats();
                 logger.onAgentEnd({ runId, status: 'completed', finalOutput: result, stats: finalStats });
             }
-            // highlight-end
+            
 
         } catch (error: any) {
-             // highlight-start
+             
             if (this.activeRuns.has(runId)) {
                  const finalStats = statsTracker.getFinalStats();
                  logger.onAgentEnd({ runId, status: 'failed', error: error.message, stats: finalStats });
             }
-            // highlight-end
+            
         } finally {
-            // highlight-start
+            
             this.activeRuns.delete(runId);
-            // highlight-end
+            
         }
     }
 }

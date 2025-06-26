@@ -90,10 +90,10 @@ export class AtCommandMenu {
         this.onSelect = onSelect;
         this.filterText = filter.trim().toLowerCase();
         
-        // highlight-start
+        
         // 强制禁用搜索模式，总是显示层级菜单
         this.isSearchMode = false;
-        // highlight-end
+        
 
         this.currentPath = [];
         this.activeIndex = 0;

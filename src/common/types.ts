@@ -19,7 +19,7 @@ export interface ModelConfig {
     isDefault?: boolean;
 }
 
-// highlight-start
+
 /**
  * 新增：代表一个已完成并被持久化的 Agent 运行记录中单个步骤的状态。
  * 注意：这不包含 runId 或 isCollapsed 等瞬态/UI状态。
@@ -67,7 +67,7 @@ export interface AgentRunChatMessage {
  * 代表一个完整的消息，可以是文本或 Agent 运行。
  */
 export type ChatMessage = TextChatMessage | AgentRunChatMessage;
-// highlight-end
+
 
 /**
  * Represents a full conversation, including its ID, title, and all messages.

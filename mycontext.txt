@@ -182,14 +182,14 @@ export interface AgentResult {
     status: 'completed' | 'failed' | 'cancelled';
     finalOutput?: any;
     error?: string;
-    // highlight-start
+    
     stats?: {
         duration: string;
         totalTokens: number;
         promptTokens: number;
         completionTokens: number;
     };
-    // highlight-end
+    
 }
 
 --------------------------------------------------------------------------------
@@ -1516,14 +1516,14 @@ export class ProjectDocumentationOrchestrator {
             const plan = JSON.parse(jsonString) as PlannerOutput;
 
             logger.onStepUpdate({ runId, taskId, type: 'output', data: { name: "项目规划", content: plan } });
-            // highlight-start
+            
             logger.onStepEnd({ runId, taskId, stepName, status: 'completed' });
-            // highlight-end
+            
             return plan;
         } catch (e: any) {
-            // highlight-start
+            
             logger.onStepEnd({ runId, taskId, stepName, status: 'failed', error: e.message });
-            // highlight-end
+            
             throw new Error(`解析规划输出失败: ${e.message}`);
         }
     }
@@ -1609,9 +1609,9 @@ export class ProjectDocumentationOrchestrator {
         }
 
         logger.onStepUpdate({ runId, taskId: filterTaskId, type: 'output', data: { name: "唯一模块", content: `已过滤，将分析 ${finalModules.length} 个模块。` } });
-        // highlight-start
+        
         logger.onStepEnd({ runId, taskId: filterTaskId, stepName: filterStepName, status: 'completed' });
-        // highlight-end
+        
 
         const analysisStepName = "分析: 并行处理模块";
         logger.info(`[DEBUG] Attempting to start parent step: ${analysisStepName}`);
@@ -1701,9 +1701,9 @@ export class ProjectDocumentationOrchestrator {
             logger.onStepEnd({ runId, taskId, stepName, status: 'completed' });
             return { ...module, content: docContent };
         } catch (e: any) {
-            // highlight-start
+            
             logger.onStepEnd({ runId, taskId, stepName, status: 'failed', error: e.message });
-            // highlight-end
+            
             throw e; // Re-throw to be caught by the main run() method's try-catch
         }
     }
@@ -1836,7 +1836,7 @@ export const languageFilters: Record<string, LanguageFilter> = {
         include: ['.go'],
         exclude: ['_test.go'],
     },
-    // highlight-start
+    
     java: {
         include: ['.java'],
         // Java testing is typically directory-based (src/test/java),
@@ -1854,13 +1854,13 @@ export const languageFilters: Record<string, LanguageFilter> = {
         include: ['.cpp', '.hpp', '.cc', '.cxx', '.h'],
         exclude: [],
     },
-    // highlight-end
+    
     unknown: { // Default rule when language isn't identified
         include: [
             '.ts', '.tsx', '.js', '.jsx', '.py', '.go', 
-            // highlight-start
+            
             '.java', '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', 
-            // highlight-end
+            
             '.cs', '.rb', '.php', '.rs'
         ],
         exclude: ['.spec.ts', '.test.ts', '.spec.js', '.test.js', '_test.go'],
@@ -2169,30 +2169,30 @@ export class AgentService {
         const runId = uuidv4();
 
         try {
-            // highlight-start
+            
             this.activeRuns.set(runId, { logger });
-            // highlight-end
+            
             const executor = new ToolChainExecutor(context);
             const result = await executor.run(runId, yamlContent, userInputs);
             
-            // highlight-start
+            
             if (this.activeRuns.has(runId)) {
                 const finalStats = statsTracker.getFinalStats();
                 logger.onAgentEnd({ runId, status: 'completed', finalOutput: result, stats: finalStats });
             }
-            // highlight-end
+            
 
         } catch (error: any) {
-             // highlight-start
+             
             if (this.activeRuns.has(runId)) {
                  const finalStats = statsTracker.getFinalStats();
                  logger.onAgentEnd({ runId, status: 'failed', error: error.message, stats: finalStats });
             }
-            // highlight-end
+            
         } finally {
-            // highlight-start
+            
             this.activeRuns.delete(runId);
-            // highlight-end
+            
         }
     }
 }
@@ -2217,7 +2217,7 @@ export interface CreateModelOptions {
     streaming?: boolean;
 }
 
-// highlight-start
+
 /**
  * 定义一个可以放入队列的LLM任务。
  * 它包含一个返回Promise的函数，以及用于解决该Promise的resolver和rejecter。
@@ -2227,7 +2227,7 @@ type LlmTask<T> = {
     resolve: (value: T) => void;
     reject: (reason?: any) => void;
 };
-// highlight-end
+
 
 async function getGoogleApiKey(): Promise<string | undefined> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -2255,7 +2255,7 @@ async function getGoogleApiKey(): Promise<string | undefined> {
 export class LLMService {
     private _abortController: AbortController | null = null;
 
-    // highlight-start
+    
     // --- 新的并行速率限制器属性 ---
     private requestQueue: LlmTask<any>[] = [];
     private activeRequests = 0;
@@ -2268,7 +2268,7 @@ export class LLMService {
     // 最大并发请求数，防止过多请求同时进行
     private readonly concurrencyLimit = 10; 
     // --- 结束新的属性 ---
-    // highlight-end
+    
 
     constructor() {}
 
@@ -2296,7 +2296,7 @@ export class LLMService {
         });
     }
 
-    // highlight-start
+    
     /**
      * 将一个非流式的LLM调用任务加入队列，并由并行的速率限制调度器执行。
      * @param task 一个返回LLM调用Promise的函数，例如 `() => llm.invoke(messages)`
@@ -2354,7 +2354,7 @@ export class LLMService {
                 
         }, delay);
     }
-    // highlight-end
+    
 
     public async getCompletion(
         messages: ChatMessage[],
@@ -2961,10 +2961,10 @@ export class GetAllFilesContentTool extends StructuredTool {
             const absolutePath = path.join(workspaceRoot, relativePath);
             const dirUri = vscode.Uri.file(absolutePath);
 
-            // highlight-start
+            
             // 使用新的过滤辅助函数
             const fileUris = await getFilteredFilePathsRecursive(dirUri, language);
-            // highlight-end
+            
 
             if (fileUris.length === 0) {
                 return `在目录 "${relativePath}" 及其子目录中没有找到与语言 '${language}' 相关的任何文件。`;
@@ -3130,9 +3130,9 @@ class FileSelectorLLMTool extends StructuredTool {
     }
 
     name = "file_selector_llm_tool";
-    // highlight-start
+    
     description = "分析文件摘要列表和任务描述，以智能地选择最相关的文件。输出是一个包含文件路径的数组。";
-    // highlight-end
+    
     
     // 该工具的输入 schema
     schema = z.object({
@@ -4099,10 +4099,10 @@ export class AtCommandMenu {
         this.onSelect = onSelect;
         this.filterText = filter.trim().toLowerCase();
         
-        // highlight-start
+        
         // 强制禁用搜索模式，总是显示层级菜单
         this.isSearchMode = false;
-        // highlight-end
+        
 
         this.currentPath = [];
         this.activeIndex = 0;
@@ -6759,7 +6759,7 @@ export class ChatView {
 
             const event = mockEventStream[eventIndex++];
             
-            // highlight-start
+            
             // 更稳健的类型检查和派发，修复了原有逻辑错误
             if ('stepName' in event && 'status' in event && 'runId' in event) {
                 // 这是 StepExecution 事件
@@ -6774,7 +6774,7 @@ export class ChatView {
                 // 这是 StreamChunk 事件
                  agentBlock.appendStreamChunk(event as StreamChunk);
             }
-            // highlight-end
+            
 
         }, 3000); // 每 800 毫秒发送一个事件
     }

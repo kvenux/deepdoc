@@ -181,7 +181,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     vscode.window.showErrorMessage(data.payload);
                     break;
                 }
-            // highlight-start
+            
             case 'saveConversation': // 新增 case 处理来自 webview 的保存请求
                 {
                     const { id, messages } = data.payload;
@@ -197,7 +197,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 }
-            // highlight-end
+            
             case 'sendMessage':
                 {
                     // When a message is sent from either view, clear the input in the other.
@@ -208,10 +208,10 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     }
 
                     const { prompt, config } = data.payload;
-                    // highlight-start
+                    
                     const userMessage: TextChatMessage = { type: 'text', role: 'user', content: prompt };
                     let modelMessage: TextChatMessage = { type: 'text', role: 'assistant', content: '' };
-                    // highlight-end
+                    
 
                     // Ensure there is an active conversation
                     if (!this._activeConversation) {
@@ -221,11 +221,11 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                             messages: [],
                             createdAt: new Date().toISOString(),
                         };
-                         // highlight-start
+                         
                         // 首次消息，需要将整个新对话保存起来
                         this._activeConversation.messages.push(userMessage);
                         await this._stateManager.saveConversation(this._activeConversation);
-                         // highlight-end
+                         
                     } else {
                         this._activeConversation.messages.push(userMessage);
                     }
@@ -309,9 +309,9 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._activeConversation.messages.splice(messageIndex);
 
                     if (data.command === 'editMessage') {
-                        // highlight-start
+                        
                         const userMessage: TextChatMessage = { type: 'text', role: 'user', content: content };
-                        // highlight-end
+                        
                         this._activeConversation.messages.push(userMessage);
                     }
 
@@ -324,9 +324,9 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                         break;
                     }
 
-                    // highlight-start
+                    
                     let modelMessage: TextChatMessage = { type: 'text', role: 'assistant', content: '' };
-                    // highlight-end
+                    
                     let fullReply = '';
 
                     // Post a message to clear the old response and show a loading state
@@ -488,7 +488,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     logger.onAgentEnd({ runId: 'init-fail', status: 'failed', error: errorMsg });
                     return;
                 }
-                // highlight-start
+                
                 // 如果当前没有激活的对话，则创建一个新的
                 if (!this._activeConversation) {
                     const agentPlan = this._agentService.getAgentPlan(agentId);
@@ -504,7 +504,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
                     this._view?.webview.postMessage({ command: 'setActiveConversation', payload: this._activeConversation });
                 }
-                // highlight-end
+                
 
                 const logger = new WebviewLogger(mainWebview);
 

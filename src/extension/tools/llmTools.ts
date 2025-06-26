@@ -35,9 +35,9 @@ class FileSelectorLLMTool extends StructuredTool {
     }
 
     name = "file_selector_llm_tool";
-    // highlight-start
+    
     description = "分析文件摘要列表和任务描述，以智能地选择最相关的文件。输出是一个包含文件路径的数组。";
-    // highlight-end
+    
     
     // 该工具的输入 schema
     schema = z.object({

@@ -54,7 +54,7 @@ export const languageFilters: Record<string, LanguageFilter> = {
         include: ['.go'],
         exclude: ['_test.go'],
     },
-    // highlight-start
+    
     java: {
         include: ['.java'],
         // Java testing is typically directory-based (src/test/java),
@@ -72,13 +72,13 @@ export const languageFilters: Record<string, LanguageFilter> = {
         include: ['.cpp', '.hpp', '.cc', '.cxx', '.h'],
         exclude: [],
     },
-    // highlight-end
+    
     unknown: { // Default rule when language isn't identified
         include: [
             '.ts', '.tsx', '.js', '.jsx', '.py', '.go', 
-            // highlight-start
+            
             '.java', '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', 
-            // highlight-end
+            
             '.cs', '.rb', '.php', '.rs'
         ],
         exclude: ['.spec.ts', '.test.ts', '.spec.js', '.test.js', '_test.go'],

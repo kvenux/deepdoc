@@ -82,7 +82,7 @@ export class AgentRunBlock {
             return null;
         }
 
-        // highlight-start
+        
         // 将 Map 转换为普通对象以便 JSON 序列化
         const serializableExecutionState: Record<string, SavedStepState> = {};
         this.executionState.forEach((state, key) => {
@@ -96,7 +96,7 @@ export class AgentRunBlock {
                 error: state.error,
             };
         });
-        // highlight-end
+        
 
         return {
             plan: this.plan,

@@ -1,9 +1,9 @@
 // src/extension/services/LLMService.ts (修改后完整文件)
 
 import vscode from 'vscode';
-// highlight-start
+
 import { ChatMessage, ModelConfig, TextChatMessage } from '../../common/types';
-// highlight-end
+
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, AIMessage, BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -162,12 +162,12 @@ export class LLMService {
 
         try {
             llm = await this.createModel({ modelConfig: config, streaming: true, temperature: 0.7 });
-            // highlight-start
+            
             // Filter for text messages only and then map them
             const langchainMessages: BaseMessage[] = messages
                 .filter((msg): msg is TextChatMessage => msg.type === 'text')
                 .map(msg => msg.role === 'user' ? new HumanMessage(msg.content) : new AIMessage(msg.content));
-            // highlight-end
+            
             const stream = await llm.stream(langchainMessages, { signal });
             for await (const chunk of stream) {
                 if (chunk.content) {

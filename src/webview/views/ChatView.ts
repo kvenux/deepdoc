@@ -208,7 +208,7 @@ export class ChatView {
                         case 'agent:end':
                             this.activeAgentRunBlock.setAgentResult(payload as AgentResult);
                             
-                            // highlight-start
+                            
                             // 如果成功，将运行记录保存到对话中
                             if (payload.status === 'completed') {
                                 const runRecord = this.activeAgentRunBlock.getSerializableState();
@@ -227,7 +227,7 @@ export class ChatView {
                                     this.saveCurrentConversation();
                                 }
                             }
-                             // highlight-end
+                             
 
                             this.isAgentRunning = false;
                             this.activeAgentRunId = null;
@@ -335,7 +335,7 @@ export class ChatView {
 
     private handleCopy(index: number) {
         const message = this.messages[index];
-        // highlight-start
+        
         if (message.type === 'text') {
             navigator.clipboard.writeText(message.content);
             vscode.postMessage({ command: 'info', payload: 'Copied to clipboard!' });
@@ -345,7 +345,7 @@ export class ChatView {
             navigator.clipboard.writeText(summary);
              vscode.postMessage({ command: 'info', payload: 'Copied agent result summary to clipboard!' });
         }
-        // highlight-end
+        
     }
 
     private handleRegenerate(index: number) {
@@ -354,13 +354,13 @@ export class ChatView {
 
     private handleEnterEditMode(index: number) {
         if (this.editingMessageIndex === index) return;
-        // highlight-start
+        
         const message = this.messages[index];
         if (message.type !== 'text') {
              vscode.postMessage({ command: 'info', payload: 'Agent runs cannot be edited.' });
             return; // 不允许编辑 Agent 运行
         }
-        // highlight-end
+        
 
         if (this.editingMessageIndex !== null) {
             this.handleCancelEdit();
@@ -418,9 +418,9 @@ export class ChatView {
 
     private beginStream() {
         this.isStreaming = true;
-        // highlight-start
+        
         const assistantMessage: TextChatMessage = { type: 'text', role: 'assistant', content: '' };
-        // highlight-end
+        
         this.messages.push(assistantMessage);
         this.renderMessages();
         this.updateSendButtonState();
@@ -428,12 +428,12 @@ export class ChatView {
 
     private appendStreamData(chunk: string) {
         const lastMessage = this.messages[this.messages.length - 1];
-        // highlight-start
+        
         if (lastMessage?.type === 'text' && lastMessage?.role === 'assistant') {
             lastMessage.content += chunk;
             this.renderMessages();
         }
-        // highlight-end
+        
     }
 
 
@@ -495,7 +495,7 @@ export class ChatView {
     private renderMessages() {
         this.messageContainer.innerHTML = '';
         this.messages.forEach((msg, index) => {
-            // highlight-start
+            
             if (msg.type === 'agent_run') {
                 // 渲染一个 AgentRunBlock
                 const agentContainer = document.createElement('div');
@@ -510,7 +510,7 @@ export class ChatView {
                 }
                 this.messageContainer.appendChild(element);
             }
-            // highlight-end
+            
         });
         
         // 如果当前有正在运行但尚未保存到 messages 数组的 Agent，它的容器也需要被处理
@@ -848,7 +848,7 @@ export class ChatView {
 
             const event = mockEventStream[eventIndex++];
             
-            // highlight-start
+            
             // 更稳健的类型检查和派发，修复了原有逻辑错误
             if ('stepName' in event && 'status' in event && 'runId' in event) {
                 // 这是 StepExecution 事件
@@ -863,7 +863,7 @@ export class ChatView {
                 // 这是 StreamChunk 事件
                  agentBlock.appendStreamChunk(event as StreamChunk);
             }
-            // highlight-end
+            
 
         }, 3000); // 每 800 毫秒发送一个事件
     }
