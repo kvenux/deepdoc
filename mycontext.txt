@@ -1,3 +1,20 @@
+ 你是一位世界顶级的软件架构师和资深技术文档专家（Principal Software Architect / Staff Engineer）。你的任务是基于一个软件模块的完整代码，进行一次彻底的架构评审，并生成一份极其详尽、深入、图文并茂的专业级中文技术设计文档。
+
+    你的分析不应停留在代码表面，而是要洞察其背后的设计思想、架构模式、权衡取舍和潜在风险。你必须严格按照用户要求的结构和格式进行输出，并熟练运用 PlantUML 生成多种 UML 图来可视化你的分析。
+
+    核心要求：
+    - 篇幅控制：不得超出10000字
+    - 深度分析: 不仅是描述，更是分析和解读。
+    - 图文并茂: 必须使用 PlantUML 生成UML图。
+    - 代码溯源: 所有分析必须有明确的代码依据。
+    - 专业严谨: 语言专业，结构清晰，逻辑严密。
+    - 全程中文: 所有输出内容必须是中文。
+
+  human: |
+    请为我下面的软件模块生成一份软件实现设计文档。所有内容请使用中文撰写。
+
+    模块输入信息：
+
 ================================================================================
 项目结构 (基于过滤规则):
 src
@@ -49,7 +66,10 @@ src
     └── vscode.ts
 ================================================================================
 
+ 模块内所有文件的代码内容：
+
 --- file_path: common/types.ts ---
+// --- file_path: common/types.ts ---
 /**
  * Defines the structure for messages posted between the Webview and the Extension Host.
  */
@@ -70,14 +90,55 @@ export interface ModelConfig {
     isDefault?: boolean;
 }
 
+
 /**
- * Represents a single message in a conversation, from either the user or the model (assistant).
+ * 新增：代表一个已完成并被持久化的 Agent 运行记录中单个步骤的状态。
+ * 注意：这不包含 runId 或 isCollapsed 等瞬态/UI状态。
  */
-export interface ChatMessage {
+export interface SavedStepState {
+    stepName: string;
+    taskId?: string;
+    status: 'running' | 'completed' | 'failed' | 'waiting';
+    logs: { type: 'input' | 'output' | 'llm-request', data: any, metadata?: Record<string, any> }[];
+    streamedContent: string;
+    error?: string;
+}
+
+
+/**
+ * 新增：代表一个已完成并被持久化的 Agent 运行记录。
+ */
+export interface AgentRunRecord {
+    plan: AgentPlan;
+    // 注意：executionState 的 key 是 stepKey (taskId 或 stepName)
+    executionState: Record<string, SavedStepState>;
+    result: AgentResult;
+}
+
+/**
+ * 代表一个标准的文本消息。
+ */
+export interface TextChatMessage {
+    type: 'text';
     role: 'user' | 'assistant';
     content: string;
-    // Additional metadata can be added here, e.g., timestamps, message ID, etc.
 }
+
+/**
+
+ * 代表一个已完成的 Agent 运行消息。
+ */
+export interface AgentRunChatMessage {
+    type: 'agent_run';
+    role: 'assistant'; // Agent 运行总是被视为 'assistant' 的一部分
+    run: AgentRunRecord;
+}
+
+/**
+ * 代表一个完整的消息，可以是文本或 Agent 运行。
+ */
+export type ChatMessage = TextChatMessage | AgentRunChatMessage;
+
 
 /**
  * Represents a full conversation, including its ID, title, and all messages.
@@ -102,7 +163,7 @@ export interface Prompt {
 
 /**
  * =======================================================================
- * Agent Execution Event & Plan Types (新增)
+ * Agent Execution Event & Plan Types
  * =======================================================================
  */
 
@@ -182,14 +243,12 @@ export interface AgentResult {
     status: 'completed' | 'failed' | 'cancelled';
     finalOutput?: any;
     error?: string;
-    
     stats?: {
         duration: string;
         totalTokens: number;
         promptTokens: number;
         completionTokens: number;
     };
-    
 }
 
 --------------------------------------------------------------------------------
@@ -198,7 +257,7 @@ export interface AgentResult {
 // src/extension/CodeWikiViewProvider.ts (修改后完整文件)
 
 import * as vscode from 'vscode';
-import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig, AgentPlan } from '../common/types'; // AgentPlan 可能也需要
+import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig, AgentPlan, TextChatMessage } from '../common/types';
 import { StateManager } from './StateManager';
 import { LLMService } from './services/LLMService';
 import { AgentService } from './services/AgentService';
@@ -378,6 +437,23 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     vscode.window.showErrorMessage(data.payload);
                     break;
                 }
+            
+            case 'saveConversation': // 新增 case 处理来自 webview 的保存请求
+                {
+                    const { id, messages } = data.payload;
+                    const allConversations = await this._stateManager.getConversations();
+                    const conversationToUpdate = allConversations.find(c => c.id === id);
+                    if (conversationToUpdate) {
+                        conversationToUpdate.messages = messages;
+                        await this._stateManager.saveConversation(conversationToUpdate);
+                        // 更新内存中的活动对话
+                        if (this._activeConversation && this._activeConversation.id === id) {
+                            this._activeConversation = conversationToUpdate;
+                        }
+                    }
+                    break;
+                }
+            
             case 'sendMessage':
                 {
                     // When a message is sent from either view, clear the input in the other.
@@ -388,8 +464,10 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     }
 
                     const { prompt, config } = data.payload;
-                    const userMessage: ChatMessage = { role: 'user', content: prompt };
-                    let modelMessage: ChatMessage = { role: 'assistant', content: '' };
+                    
+                    const userMessage: TextChatMessage = { type: 'text', role: 'user', content: prompt };
+                    let modelMessage: TextChatMessage = { type: 'text', role: 'assistant', content: '' };
+                    
 
                     // Ensure there is an active conversation
                     if (!this._activeConversation) {
@@ -399,9 +477,15 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                             messages: [],
                             createdAt: new Date().toISOString(),
                         };
+                         
+                        // 首次消息，需要将整个新对话保存起来
+                        this._activeConversation.messages.push(userMessage);
+                        await this._stateManager.saveConversation(this._activeConversation);
+                         
+                    } else {
+                        this._activeConversation.messages.push(userMessage);
                     }
 
-                    this._activeConversation.messages.push(userMessage);
 
                     // Tell the webviews to enter streaming state
                     this._view?.webview.postMessage({ command: 'startStreaming' });
@@ -412,7 +496,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._llmService.getCompletion(
                         this._activeConversation.messages,
                         config,
-                        (chunk: string) => { // <--- 添加类型 : string
+                        (chunk: string) => { 
                             fullReply += chunk;
                             this._view?.webview.postMessage({ command: 'streamData', payload: chunk });
                             this._focusEditorView?.webview.postMessage({ command: 'streamData', payload: chunk });
@@ -433,7 +517,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                             const conversations = await this._stateManager.getConversations();
                             this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
                         },
-                        (error: any) => { // <--- 添加类型 : any 或 : Error
+                        (error: any) => { 
                             const errorPayload = { error: error.message };
                             this._view?.webview.postMessage({ command: 'requestFailed', payload: errorPayload });
                             this._focusEditorView?.webview.postMessage({ command: 'requestFailed', payload: errorPayload });
@@ -481,7 +565,9 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._activeConversation.messages.splice(messageIndex);
 
                     if (data.command === 'editMessage') {
-                        const userMessage: ChatMessage = { role: 'user', content: content };
+                        
+                        const userMessage: TextChatMessage = { type: 'text', role: 'user', content: content };
+                        
                         this._activeConversation.messages.push(userMessage);
                     }
 
@@ -494,7 +580,9 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                         break;
                     }
 
-                    let modelMessage: ChatMessage = { role: 'assistant', content: '' };
+                    
+                    let modelMessage: TextChatMessage = { type: 'text', role: 'assistant', content: '' };
+                    
                     let fullReply = '';
 
                     // Post a message to clear the old response and show a loading state
@@ -505,7 +593,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     this._llmService.getCompletion(
                         this._activeConversation.messages,
                         defaultConfig,
-                        (chunk: string) => { // <--- 添加类型 : string
+                        (chunk: string) => { 
                             fullReply += chunk;
                             this._view?.webview.postMessage({ command: 'streamData', payload: chunk });
                         },
@@ -523,7 +611,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                             const conversations = await this._stateManager.getConversations();
                             this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
                         },
-                        (error: any) => { // <--- 添加类型 : any 或 : Error
+                        (error: any) => { 
                             this._view?.webview.postMessage({ command: 'requestFailed', payload: { error: error.message } });
                         }
                     );
@@ -546,6 +634,11 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     await this._stateManager.deleteConversation(id);
                     const conversations = await this._stateManager.getConversations();
                     this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
+                    // If the deleted conversation was active, clear the chat view
+                    if (this._activeConversation && this._activeConversation.id === id) {
+                        this._activeConversation = null;
+                        this._view?.webview.postMessage({ command: 'setActiveConversation', payload: null });
+                    }
                     break;
                 }
             case 'saveModelConfigs':
@@ -651,6 +744,23 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     logger.onAgentEnd({ runId: 'init-fail', status: 'failed', error: errorMsg });
                     return;
                 }
+                
+                // 如果当前没有激活的对话，则创建一个新的
+                if (!this._activeConversation) {
+                    const agentPlan = this._agentService.getAgentPlan(agentId);
+                    this._activeConversation = {
+                        id: uuidv4(),
+                        title: `Agent Run: ${agentPlan?.agentName || agentId}`,
+                        messages: [],
+                        createdAt: new Date().toISOString(),
+                    };
+                    await this._stateManager.saveConversation(this._activeConversation);
+                    // 通知 webview 更新历史记录
+                    const conversations = await this._stateManager.getConversations();
+                    this._view?.webview.postMessage({ command: 'updateHistory', payload: conversations });
+                    this._view?.webview.postMessage({ command: 'setActiveConversation', payload: this._activeConversation });
+                }
+                
 
                 const logger = new WebviewLogger(mainWebview);
 
@@ -2203,7 +2313,9 @@ export class AgentService {
 // src/extension/services/LLMService.ts (修改后完整文件)
 
 import vscode from 'vscode';
-import { ChatMessage, ModelConfig } from '../../common/types';
+
+import { ChatMessage, ModelConfig, TextChatMessage } from '../../common/types';
+
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, AIMessage, BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -2217,7 +2329,6 @@ export interface CreateModelOptions {
     streaming?: boolean;
 }
 
-
 /**
  * 定义一个可以放入队列的LLM任务。
  * 它包含一个返回Promise的函数，以及用于解决该Promise的resolver和rejecter。
@@ -2227,7 +2338,6 @@ type LlmTask<T> = {
     resolve: (value: T) => void;
     reject: (reason?: any) => void;
 };
-
 
 async function getGoogleApiKey(): Promise<string | undefined> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -2255,7 +2365,6 @@ async function getGoogleApiKey(): Promise<string | undefined> {
 export class LLMService {
     private _abortController: AbortController | null = null;
 
-    
     // --- 新的并行速率限制器属性 ---
     private requestQueue: LlmTask<any>[] = [];
     private activeRequests = 0;
@@ -2267,8 +2376,6 @@ export class LLMService {
     private readonly minInterval = 1100; 
     // 最大并发请求数，防止过多请求同时进行
     private readonly concurrencyLimit = 10; 
-    // --- 结束新的属性 ---
-    
 
     constructor() {}
 
@@ -2296,7 +2403,6 @@ export class LLMService {
         });
     }
 
-    
     /**
      * 将一个非流式的LLM调用任务加入队列，并由并行的速率限制调度器执行。
      * @param task 一个返回LLM调用Promise的函数，例如 `() => llm.invoke(messages)`
@@ -2354,7 +2460,6 @@ export class LLMService {
                 
         }, delay);
     }
-    
 
     public async getCompletion(
         messages: ChatMessage[],
@@ -2369,7 +2474,12 @@ export class LLMService {
 
         try {
             llm = await this.createModel({ modelConfig: config, streaming: true, temperature: 0.7 });
-            const langchainMessages: BaseMessage[] = messages.map(msg => msg.role === 'user' ? new HumanMessage(msg.content) : new AIMessage(msg.content));
+            
+            // Filter for text messages only and then map them
+            const langchainMessages: BaseMessage[] = messages
+                .filter((msg): msg is TextChatMessage => msg.type === 'text')
+                .map(msg => msg.role === 'user' ? new HumanMessage(msg.content) : new AIMessage(msg.content));
+            
             const stream = await llm.stream(langchainMessages, { signal });
             for await (const chunk of stream) {
                 if (chunk.content) {
@@ -3215,7 +3325,7 @@ export function createFileSelectorLLMTool(llm: BaseLanguageModel, llmService: LL
 --- file_path: webview/components/AgentRunBlock.ts ---
 // --- file_path: webview/components/AgentRunBlock.ts ---
 
-import { AgentPlan, AgentResult, StepExecution, StepUpdate, StreamChunk, AgentPlanStep, StepResult as CommonStepResultType } from '../../common/types'; // Renamed to avoid conflict
+import { AgentPlan, AgentResult, StepExecution, StepUpdate, StreamChunk, AgentPlanStep, StepResult as CommonStepResultType, AgentRunRecord, SavedStepState } from '../../common/types'; 
 import { marked } from 'marked';
 import { vscode } from '../vscode';
 
@@ -3228,10 +3338,15 @@ interface ExecutionStepState extends StepExecution {
     error?: string;
 }
 
+// 类型守卫，用于区分 AgentPlan 和 AgentRunRecord
+function isAgentRunRecord(data: AgentPlan | AgentRunRecord): data is AgentRunRecord {
+    return (data as AgentRunRecord).result !== undefined;
+}
+
 export class AgentRunBlock {
     private element: HTMLElement;
     private plan: AgentPlan;
-    private onExecute: (params: Record<string, any>) => void;
+    private onExecute: ((params: Record<string, any>) => void) | null = null; // 可为 null
     private status: AgentStatus = 'planning';
     private executionState: Map<string, ExecutionStepState> = new Map();
     private agentResult: AgentResult | null = null;
@@ -3242,16 +3357,77 @@ export class AgentRunBlock {
 
     constructor(
         container: HTMLElement,
-        plan: AgentPlan,
-        onExecute: (params: Record<string, any>) => void
+        // 构造函数现在可以接收一个 AgentPlan（用于新的运行）或一个 AgentRunRecord（用于从历史恢复）
+        planOrRecord: AgentPlan | AgentRunRecord,
+        onExecute?: (params: Record<string, any>) => void
     ) {
         this.element = container;
-        this.plan = plan;
-        this.onExecute = onExecute;
         this.element.className = 'agent-run-block';
+        
+        if (isAgentRunRecord(planOrRecord)) {
+            // 从历史记录中恢复
+            const record = planOrRecord;
+            this.plan = record.plan;
+            this.agentResult = record.result;
+            this.status = record.result.status as AgentStatus;
+            this.runId = record.result.runId;
+            // 将保存的普通对象转换回 Map
+            this.executionState = new Map(Object.entries(record.executionState).map(([key, value]) => {
+                // 确保每个步骤状态都符合 ExecutionStepState 接口
+                const fullStepState: ExecutionStepState = {
+                    runId: record.result.runId, // 从顶层结果中恢复 runId
+                    stepName: value.stepName,
+                    taskId: value.taskId,
+                    status: value.status,
+                    logs: value.logs || [],
+                    isCollapsed: true, // 从历史记录加载时默认折叠
+                    streamedContent: value.streamedContent || '',
+                    error: value.error,
+                };
+                return [key, fullStepState];
+            }));
+            this.onExecute = null; // 历史记录是只读的
+        } else {
+            // 开始一个新的运行
+            this.plan = planOrRecord;
+            this.onExecute = onExecute || null;
+            this.status = 'planning';
+        }
 
         this.render(); // Initial render
         this.setupEventListeners();
+    }
+    
+    /**
+     * 新增：获取组件当前的可序列化状态，用于保存到历史记录。
+     */
+    public getSerializableState(): AgentRunRecord | null {
+        if (!this.agentResult) {
+            console.error("Cannot serialize state: Agent has not completed.");
+            return null;
+        }
+
+        
+        // 将 Map 转换为普通对象以便 JSON 序列化
+        const serializableExecutionState: Record<string, SavedStepState> = {};
+        this.executionState.forEach((state, key) => {
+            // 从 state 中只选择要保存的字段
+            serializableExecutionState[key] = {
+                stepName: state.stepName,
+                taskId: state.taskId,
+                status: state.status,
+                logs: state.logs,
+                streamedContent: state.streamedContent,
+                error: state.error,
+            };
+        });
+        
+
+        return {
+            plan: this.plan,
+            executionState: serializableExecutionState,
+            result: this.agentResult
+        };
     }
 
     // Called by ChatView when agent:stepStart or agent:stepEnd is received
@@ -3393,7 +3569,8 @@ export class AgentRunBlock {
     }
 
     private render() {
-        const isPlanningReadOnly = this.status !== 'planning' && this.status !== 'validating';
+        // 如果 onExecute 为 null，说明是从历史记录中恢复的，始终为只读状态
+        const isPlanningReadOnly = (this.status !== 'planning' && this.status !== 'validating') || this.onExecute === null;
 
         const planningViewContainer = this.element.querySelector('.planning-view-container');
         if (!planningViewContainer) {
@@ -3448,17 +3625,19 @@ export class AgentRunBlock {
              if (!this.executionStepsOuterContainer) return; // Should not happen
         }
 
+        // 清理旧的DOM元素，并根据当前状态重新渲染
+        this.executionStepsOuterContainer.innerHTML = '';
+        this.stepElementsCache.clear();
 
         this.plan.steps.forEach((planStep, index) => {
+            // 从 state 中找到所有与 planStep 匹配的顶级执行步骤
+            // 这很重要，因为从历史恢复时，executionState 是预先填充好的
             const executionStepState = Array.from(this.executionState.values())
-                .find(s => s.stepName === planStep.name && !s.stepName.startsWith("分析模块:")); // Find top-level steps
+                .find(s => s.stepName === planStep.name && !s.stepName.startsWith("分析模块:"));
 
             if (!executionStepState) {
-                const existingEl = this.stepElementsCache.get(planStep.name); // Key by planStep.name for top-level
-                if (existingEl) {
-                    existingEl.remove();
-                    this.stepElementsCache.delete(planStep.name);
-                }
+                // 如果是实时执行，可能会暂时没有状态，直接跳过
+                // 如果是从历史恢复，这里不应该发生
                 return;
             }
 
@@ -3467,7 +3646,8 @@ export class AgentRunBlock {
 
             if (!stepElement) {
                 let animationClass = '';
-                if (!this.animatedStepIds.has(stepMapKey)) {
+                 // 从历史恢复时，不应用动画
+                if (!isAgentRunRecord(this.plan) && !this.animatedStepIds.has(stepMapKey)) {
                     animationClass = 'needs-animation';
                     this.animatedStepIds.add(stepMapKey);
                 }
@@ -3485,6 +3665,7 @@ export class AgentRunBlock {
                     this.stepElementsCache.set(stepMapKey, stepElement);
                 }
             } else {
+                 // 理论上，因为我们清理了 outer container，这个分支在当前逻辑下不会被走到
                 this.updateStepElement(stepElement, executionStepState, planStep, planStep.name === "分析: 并行处理模块", index);
             }
         });
@@ -3682,6 +3863,7 @@ export class AgentRunBlock {
     private getExecutionStepHtml(stepState: ExecutionStepState, planStep: { name: string }, index: number, animationClass: string): string {
         const state = stepState.status;
         const taskIdAttr = stepState.taskId ? `data-task-id="${stepState.taskId}"` : '';
+        const contentWrapperStyle = stepState.isCollapsed ? 'max-height: 0px; padding: 0px 15px;' : 'max-height: 2000px; padding: 10px 15px;';
         return `
             <div class="execution-step ${state} ${animationClass}" data-step-name="${planStep.name}" ${taskIdAttr}>
                 <div class="step-header">
@@ -3689,7 +3871,7 @@ export class AgentRunBlock {
                     <span class="step-name"><b>Step ${index + 1}:</b> ${planStep.name}</span>
                     <span class="step-status">${state}</span>
                 </div>
-                <div class="step-content-wrapper">
+                <div class="step-content-wrapper" style="${contentWrapperStyle}">
                     ${this.renderStepInternals(stepState)}
                 </div>
             </div>
@@ -3701,6 +3883,7 @@ export class AgentRunBlock {
         const taskIdAttr = parentStepState.taskId ? `data-task-id="${parentStepState.taskId}"` : '';
         // Initial sub-steps rendering (likely empty or placeholder if just started)
         const subStepsHtml = this.renderSubStepsContainerInitial(parentStepState);
+        const contentWrapperStyle = parentStepState.isCollapsed ? 'max-height: 0px; padding: 0px 15px;' : 'max-height: 5000px; padding: 10px 15px;';
 
         return `
             <div class="execution-step ${state} ${animationClass}" data-step-name="${planStep.name}" ${taskIdAttr}>
@@ -3709,7 +3892,7 @@ export class AgentRunBlock {
                     <span class="step-name"><b>Step ${index + 1}:</b> ${planStep.name}</span>
                     <span class="step-status">${state}</span>
                 </div>
-                <div class="step-content-wrapper">
+                <div class="step-content-wrapper" style="${contentWrapperStyle}">
                      <div class="sub-steps-container">
                         ${subStepsHtml}
                     </div>
@@ -3738,13 +3921,14 @@ export class AgentRunBlock {
 
 
     private getSubStepHtml(subStep: ExecutionStepState, animationClass: string): string {
+        const contentWrapperStyle = subStep.isCollapsed ? 'max-height: 0px; padding: 0px 10px;' : 'max-height: 2000px; padding: 10px;';
         return `
             <div class="sub-step ${subStep.status} ${animationClass}" data-task-id="${subStep.taskId}">
                  <div class="sub-step-header">
                     <span class="status-icon">${this.getIconForStatus(subStep.status)}</span>
                     <span class="step-name">${subStep.stepName}</span>
                 </div>
-                <div class="sub-step-content-wrapper">
+                <div class="sub-step-content-wrapper" style="${contentWrapperStyle}">
                     ${this.renderStepInternals(subStep)}
                 </div>
             </div>
@@ -3757,6 +3941,10 @@ export class AgentRunBlock {
         const badgeText = this.status === 'planning' || this.status === 'validating' ? '待执行' : (this.status === 'executing' ? '运行中' : '规划已锁定');
 
         const renderAgentActions = (status: AgentStatus) => {
+            // 如果 onExecute 为 null (从历史恢复)，则不显示任何操作按钮
+            if (this.onExecute === null) {
+                return '';
+            }
             if (status === 'executing') {
                 return `<button class="stop-btn secondary"><i class="codicon codicon-stop-circle"></i> 停止执行</button>`;
             }
@@ -3854,7 +4042,8 @@ export class AgentRunBlock {
         let animationClass = '';
 
         if (!resultElement) {
-            if (!this.animatedStepIds.has(resultKey)) {
+            // 从历史恢复时，不应用动画
+            if (!isAgentRunRecord(this.plan) && !this.animatedStepIds.has(resultKey)) {
                 animationClass = 'needs-animation';
                 this.animatedStepIds.add(resultKey);
             }
@@ -3938,6 +4127,7 @@ export class AgentRunBlock {
                 const stopBtn = target.closest('.stop-btn');
 
                 if (executeBtn) {
+                    if (!this.onExecute) return; // 从历史恢复时，onExecute 为 null
                     const params: Record<string, any> = {};
                     let allValid = true;
                     this.plan.parameters.forEach(p => {
@@ -5998,7 +6188,7 @@ import { MessageBlock } from "../components/MessageBlock";
 import { AtCommandMenu } from "../components/AtCommandMenu";
 // 在文件顶部添加新的 import
 import { AgentRunBlock } from "../components/AgentRunBlock";
-import { Conversation, ChatMessage, ModelConfig, Prompt, AgentPlan, StepExecution, StepUpdate, StepResult, StreamChunk, AgentResult } from "../../common/types"; // 确保 Agent 相关类型被导入
+import { Conversation, ChatMessage, ModelConfig, Prompt, AgentPlan, StepExecution, StepUpdate, StepResult, StreamChunk, AgentResult, TextChatMessage, AgentRunChatMessage, AgentRunRecord } from "../../common/types";
 
 interface CommandLeaf {
     id: string;
@@ -6008,6 +6198,7 @@ interface CommandLeaf {
 }
 
 export class ChatView {
+    private activeConversationId: string | null = null;
     private messages: ChatMessage[] = [];
     private modelConfigs: ModelConfig[] = [];
     private prompts: Prompt[] = [];
@@ -6046,7 +6237,9 @@ export class ChatView {
 
     public setConversations(conversations: Conversation[]) {
         if (conversations.length > 0) {
-            this.messages = conversations[conversations.length - 1].messages;
+            const activeConversation = conversations[conversations.length - 1];
+            this.messages = activeConversation.messages;
+            this.activeConversationId = activeConversation.id;
         } else {
             this.messages = [];
         }
@@ -6196,17 +6389,36 @@ export class ChatView {
                             this.activeAgentRunBlock.appendStreamChunk(payload);
                             return;
                         case 'agent:end':
-                           // 首先，更新卡片本身的UI，显示最终结果
-                            this.activeAgentRunBlock.setAgentResult(payload);
+                            this.activeAgentRunBlock.setAgentResult(payload as AgentResult);
                             
-                            // 然后，重置ChatView自身的状态
+                            
+                            // 如果成功，将运行记录保存到对话中
+                            if (payload.status === 'completed') {
+                                const runRecord = this.activeAgentRunBlock.getSerializableState();
+                                if (runRecord) {
+                                    const agentMessage: AgentRunChatMessage = {
+                                        type: 'agent_run',
+                                        role: 'assistant',
+                                        run: runRecord
+                                    };
+                                    // AgentRunBlock 已经渲染在页面上，我们只需要将其替换为
+                                    // 消息数组中的一个正式条目，以便保存。
+                                    // 我们不立即重渲染，而是将状态更新到 this.messages
+                                    // 并保存整个对话。
+                                    // 当对话被重新加载时，这个 agent_run 消息将被正确渲染。
+                                    this.messages.push(agentMessage);
+                                    this.saveCurrentConversation();
+                                }
+                            }
+                             
+
                             this.isAgentRunning = false;
                             this.activeAgentRunId = null;
                             this.activeAgentRunBlock = null; 
                             this.activeAgentRunContainer = null;
                             
-                            // 最后，更新主聊天窗口的发送/停止按钮
                             this.updateSendButtonState();
+
                             return;
                     }
                 }
@@ -6244,6 +6456,24 @@ export class ChatView {
         });
     }
 
+    private saveCurrentConversation() {
+        if (this.activeConversationId) {
+            // 这是向后端发送更新后对话的请求
+            // 后端 StateManager.saveConversation 会处理它
+            vscode.postMessage({
+                command: 'saveConversation',
+                payload: {
+                    id: this.activeConversationId,
+                    messages: this.messages,
+                    // 其他字段（如 title, createdAt）将由后端保留
+                }
+            });
+        } else {
+             // 如果是新对话，第一个Agent运行也可能触发保存
+            console.warn("Attempted to save conversation, but no activeConversationId is set.");
+        }
+    }
+
     private handleSendOrSave() {
         if (this.isAgentRunning && this.activeAgentRunId) {
             vscode.postMessage({ command: 'agent:cancel', payload: { runId: this.activeAgentRunId } });
@@ -6278,7 +6508,7 @@ export class ChatView {
             return;
         }
 
-        const message: ChatMessage = { role: 'user', content: prompt };
+        const message: TextChatMessage = { type: 'text', role: 'user', content: prompt };
         this.messages.push(message);
         this.renderMessages();
 
@@ -6287,8 +6517,18 @@ export class ChatView {
     }
 
     private handleCopy(index: number) {
-        navigator.clipboard.writeText(this.messages[index].content);
-        vscode.postMessage({ command: 'info', payload: 'Copied to clipboard!' });
+        const message = this.messages[index];
+        
+        if (message.type === 'text') {
+            navigator.clipboard.writeText(message.content);
+            vscode.postMessage({ command: 'info', payload: 'Copied to clipboard!' });
+        } else {
+            // 对于 Agent 运行，可以复制其最终结果或摘要
+            const summary = JSON.stringify(message.run.result, null, 2);
+            navigator.clipboard.writeText(summary);
+             vscode.postMessage({ command: 'info', payload: 'Copied agent result summary to clipboard!' });
+        }
+        
     }
 
     private handleRegenerate(index: number) {
@@ -6297,13 +6537,20 @@ export class ChatView {
 
     private handleEnterEditMode(index: number) {
         if (this.editingMessageIndex === index) return;
+        
+        const message = this.messages[index];
+        if (message.type !== 'text') {
+             vscode.postMessage({ command: 'info', payload: 'Agent runs cannot be edited.' });
+            return; // 不允许编辑 Agent 运行
+        }
+        
 
         if (this.editingMessageIndex !== null) {
             this.handleCancelEdit();
         }
 
         this.editingMessageIndex = index;
-        this.originalMessageContent = this.messages[index].content;
+        this.originalMessageContent = message.content;
 
         if (this.inputBox) {
             this.inputBox.innerText = this.originalMessageContent;
@@ -6314,11 +6561,13 @@ export class ChatView {
         this.updateSendButtonState();
     }
 
+
     private handleCancelEdit() {
         if (this.editingMessageIndex === null) return;
 
-        if (this.originalMessageContent !== null) {
-            this.messages[this.editingMessageIndex].content = this.originalMessageContent;
+        const message = this.messages[this.editingMessageIndex];
+        if (this.originalMessageContent !== null && message.type === 'text') {
+            message.content = this.originalMessageContent;
         }
 
         this.editingMessageIndex = null;
@@ -6335,8 +6584,9 @@ export class ChatView {
     private handleSaveEdit(index: number) {
         if (!this.inputBox) return;
         const newContent = this.inputBox.innerText.trim();
-        if (newContent) {
-            this.messages[index].content = newContent;
+        const message = this.messages[index];
+        if (newContent && message.type === 'text') {
+            message.content = newContent;
             vscode.postMessage({ command: 'editMessage', payload: { messageIndex: index, content: newContent } });
         }
 
@@ -6351,7 +6601,9 @@ export class ChatView {
 
     private beginStream() {
         this.isStreaming = true;
-        const assistantMessage: ChatMessage = { role: 'assistant', content: '' };
+        
+        const assistantMessage: TextChatMessage = { type: 'text', role: 'assistant', content: '' };
+        
         this.messages.push(assistantMessage);
         this.renderMessages();
         this.updateSendButtonState();
@@ -6359,16 +6611,19 @@ export class ChatView {
 
     private appendStreamData(chunk: string) {
         const lastMessage = this.messages[this.messages.length - 1];
-        if (lastMessage?.role === 'assistant') {
+        
+        if (lastMessage?.type === 'text' && lastMessage?.role === 'assistant') {
             lastMessage.content += chunk;
             this.renderMessages();
         }
+        
     }
+
 
     private finalizeStream(stopped = false) {
         this.isStreaming = false;
         const lastMessage = this.messages[this.messages.length - 1];
-        if (stopped && lastMessage?.role === 'assistant') {
+        if (stopped && lastMessage?.type === 'text' && lastMessage?.role === 'assistant') {
             lastMessage.content += ' (Stopped)';
         }
         this.renderMessages();
@@ -6382,7 +6637,7 @@ export class ChatView {
 
         this.renderMessages();
 
-        if (lastUserMessage) {
+        if (lastUserMessage && lastUserMessage.type === 'text') {
             if (this.inputBox) this.inputBox.innerText = lastUserMessage.content;
         }
 
@@ -6423,12 +6678,29 @@ export class ChatView {
     private renderMessages() {
         this.messageContainer.innerHTML = '';
         this.messages.forEach((msg, index) => {
-            const element = new MessageBlock(msg, index).render();
-            if (this.editingMessageIndex === index) {
-                element.classList.add('editing');
+            
+            if (msg.type === 'agent_run') {
+                // 渲染一个 AgentRunBlock
+                const agentContainer = document.createElement('div');
+                this.messageContainer.appendChild(agentContainer);
+                // 使用 AgentRunBlock 的构造函数从历史记录中恢复
+                new AgentRunBlock(agentContainer, msg.run);
+            } else {
+                // 渲染一个标准的 MessageBlock
+                const element = new MessageBlock(msg, index).render();
+                if (this.editingMessageIndex === index) {
+                    element.classList.add('editing');
+                }
+                this.messageContainer.appendChild(element);
             }
-            this.messageContainer.appendChild(element);
+            
         });
+        
+        // 如果当前有正在运行但尚未保存到 messages 数组的 Agent，它的容器也需要被处理
+        if (this.activeAgentRunContainer && !this.messageContainer.contains(this.activeAgentRunContainer)) {
+             this.messageContainer.appendChild(this.activeAgentRunContainer);
+        }
+
         this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
     }
 
@@ -7426,3 +7698,102 @@ export const vscode = acquireVsCodeApi();
 
 
 --------------------------------------------------------------------------------
+软件实现设计文档 (输出结构要求):
+
+    摘要 (Executive Summary)
+    *   用一小段话高度概括该模块的核心价值、技术栈、关键设计和复杂度。
+
+     1.  模块介绍
+        *   描述该模块的用途。
+        *   说明模块在整个系统中的定位。
+        *   阐述模块的主要职责。
+
+    2.  功能描述 
+        *   详细列出并逐一描述该模块提供的各项核心功能，以 Markdown 列表形式输出。
+        *   针对每个核心功能，请明确指出实现该功能的关键代码片段所在的位置。
+
+    3.  模块的文件夹详细结构及功能介绍：
+        *   详细列出所有文件夹的树形结构
+        *   在每个树形结构上对文件的功能进行描述；对于文件夹要总结文件夹内部文件功能，对文件夹的功能进行描述
+        *   用合适的缩进或者项目符号来表示文件夹结构的层次
+
+    
+    4. 架构与设计图谱
+        *   说明： 在此部分，请使用 PlantUML 语法生成嵌入在 Markdown 代码块中的图表。
+        *   每个图要提供详细的文字补充说明，不能一句话带过
+        *   2.1 类图 (Class Diagram):
+            *   目的: 可视化模块中核心类、接口、枚举及其之间的关系（继承、实现、关联、聚合、组合）。
+            *   要求: 重点展示主要业务实体和逻辑控制类的属性与方法，这将是文档的核心图表。
+            *   补充描述：分析它们之间的关系如何体现了如“单一职责”、“开闭原则”等设计原则。
+        *   2.2 关键时序图 (Key Sequence Diagram):
+            *   目的: 描绘一个核心业务流程的动态交互过程。
+            *   要求: 选择一个最能体现模块价值的对外接口调用场景，详细展示其内部对象/函数间的调用顺序和消息传递。
+            *   补充描述：在分析中，解读出其交互模式（如同步/异步）、职责划分和性能考量。
+        *   2.3 核心逻辑流程图/活动图 (Core Logic Flowchart/Activity Diagram):
+            *   目的: 描绘一个复杂算法或业务逻辑的执行步骤。
+            *   要求: 选择模块内最复杂的一段逻辑（例如一个循环、条件判断交织的函数），用流程图或活动图清晰地表达出来。
+            *   补充描述：描述整体流程图，分析其健壮性和效率。
+        *   2.4 实体关系图 (ER Diagram - 如适用):
+            *   目的: 如果模块涉及数据持久化或定义了明确的数据模型，使用ER图展示实体及其关系。
+            *   要求: 仅在代码中存在明确的数据库实体、ORM 模型或类似结构时生成。如果不存在，请明确指出“根据代码分析，该模块不涉及持久化实体，故无ER图”。
+            *   补充描述：分析数据库的设计考量，包括分层描述等
+
+    5. 功能与用例分析 
+        *   以列表形式，详细分析模块提供的每项核心功能。
+        *   对每个功能，提供以下分析：
+            *   功能描述: 它解决了什么问题。
+            *   典型用例 (Use Case): 描述一个具体的使用场景或用户故事。
+            *   实现入口: 指明实现该功能的关键入口函数/方法，并提供带链接的文件路径。
+
+    6. 接口设计
+        *   4.1 对外接口 (Public APIs):
+            *   列出所有暴露给外部的函数、类、方法或 API 端点。
+            *   对每一个接口，提供详尽的表格化描述：
+            接口名称 `functionName()` 或 `ClassName`
+            文件位置  提供带链接的文件路径 
+            功能概述 清晰说明其作用和业务价值 
+            参数列表 (名称, 类型, 是否必需, 详细描述及约束) 
+            返回值 (类型, 详细描述，包括成功和失败时的结构) 
+            异常处理  该接口会抛出或处理哪些主要异常 
+
+        *   4.2 内部关键交互 (Key Internal Interactions):
+            *   分析模块内部不同组件/类之间最重要的几次交互，解释其为何是关键交互以及它们如何协作完成任务。
+
+    7. 核心实现与设计模式
+        *   5.1 核心算法/逻辑详解:
+            *   识别并深入剖析模块中最核心或最复杂的算法/业务逻辑。
+            *   使用伪代码、文字描述和代码引用相结合的方式，解释其工作原理、步骤和复杂度。
+        *   5.2 设计模式应用分析 (Design Pattern Analysis):
+            *   识别代码中显式或隐式使用的设计模式（如：工厂模式、单例模式、策略模式、观察者模式等）。
+            *   对每种应用的模式，说明其解决了什么问题，以及在该场景下应用的优缺点。
+
+    8. 关键数据结构与模型
+        *   列出模块中定义的所有重要数据结构（类、Struct、接口定义等）。
+        *   对每个数据结构，分析其：
+            *   定义位置: 提供带链接的文件路径。
+            *   字段说明: 解释每个字段的含义和用途。
+            *   核心作用: 阐述该数据结构在模块的业务逻辑中扮演的角色。
+            *   数据流转: 描述该数据结构对象是如何被创建、传递、修改和销毁的。
+
+    9. 错误处理与健壮性 
+        *   9.1 错误处理策略:
+            *   分析模块统一的错误处理机制（例如：使用特定异常类、返回错误码、空对象模式等）。
+        *   9.2 日志记录 (Logging):
+            *   分析代码中的日志使用情况。日志级别是否分明？关键操作和错误是否都有记录？
+        *   9.3 边界条件与校验 (Boundary Conditions & Validation):
+            *   分析代码如何处理输入验证和边界情况。
+
+    10. 依赖关系分析
+        *   8.1 内部依赖: 描述模块内部文件/组件之间的依赖关系（已在组件图中体现，此处可用文字补充）。
+        *   8.2 外部依赖:
+            *   列出所有 `import` 或 `require` 的外部库/模块。
+            *   将依赖分类：标准库、第三方框架/库、公司内部其他模块。
+            *   分析关键第三方库的作用及其对本模块的影响。
+
+
+    通用生成准则 (General Generation Guidelines):
+    *   准确性优先： 所有信息必须直接来源于提供的代码，禁止臆测。
+    *   代码溯源与链接： 在文档中引用任何文件、类或函数时，必须将其格式化为可点击的 Markdown 链接，链接路径应相对于输入的 `{module_path}` 的根目录。例如，对于 `{module_path}` 下的 `src/utils/parser.js` 文件，应表示为 `[parser.js](./src/utils/parser.js)`。
+    *   PlantUML 语法: 所有 UML 图必须使用 PlantUML 语法，并包裹在 ` ```plantuml ... ``` ` 代码块中。
+    *   详尽具体： 避免使用“可能”、“也许”等模糊词汇。对每个要求点，提供充分具体的描述和代码证据。
+    *   结构完整： 严格按照上述10个章节和所有子标题组织文档。若某个子项在代码中未体现，需明确指出“根据代码分析，未发现相关内容”。
