@@ -79,6 +79,9 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     if (!sourceWebview) break;
 
                     const conversations = await this._stateManager.getConversations();
+                    // --- highlight-start ---
+                    console.log("--- All Conversations on Ready ---", JSON.stringify(conversations, null, 2));
+                    // --- highlight-end ---
                     const modelConfigs = await this._stateManager.getModelConfigs();
                     const prompts = await this._stateManager.getPrompts();
 
@@ -185,6 +188,11 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
             case 'saveConversation': // 新增 case 处理来自 webview 的保存请求
                 {
                     const { id, messages } = data.payload;
+                    // --- DEBUG START ---
+                    console.log("--- Saving Conversation ---");
+                    console.log("Conversation ID:", id);
+                    console.log("Messages being saved:", JSON.stringify(messages, null, 2));
+                    // --- DEBUG END ---
                     const allConversations = await this._stateManager.getConversations();
                     const conversationToUpdate = allConversations.find(c => c.id === id);
                     if (conversationToUpdate) {
@@ -365,8 +373,17 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 {
                     const { id } = data.payload;
                     const conversations = await this._stateManager.getConversations();
+                    // --- highlight-start ---
+                    console.log("--- All Conversations on Load ---", JSON.stringify(conversations, null, 2));
+                    // --- highlight-end ---
                     const conversation = conversations.find(c => c.id === id);
                     if (conversation) {
+                        // --- DEBUG START ---
+                        console.log("--- Loading Specific Conversation ---");
+                        console.log("Conversation ID:", conversation.id);
+                        console.log("Messages being loaded:", conversation.messages);
+                        // console.log("conversations:", conversations);
+                        // --- DEBUG END ---
                         this._activeConversation = conversation;
                         this._view?.webview.postMessage({ command: 'setActiveConversation', payload: conversation });
                     }

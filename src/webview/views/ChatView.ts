@@ -71,6 +71,7 @@ export class ChatView {
 
     public loadConversation(conversation: Conversation) {
         this.messages = conversation.messages;
+        this.activeConversationId = conversation.id; // 确保加载对话时也设置 activeConversationId
         this.handleCancelEdit(); // Ensure we exit any edit mode when loading a new conversation
         this.renderMessages();
     }
@@ -205,38 +206,43 @@ export class ChatView {
                         case 'agent:streamChunk':
                             this.activeAgentRunBlock.appendStreamChunk(payload);
                             return;
-                        case 'agent:end':
+                        case 'agent:end': { // 使用块作用域
                             this.activeAgentRunBlock.setAgentResult(payload as AgentResult);
                             
-                            
-                            // 如果成功，将运行记录保存到对话中
-                            if (payload.status === 'completed') {
-                                const runRecord = this.activeAgentRunBlock.getSerializableState();
-                                if (runRecord) {
-                                    const agentMessage: AgentRunChatMessage = {
-                                        type: 'agent_run',
-                                        role: 'assistant',
-                                        run: runRecord
-                                    };
-                                    // AgentRunBlock 已经渲染在页面上，我们只需要将其替换为
-                                    // 消息数组中的一个正式条目，以便保存。
-                                    // 我们不立即重渲染，而是将状态更新到 this.messages
-                                    // 并保存整个对话。
-                                    // 当对话被重新加载时，这个 agent_run 消息将被正确渲染。
-                                    this.messages.push(agentMessage);
-                                    this.saveCurrentConversation();
-                                }
-                            }
-                             
+                            // 对于任何终端状态，都获取其可序列化状态
+                            const runRecord = this.activeAgentRunBlock.getSerializableState();
 
+                            if (runRecord) {
+                                // --- highlight-start ---
+                                // 在保存前截断长字符串
+                                const truncatedRecord = this.truncateLongStrings(runRecord);
+                                // --- highlight-end ---
+
+                                const agentMessage: AgentRunChatMessage = {
+                                    type: 'agent_run',
+                                    role: 'assistant',
+                                    run: truncatedRecord as AgentRunRecord // 使用截断后的记录
+                                };
+                                // 将持久化消息添加到历史记录中
+                                this.messages.push(agentMessage);
+                                this.saveCurrentConversation();
+                            }
+
+                            // 清理实时运行状态
                             this.isAgentRunning = false;
                             this.activeAgentRunId = null;
                             this.activeAgentRunBlock = null; 
                             this.activeAgentRunContainer = null;
                             
+                            // 从更新后的 messages 数组中重新渲染整个消息列表。
+                            // 这将移除旧的“实时”agent block容器，并从保存的消息中
+                            // 渲染一个新的、历史性的 AgentRunBlock。
+                            this.renderMessages();
+                            
                             this.updateSendButtonState();
 
                             return;
+                        }
                     }
                 }
             }
@@ -272,6 +278,40 @@ export class ChatView {
             }
         });
     }
+
+    // --- highlight-start ---
+    /**
+     * 递归地遍历一个对象，并将所有长字符串截断。
+     * @param obj 要处理的对象
+     * @param maxLength 最大字符串长度，默认为 500
+     * @returns 处理后的新对象
+     */
+    private truncateLongStrings(obj: any, maxLength: number = 500): any {
+        if (!obj) {
+            return obj;
+        }
+
+        if (Array.isArray(obj)) {
+            return obj.map(item => this.truncateLongStrings(item, maxLength));
+        }
+
+        if (typeof obj === 'object') {
+            const newObj: { [key: string]: any } = {};
+            for (const key in obj) {
+                if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                    newObj[key] = this.truncateLongStrings(obj[key], maxLength);
+                }
+            }
+            return newObj;
+        }
+
+        if (typeof obj === 'string' && obj.length > maxLength) {
+            return obj.substring(0, maxLength) + '... (truncated)';
+        }
+
+        return obj;
+    }
+    // --- highlight-end ---
 
     private saveCurrentConversation() {
         if (this.activeConversationId) {
