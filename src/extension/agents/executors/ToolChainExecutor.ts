@@ -63,14 +63,10 @@ export class ToolChainExecutor {
                 await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(runDir, 'llm_request.txt'), Buffer.from(`[SYSTEM]\n${systemMessageContent}\n\n[HUMAN]\n${humanMessageContent}`, 'utf8'));
             }
 
-            const finalLlm = await llmService.createModel({ modelConfig, streaming: true, temperature: 0.7 });
+            const finalLlm = await llmService.createModel({ modelConfig, streaming: false, temperature: 0.7 });
             const finalChain = finalLlm.pipe(new StringOutputParser());
-            const stream = await finalChain.stream([ new SystemMessage(systemMessageContent), new HumanMessage(humanMessageContent) ]);
             
-            for await (const chunk of stream) {
-                finalResult += chunk;
-                // logger.onStreamChunk({ runId, taskId: llmTaskId, content: chunk as string });
-            }
+            finalResult = await finalChain.invoke([ new SystemMessage(systemMessageContent), new HumanMessage(humanMessageContent) ]);
             statsTracker.add(humanMessageContent, finalResult);
             
             logger.onStepUpdate({ runId, taskId: llmTaskId, type: 'output', data: { name: "LLM响应", content: finalResult }, metadata: { type: 'markdown' } });

@@ -331,7 +331,7 @@ export class ProjectDocumentationOrchestrator {
         const stepName = "综合: 生成最终文档";
         logger.onStepStart({ runId, taskId, stepName, status: 'running' });
 
-        const synthesisLlm = await llmService.createModel({ modelConfig, temperature: 0.4, streaming: true });
+        const synthesisLlm = await llmService.createModel({ modelConfig, temperature: 0.4, streaming: false });
 
         const synthesisPromptTemplate = (yaml.load(this.prompts.synthesisPrompt) as any).llm_prompt_template.human;
         const moduleOverviews = moduleDocs.map(m => `- **${m.name} (${m.path})**: ${m.description}`).join('\n');
@@ -346,14 +346,7 @@ export class ProjectDocumentationOrchestrator {
         );
 
         const chain = synthesisLlm.pipe(new StringOutputParser());
-        const stream = await chain.stream([new HumanMessage(prompt)]);
-
-        let finalDoc = '';
-        for await (const chunk of stream) {
-            const chunkContent = chunk as string;
-            finalDoc += chunkContent;
-            // logger.onStreamChunk({ runId, taskId, content: chunkContent });
-        }
+        const finalDoc = await chain.invoke([new HumanMessage(prompt)]);
 
         statsTracker.add(prompt, finalDoc); // 记录 Token
 

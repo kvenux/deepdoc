@@ -164,7 +164,7 @@ export class MapReduceExecutor {
 
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'input', data: { name: "所有摘要", content: combinedMarkdownSummaries } });
             
-            const reduceLlm = await llmService.createModel({ modelConfig, temperature: 0.5, streaming: true });
+            const reduceLlm = await llmService.createModel({ modelConfig, temperature: 0.5, streaming: false });
             let humanReducePrompt = actionPrompt.reduce_prompt_template.human;
             for (const key in userInputs) {
                 humanReducePrompt = humanReducePrompt.replace(new RegExp(`\\{${key}\\}`, 'g'), userInputs[key]);
@@ -174,14 +174,7 @@ export class MapReduceExecutor {
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'llm-request', data: { system: actionPrompt.reduce_prompt_template.system, human: humanReducePrompt } });
 
             const reduceChain = reduceLlm.pipe(new StringOutputParser()); 
-            const stream = await reduceChain.stream([ new SystemMessage(actionPrompt.reduce_prompt_template.system), new HumanMessage(humanReducePrompt) ]);
-
-            let finalContent = '';
-            for await (const chunk of stream) {
-                const chunkContent = chunk as string; 
-                finalContent += chunkContent;
-                // logger.onStreamChunk({ runId, taskId: reduceTaskId, content: chunkContent });
-            }
+            const finalContent = await reduceChain.invoke([ new SystemMessage(actionPrompt.reduce_prompt_template.system), new HumanMessage(humanReducePrompt) ]);
 
             const fullReducePrompt = actionPrompt.reduce_prompt_template.system + "\n" + humanReducePrompt; // 估算
             statsTracker.add(fullReducePrompt, finalContent);
