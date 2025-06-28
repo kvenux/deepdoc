@@ -327,46 +327,114 @@ export class ProjectDocumentationOrchestrator {
         }
     }
 
+    /**
+     * 清洗并重编号单个模块的Markdown文档。
+     * @param rawContent 原始Markdown内容。
+     * @param newParentSectionNumber 新的父章节号，如 "3.3"。
+     * @returns 处理后的Markdown内容。
+     */
+    private cleanAndRenumberModuleDoc(rawContent: string, newParentSectionNumber: string): string {
+        // 1. 清洗：只保留第一个'#'标题之后的内容
+        const firstHeadingIndex = rawContent.indexOf('#');
+        if (firstHeadingIndex === -1) {
+            return ''; // 如果没有标题，则视为空内容
+        }
+        const content = rawContent.substring(firstHeadingIndex);
+        const lines = content.split('\n');
+
+        // 2. 提取原始主标题，并创建新的、重编号的主标题
+        const originalTitleLine = lines.shift() || '';
+        const title = originalTitleLine.replace(/^#\s*/, '').trim();
+        const newMainHeading = `# ${newParentSectionNumber}. ${title}`;
+
+        // 3. 重编号所有子标题
+        const body = lines.join('\n');
+        const renumberedBody = body.replace(
+            /^(#+)\s(\d[\d\.]*)/gm, // 匹配所有级别的标题，如 '## 1. ...' 或 '### 1.2. ...'
+            (match, hashes, oldNumbering) => {
+                // 将标题降一级（增加一个'#'），并用新的父章节号作为前缀
+                return `#${hashes} ${newParentSectionNumber}.${oldNumbering}`;
+            }
+        );
+
+        return `${newMainHeading}\n${renumberedBody}`;
+    }
+
     private async runSynthesisPhase(runId: string, plan: PlannerOutput, moduleDocs: ModuleDoc[]): Promise<string> {
-        const { logger, llmService, modelConfig, statsTracker } = this.context; // <-- 添加 statsTracker
+        const { logger, llmService, modelConfig, statsTracker } = this.context;
         const taskId = uuidv4();
         const stepName = "综合: 生成最终文档";
         logger.onStepStart({ runId, taskId, stepName, status: 'running' });
 
+        // --- 步骤 1: 生成文档框架 ---
         const synthesisLlm = await llmService.createModel({ modelConfig, temperature: 0.4, streaming: false });
-
         const synthesisPromptTemplate = (yaml.load(this.prompts.synthesisPrompt) as any).llm_prompt_template.human;
         const moduleOverviews = moduleDocs.map(m => `- **${m.name} (${m.path})**: ${m.description}`).join('\n');
-        const detailedModuleDocs = moduleDocs.map(doc => `\n### 模块: ${doc.name}\n${doc.content}\n`).join('\n---\n');
-        const prompt = synthesisPromptTemplate.replace('{projectName}', plan.projectName).replace('{language}', plan.language).replace('{module_overviews}', moduleOverviews).replace('{detailed_module_docs}', detailedModuleDocs);
+        
+        // 关键改动：不将详细文档传给LLM，让它只生成框架
+        const prompt = synthesisPromptTemplate
+            .replace('{projectName}', plan.projectName)
+            .replace('{language}', plan.language)
+            .replace('{module_overviews}', moduleOverviews)
+            .replace('{detailed_module_docs}', '<!-- 模块详细设计将由程序自动拼接 -->');
 
-        logger.onStepUpdate({ runId, taskId, type: 'llm-request', data: { system: "...", human: prompt } });
-
+        logger.onStepUpdate({ runId, taskId, type: 'llm-request', data: { system: "...", human: prompt }});
         await vscode.workspace.fs.writeFile(
             vscode.Uri.joinPath(this.runDir, '03_synthesis_request.txt'),
             Buffer.from(prompt, 'utf8')
         );
 
         const chain = synthesisLlm.pipe(new StringOutputParser());
-        const finalDoc = await chain.invoke([new HumanMessage(prompt)]);
+        const wrapperDoc = await chain.invoke([new HumanMessage(prompt)]);
+        statsTracker.add(prompt, wrapperDoc);
 
-        statsTracker.add(prompt, finalDoc); // 记录 Token
+         // 步骤 2: 准备拼接模块文档
+        const processedModuleDocs = moduleDocs.map((doc, index) => {
+            const parentSectionNumber = `3.${3 + index}`; // 生成 3.3, 3.4, ...
+            return this.cleanAndRenumberModuleDoc(doc.content, parentSectionNumber);
+        });
+        const combinedModuleDocsString = processedModuleDocs.join('\n\n---\n\n');
 
+        // 步骤 3: 找到插入点并拼接
+        const splitMarker = '\n# 4. 接口设计';
+        const splitIndex = wrapperDoc.indexOf(splitMarker);
+        
+        let finalDoc: string;
+
+        if (splitIndex !== -1) {
+            // 找到了插入点
+            let docPart1 = wrapperDoc.substring(0, splitIndex);
+            const docPart2 = wrapperDoc.substring(splitIndex);
+
+            // 清理掉 part1 末尾可能存在的占位符
+            docPart1 = docPart1.replace(/##\s*3\.3\s*模块详细设计[\s\S]*/, '').trim();
+
+            finalDoc = [
+                docPart1,
+                combinedModuleDocsString,
+                docPart2
+            ].join('\n\n');
+        } else {
+            // 如果没找到第4节，作为回退，直接在末尾拼接
+            logger.warn("在文档框架中未找到'# 4. 接口设计'，将模块文档追加到末尾。");
+            finalDoc = [
+                wrapperDoc,
+                combinedModuleDocsString
+            ].join('\n\n---\n\n');
+        }
+        
         await vscode.workspace.fs.writeFile(
             vscode.Uri.joinPath(this.runDir, '03_synthesis_response.txt'),
             Buffer.from(finalDoc, 'utf8')
         );
 
-        // 1. 获取最终文档的路径
         const finalDocPath = await this.getFinalDocPath();
-
-        // 2. 发送 StepUpdate，其中 metadata 指向文件路径，data.content 可以是简短描述
-        logger.onStepUpdate({
-            runId,
-            taskId,
-            type: 'output',
+        logger.onStepUpdate({ 
+            runId, 
+            taskId, 
+            type: 'output', 
             data: { name: "最终项目文档", content: `文档已生成: ${path.basename(finalDocPath.fsPath)}` },
-            metadata: { type: 'file', path: finalDocPath.fsPath } // <-- 这是关键
+            metadata: { type: 'file', path: finalDocPath.fsPath }
         });
 
         logger.onStepEnd({ runId, taskId, stepName, status: 'completed' });
