@@ -56,7 +56,7 @@ export class ProjectDocumentationOrchestrator {
     constructor(
         private readonly context: AgentContext,
         private readonly prompts: PromptsCollection
-    ) {}
+    ) { }
 
     public async run(runId: string) {
         this.tokenizer = get_encoding("cl100k_base");
@@ -84,7 +84,7 @@ export class ProjectDocumentationOrchestrator {
         // 移除 onAgentEnd 调用。AgentService 将负责此事
         // logger.onAgentEnd({ runId, status: 'completed', finalOutput: "执行成功" });
 
-        if (this.tokenizer) { 
+        if (this.tokenizer) {
             this.tokenizer.free();
         }
     }
@@ -109,7 +109,7 @@ export class ProjectDocumentationOrchestrator {
         const plannerLlm = await llmService.createModel({ modelConfig, temperature: 0.1 });
         const plannerPromptTemplate = (yaml.load(this.prompts.plannerPrompt) as any).llm_prompt_template.human;
         const prompt = plannerPromptTemplate.replace('{file_tree}', fileTree);
-        logger.onStepUpdate({ runId, taskId, type: 'llm-request', data: { system: "...", human: prompt }});
+        logger.onStepUpdate({ runId, taskId, type: 'llm-request', data: { system: "...", human: prompt } });
 
         await vscode.workspace.fs.writeFile(
             vscode.Uri.joinPath(this.runDir, '01_planning_request.txt'),
@@ -133,14 +133,15 @@ export class ProjectDocumentationOrchestrator {
             const plan = JSON.parse(jsonString) as PlannerOutput;
 
             logger.onStepUpdate({ runId, taskId, type: 'output', data: { name: "项目规划", content: plan } });
-            
+
             logger.onStepEnd({ runId, taskId, stepName, status: 'completed' });
-            
+
             return plan;
         } catch (e: any) {
-            
-            logger.onStepEnd({ runId, taskId, stepName, status: 'failed', error: e.message });
-            
+
+            const errorMessage = e instanceof Error ? e.message : String(e);
+            logger.onStepEnd({ runId, taskId, stepName, status: 'failed', error: errorMessage });
+
             throw new Error(`解析规划输出失败: ${e.message}`);
         }
     }
@@ -201,7 +202,7 @@ export class ProjectDocumentationOrchestrator {
                 finalModules.push(currentModule);
                 coveredPaths.add(currentModule.normalizedPath);
             } else {
-                 logger.warn(`- 跳过模块 '${currentModule.name}' (路径: '${currentModule.path}'), 因其包含已被选中的更具体的子模块。`);
+                logger.warn(`- 跳过模块 '${currentModule.name}' (路径: '${currentModule.path}'), 因其包含已被选中的更具体的子模块。`);
             }
         }
 
@@ -226,13 +227,13 @@ export class ProjectDocumentationOrchestrator {
         }
 
         logger.onStepUpdate({ runId, taskId: filterTaskId, type: 'output', data: { name: "唯一模块", content: `已过滤，将分析 ${finalModules.length} 个模块。` } });
-        
+
         logger.onStepEnd({ runId, taskId: filterTaskId, stepName: filterStepName, status: 'completed' });
-        
+
 
         const analysisStepName = "分析: 并行处理模块";
         logger.info(`[DEBUG] Attempting to start parent step: ${analysisStepName}`);
-        logger.onStepStart({ runId, stepName: analysisStepName, status: 'running' }); 
+        logger.onStepStart({ runId, stepName: analysisStepName, status: 'running' });
         const analysisPromises = finalModules.map((module, index) =>
             this.analyzeSingleModule(runId, module, plan.language, index + 1, finalModules.length)
         );
@@ -262,7 +263,7 @@ export class ProjectDocumentationOrchestrator {
         let strategy: string;
 
         let strategyLogContent = `模块路径: ${module.path}\n`;
-        
+
         if (tokenCount <= this.maxTokensForDirectAnalysis) {
             strategy = "直接分析 (ToolChain)";
             executor = new ToolChainExecutor(moduleContext);
@@ -277,15 +278,15 @@ export class ProjectDocumentationOrchestrator {
             strategyLogContent += `Token总数: ${tokenCount.toLocaleString()} 超出最大Token数 ${this.maxTokensForDirectAnalysis} 限制\n`;
             strategyLogContent += `采用Map-Reduce分析策略，预计分 ${estimatedBatches} 个批次，因涉及多个迭代，分析时间稍长，请稍后...`;
         }
-        
-        logger.onStepUpdate({ 
-            runId, 
-            taskId, 
-            type: 'input', 
-            data: { 
-                name: "分析策略", 
+
+        logger.onStepUpdate({
+            runId,
+            taskId,
+            type: 'input',
+            data: {
+                name: "分析策略",
                 content: strategyLogContent
-            } 
+            }
         });
         try {
             const result: ExecutorResult = await executor.run(runId, promptYaml, { module_path: module.path, language, task_description: module.description });
@@ -293,7 +294,7 @@ export class ProjectDocumentationOrchestrator {
             const docPath = vscode.Uri.joinPath(this.runDir, `module_${module.name.replace(/[\s\/]/g, '_')}.md`);
             await vscode.workspace.fs.writeFile(docPath, Buffer.from(docContent, 'utf8'));
 
-            
+
 
             // 如果有中间文件，也作为输出文件发送
             if (result.intermediateFiles && result.intermediateFiles.length > 0) {
@@ -307,7 +308,7 @@ export class ProjectDocumentationOrchestrator {
                     });
                 }
             }
-             // 将最终文档输出文件发送
+            // 将最终文档输出文件发送
             logger.onStepUpdate({
                 runId,
                 taskId,
@@ -318,9 +319,10 @@ export class ProjectDocumentationOrchestrator {
             logger.onStepEnd({ runId, taskId, stepName, status: 'completed' });
             return { ...module, content: docContent };
         } catch (e: any) {
-            
-            logger.onStepEnd({ runId, taskId, stepName, status: 'failed', error: e.message });
-            
+
+            const errorMessage = e instanceof Error ? e.message : String(e);
+            logger.onStepEnd({ runId, taskId, stepName, status: 'failed', error: errorMessage });
+
             throw e; // Re-throw to be caught by the main run() method's try-catch
         }
     }
@@ -338,7 +340,7 @@ export class ProjectDocumentationOrchestrator {
         const detailedModuleDocs = moduleDocs.map(doc => `\n### 模块: ${doc.name}\n${doc.content}\n`).join('\n---\n');
         const prompt = synthesisPromptTemplate.replace('{projectName}', plan.projectName).replace('{language}', plan.language).replace('{module_overviews}', moduleOverviews).replace('{detailed_module_docs}', detailedModuleDocs);
 
-        logger.onStepUpdate({ runId, taskId, type: 'llm-request', data: { system: "...", human: prompt }});
+        logger.onStepUpdate({ runId, taskId, type: 'llm-request', data: { system: "...", human: prompt } });
 
         await vscode.workspace.fs.writeFile(
             vscode.Uri.joinPath(this.runDir, '03_synthesis_request.txt'),
@@ -359,10 +361,10 @@ export class ProjectDocumentationOrchestrator {
         const finalDocPath = await this.getFinalDocPath();
 
         // 2. 发送 StepUpdate，其中 metadata 指向文件路径，data.content 可以是简短描述
-        logger.onStepUpdate({ 
-            runId, 
-            taskId, 
-            type: 'output', 
+        logger.onStepUpdate({
+            runId,
+            taskId,
+            type: 'output',
             data: { name: "最终项目文档", content: `文档已生成: ${path.basename(finalDocPath.fsPath)}` },
             metadata: { type: 'file', path: finalDocPath.fsPath } // <-- 这是关键
         });
@@ -382,7 +384,7 @@ export class ProjectDocumentationOrchestrator {
         });
     }
 
-     private async getFinalDocPath(): Promise<vscode.Uri> {
+    private async getFinalDocPath(): Promise<vscode.Uri> {
         return vscode.Uri.joinPath(this.runDir, '项目总体设计文档.md');
     }
 }

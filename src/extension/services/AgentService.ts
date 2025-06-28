@@ -10,7 +10,7 @@ import { MapReduceExecutor } from '../agents/executors/MapReduceExecutor';
 import { AgentLogger, VscodeOutputChannelLogger, WebviewLogger } from './logging';
 import { LLMService } from './LLMService';
 import { ToolRegistry } from './ToolRegistry';
-import { StatsTracker } from './StatsTracker'; 
+import { StatsTracker } from './StatsTracker';
 
 // 在文件顶部或一个新文件中定义Agent元数据
 /**
@@ -72,11 +72,11 @@ async function loadPromptFile(workspaceRoot: vscode.Uri, fileName: string): Prom
 export class AgentService {
     private toolRegistry: ToolRegistry;
     private activeRuns = new Map<string, { logger: AgentLogger }>();
-    
+
     constructor(private llmService: LLMService) {
         this.toolRegistry = new ToolRegistry(this.llmService);
     }
-    
+
     public async initialize(defaultModelConfig: ModelConfig): Promise<void> {
         await this.toolRegistry.initialize(defaultModelConfig);
         console.log("AgentService initialized successfully.");
@@ -119,13 +119,13 @@ export class AgentService {
     ) {
         const runId = uuidv4();
         const agentPlan = this.getAgentPlan(agentId);
-        
+
         if (!agentPlan) {
             const errorMsg = `Agent with ID "${agentId}" not found.`;
             logger.onAgentEnd({ runId, status: 'failed', error: errorMsg });
             return;
         }
-        
+
         // 填充从前端接收到的参数值
         agentPlan.parameters.forEach(param => {
             if (userInputs[param.name] !== undefined) {
@@ -134,7 +134,7 @@ export class AgentService {
         });
 
         const statsTracker = new StatsTracker();
-        
+
         const context: AgentContext = {
             logger,
             llmService: this.llmService,
@@ -143,7 +143,7 @@ export class AgentService {
             statsTracker // 注入到上下文中
 
         };
-        
+
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri;
         if (!workspaceRoot) {
             logger.onAgentEnd({ runId, status: 'failed', error: 'No workspace folder open.' });
@@ -169,12 +169,12 @@ export class AgentService {
                     await orchestrator.run(runId);
                     break;
                 }
-                
+
                 case 'docgen-module-direct': {
                     const directPromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_direct.yml');
                     const modulePathParam = agentPlan.parameters.find(p => p.name === 'module_path');
                     if (!modulePathParam || !modulePathParam.value) {
-                         throw new Error("Missing required parameter: module_path");
+                        throw new Error("Missing required parameter: module_path");
                     }
                     const directInputs = { module_path: modulePathParam.value };
 
@@ -188,12 +188,12 @@ export class AgentService {
                     const mapreducePromptYaml = await loadPromptFile(workspaceRoot, 'module_analysis_mapreduce.yml');
                     const modulePathParam = agentPlan.parameters.find(p => p.name === 'module_path');
                     if (!modulePathParam || !modulePathParam.value) {
-                         throw new Error("Missing required parameter: module_path");
+                        throw new Error("Missing required parameter: module_path");
                     }
                     const mapreduceInputs = { module_path: modulePathParam.value };
 
                     const mapReduceExecutor = new MapReduceExecutor(context);
-                     // 捕获执行器的结果作为 finalOutput
+                    // 捕获执行器的结果作为 finalOutput
                     finalOutput = await mapReduceExecutor.run(runId, mapreducePromptYaml, mapreduceInputs);
                     break;
                 }
@@ -201,7 +201,7 @@ export class AgentService {
                 default:
                     throw new Error(`Execution for agent "${agentId}" is not yet implemented.`);
             }
-            
+
             // 只有在运行没有被取消的情况下，才发送 'completed' 事件
             if (this.activeRuns.has(runId)) {
                 const finalStats = statsTracker.getFinalStats();
@@ -209,10 +209,11 @@ export class AgentService {
             }
 
         } catch (error: any) {
-             // 只有在运行没有被取消的情况下，才发送 'failed' 事件
+            // 只有在运行没有被取消的情况下，才发送 'failed' 事件
             if (this.activeRuns.has(runId)) {
                 const finalStats = statsTracker.getFinalStats();
-                logger.onAgentEnd({ runId, status: 'failed', error: error.message, stats: finalStats });
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                logger.onAgentEnd({ runId, status: 'failed', error: errorMessage, stats: finalStats });
             }
         } finally {
             this.activeRuns.delete(runId); // 确保在所有路径上都取消注册
@@ -223,10 +224,10 @@ export class AgentService {
         const logger = new VscodeOutputChannelLogger("CodeWiki Project Documentation");
         await this.prepareAndRunAgent('docgen-project', {}, modelConfig, logger);
     }
-    
+
     public async runActionFromWebview(
-        yamlContent: string, 
-        userInputs: Record<string, any>, 
+        yamlContent: string,
+        userInputs: Record<string, any>,
         modelConfig: ModelConfig,
         webview: vscode.Webview
     ) {
@@ -242,30 +243,31 @@ export class AgentService {
         const runId = uuidv4();
 
         try {
-            
+
             this.activeRuns.set(runId, { logger });
-            
+
             const executor = new ToolChainExecutor(context);
             const result = await executor.run(runId, yamlContent, userInputs);
-            
-            
+
+
             if (this.activeRuns.has(runId)) {
                 const finalStats = statsTracker.getFinalStats();
                 logger.onAgentEnd({ runId, status: 'completed', finalOutput: result, stats: finalStats });
             }
-            
+
 
         } catch (error: any) {
-             
+
             if (this.activeRuns.has(runId)) {
-                 const finalStats = statsTracker.getFinalStats();
-                 logger.onAgentEnd({ runId, status: 'failed', error: error.message, stats: finalStats });
+                const finalStats = statsTracker.getFinalStats();
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                logger.onAgentEnd({ runId, status: 'failed', error: errorMessage, stats: finalStats });
             }
-            
+
         } finally {
-            
+
             this.activeRuns.delete(runId);
-            
+
         }
     }
 }

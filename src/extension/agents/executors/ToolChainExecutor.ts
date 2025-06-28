@@ -2,7 +2,7 @@
 import * as vscode from 'vscode';
 import * as yaml from 'js-yaml';
 import { v4 as uuidv4 } from 'uuid';
-import { ToolChainStep, LlmPromptTemplate } from '../CustomAgentExecutor'; 
+import { ToolChainStep, LlmPromptTemplate } from '../CustomAgentExecutor';
 import { AgentContext } from '../AgentContext';
 import { SystemMessage, HumanMessage } from '@langchain/core/messages';
 import { StringOutputParser } from '@langchain/core/output_parsers';
@@ -15,7 +15,7 @@ interface ActionPrompt {
 }
 
 export class ToolChainExecutor {
-    constructor(private readonly context: AgentContext) {}
+    constructor(private readonly context: AgentContext) { }
 
     public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<ExecutorResult> {
         const { logger, llmService, toolRegistry, modelConfig, runDir, statsTracker } = this.context;
@@ -29,7 +29,7 @@ export class ToolChainExecutor {
             }
             const executionContext: Record<string, any> = { ...userInputs };
 
-            for (const step of actionPrompt.tool_chain) { 
+            for (const step of actionPrompt.tool_chain) {
                 const toolTaskId = uuidv4();
                 const toolStepName = `执行工具`; // 使用这个作为 stepName
                 logger.onStepStart({ runId, taskId: toolTaskId, stepName: toolStepName, status: 'running' });
@@ -38,22 +38,22 @@ export class ToolChainExecutor {
                 if (!tool) {
                     throw new Error(`工具 "${step.tool}" 未找到。`);
                 }
-                
+
                 const toolInput = this.resolveInput(step.input, executionContext);
                 logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'input', data: { name: `工具输入 ${step.tool} `, content: toolInput } });
-                
-                const toolOutputString = await tool.call(toolInput) as string; 
+
+                const toolOutputString = await tool.call(toolInput) as string;
                 const toolOutputParsed = this.parseToolOutput(toolOutputString);
                 executionContext[step.output_variable] = toolOutputParsed;
-                
+
                 logger.onStepUpdate({ runId, taskId: toolTaskId, type: 'output', data: { name: `工具输出 ${step.tool} `, content: toolOutputString } });
                 logger.onStepEnd({ runId, taskId: toolTaskId, stepName: toolStepName, status: 'completed' }); // 修正: 添加 stepName
             }
-            
+
             const llmTaskId = uuidv4();
             const llmStepName = "生成最终响应";
             logger.onStepStart({ runId, taskId: llmTaskId, stepName: llmStepName, status: 'running' });
-            
+
             const systemMessageContent = this.resolveInput(actionPrompt.llm_prompt_template.system, executionContext);
             const humanMessageContent = this.resolveInput(actionPrompt.llm_prompt_template.human, executionContext);
 
@@ -65,10 +65,15 @@ export class ToolChainExecutor {
 
             const finalLlm = await llmService.createModel({ modelConfig, streaming: false, temperature: 0.7 });
             const finalChain = finalLlm.pipe(new StringOutputParser());
-            
-            finalResult = await finalChain.invoke([ new SystemMessage(systemMessageContent), new HumanMessage(humanMessageContent) ]);
-            statsTracker.add(humanMessageContent, finalResult);
-            
+
+            // 修复：使用 llmService.scheduleLlmCall 来遵守速率限制
+            finalResult = await llmService.scheduleLlmCall(() =>
+                finalChain.invoke([new SystemMessage(systemMessageContent), new HumanMessage(humanMessageContent)])
+            );
+            console.log("finalResult", finalResult);
+            // 修复：为 statsTracker 提供完整的 prompt
+            statsTracker.add(systemMessageContent + "\n" + humanMessageContent, finalResult);
+
             logger.onStepUpdate({ runId, taskId: llmTaskId, type: 'output', data: { name: "LLM响应", content: finalResult }, metadata: { type: 'markdown' } });
             if (runDir) {
                 await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(runDir, 'llm_response.md'), Buffer.from(finalResult, 'utf8'));
@@ -114,7 +119,7 @@ export class ToolChainExecutor {
             if ((outputString.startsWith('[') && outputString.endsWith(']')) || (outputString.startsWith('{') && outputString.endsWith('}'))) {
                 return JSON.parse(outputString);
             }
-        } catch (e) {}
+        } catch (e) { }
         return outputString;
     }
 }

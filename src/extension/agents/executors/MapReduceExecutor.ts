@@ -50,27 +50,27 @@ async function getAllFilePaths(dirUri: vscode.Uri): Promise<vscode.Uri[]> {
 }
 
 export class MapReduceExecutor {
-    constructor(private readonly context: AgentContext) {}
+    constructor(private readonly context: AgentContext) { }
 
     public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<ExecutorResult> {
         const { logger, llmService, modelConfig, runDir, statsTracker } = this.context; // <-- 获取 statsTracker
         let tokenizer: Tiktoken | null = null;
-        
+
         try {
-            const prepTaskId = uuidv4(); 
+            const prepTaskId = uuidv4();
             const prepStepName = "解析与准备";
             logger.onStepStart({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'running' });
-            
+
             const actionPrompt = yaml.load(yamlContent) as MapReducePrompt;
             const modulePath = userInputs['module_path'];
             const workspaceFolders = vscode.workspace.workspaceFolders;
             if (!workspaceFolders) throw new Error("未打开工作区文件夹。");
-            
+
             const workspaceRoot = workspaceFolders[0].uri;
             const absoluteModulePath = vscode.Uri.joinPath(workspaceRoot, modulePath);
             const fileUris = await getAllFilePaths(absoluteModulePath);
             tokenizer = get_encoding("cl100k_base");
-            
+
             const fileDataPromises = fileUris.map(async (uri): Promise<FileData> => {
                 if (!tokenizer) throw new Error("Tokenizer not initialized.");
                 const contentBytes = await vscode.workspace.fs.readFile(uri);
@@ -88,8 +88,8 @@ export class MapReduceExecutor {
                 if (file.tokenCount > MAX_TOKENS_PER_BATCH) { continue; }
                 if (currentBatchTokens + file.tokenCount > MAX_TOKENS_PER_BATCH) {
                     batches.push({ files: currentBatch, tokenCount: currentBatchTokens });
-                    currentBatch = []; 
-                    currentBatchTokens = 0; 
+                    currentBatch = [];
+                    currentBatchTokens = 0;
                 }
                 currentBatch.push(file);
                 currentBatchTokens += file.tokenCount;
@@ -100,7 +100,7 @@ export class MapReduceExecutor {
             logger.onStepUpdate({ runId, taskId: prepTaskId, type: 'output', data: { name: "文件清单Token分析", content: `当前模块包含 ${allFiles.length} 个文件 ${totalTokensInModule} 个token，超过阈值 ${MAX_TOKENS_PER_BATCH}，创建 ${batches.length} 个批次迭代分析` } });
             logger.onStepEnd({ runId, taskId: prepTaskId, stepName: prepStepName, status: 'completed' }); // 修正: 添加 stepName
 
-            const mapAllTaskId = uuidv4(); 
+            const mapAllTaskId = uuidv4();
             const mapStepName = "Map阶段: 并行分析";
             logger.onStepStart({ runId, taskId: mapAllTaskId, stepName: mapStepName, status: 'running' });
 
@@ -110,12 +110,12 @@ export class MapReduceExecutor {
                 const mapTaskName = `分析批次 ${i + 1}/${batches.length}`;
                 // 现在可以访问每个批次的token数，并在日志中显示
                 logger.onStepUpdate({ runId, taskId: mapAllTaskId, type: 'input', data: { name: `${mapTaskName} `, content: `包含 ${batchInfo.files.length} 个文件，共 ${batchInfo.tokenCount} tokens.` } });
-                
+
                 try {
                     const batchContent = batchInfo.files.map(f => `--- FILE: ${f.path} ---\n${f.content}`).join('\n\n');
                     const humanPrompt = actionPrompt.map_prompt_template.human.replace('{code_files_collection}', batchContent);
                     // logger.onStepUpdate({ runId, taskId: mapTaskId, type: 'llm-request', data: { system: actionPrompt.map_prompt_template.system, human: humanPrompt } });
-                    
+
                     const response = await llmService.scheduleLlmCall(() => llm.invoke([new SystemMessage(actionPrompt.map_prompt_template.system), new HumanMessage(humanPrompt)]));
                     const responseContent = response.content as string;
 
@@ -134,7 +134,7 @@ export class MapReduceExecutor {
             const mapResults = await Promise.all(mapAnalysisPromises);
             logger.onStepEnd({ runId, taskId: mapAllTaskId, stepName: mapStepName, status: 'completed' });
 
-            const reduceTaskId = uuidv4(); 
+            const reduceTaskId = uuidv4();
             const reduceStepName = "Reduce阶段: 综合摘要";
             logger.onStepStart({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'running' });
 
@@ -147,41 +147,43 @@ export class MapReduceExecutor {
                 const summaryFileName = 'map_phase_combined_summary.md';
                 const summaryFilePath = vscode.Uri.joinPath(runDir, summaryFileName);
                 await vscode.workspace.fs.writeFile(summaryFilePath, Buffer.from(combinedMarkdownSummaries, 'utf8'));
-                
+
                 // 将文件信息存入数组
                 intermediateFiles.push({ name: 'Map阶段综合摘要', path: summaryFilePath.fsPath });
-            } 
-            
+            }
+
             logger.onStepUpdate({
                 runId,
                 taskId: reduceTaskId,
                 type: 'input',
-                data: { 
-                    name: "Reduce阶段输入", 
+                data: {
+                    name: "Reduce阶段输入",
                     content: `摘要已合并 (长度: ${combinedMarkdownSummaries.length.toLocaleString()})，准备进行最终综合。`
                 }
             });
 
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'input', data: { name: "所有摘要", content: combinedMarkdownSummaries } });
-            
+
             const reduceLlm = await llmService.createModel({ modelConfig, temperature: 0.5, streaming: false });
             let humanReducePrompt = actionPrompt.reduce_prompt_template.human;
             for (const key in userInputs) {
                 humanReducePrompt = humanReducePrompt.replace(new RegExp(`\\{${key}\\}`, 'g'), userInputs[key]);
             }
             humanReducePrompt = humanReducePrompt.replace('{combined_markdown_summaries}', combinedMarkdownSummaries);
-            
+
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'llm-request', data: { system: actionPrompt.reduce_prompt_template.system, human: humanReducePrompt } });
 
-            const reduceChain = reduceLlm.pipe(new StringOutputParser()); 
-            const finalContent = await reduceChain.invoke([ new SystemMessage(actionPrompt.reduce_prompt_template.system), new HumanMessage(humanReducePrompt) ]);
+            const reduceChain = reduceLlm.pipe(new StringOutputParser());
+            const finalContent = await llmService.scheduleLlmCall(() =>
+                reduceChain.invoke([new SystemMessage(actionPrompt.reduce_prompt_template.system), new HumanMessage(humanReducePrompt)])
+            );
 
             const fullReducePrompt = actionPrompt.reduce_prompt_template.system + "\n" + humanReducePrompt; // 估算
             statsTracker.add(fullReducePrompt, finalContent);
 
             logger.onStepUpdate({ runId, taskId: reduceTaskId, type: 'output', data: { name: "最终文档", content: finalContent }, metadata: { type: 'markdown' } });
             logger.onStepEnd({ runId, taskId: reduceTaskId, stepName: reduceStepName, status: 'completed' }); // 修正: 添加 stepName
-            
+
             return {
                 finalContent,
                 intermediateFiles
