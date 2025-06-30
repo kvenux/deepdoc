@@ -4,9 +4,68 @@ import * as vscode from 'vscode';
 import { CodeWikiViewProvider } from './CodeWikiViewProvider';
 import { StateManager } from './StateManager';
 import { LLMService } from './services/LLMService';
-import { AgentService } from './services/AgentService'; // <-- 新的 import
+import { AgentService } from './services/AgentService';
+
+/**
+ * 检查并确保提示词文件已复制到用户工作区的 .codewiki 目录中。
+ * 如果 .codewiki 目录或其中的提示词文件不存在，则会创建它们。
+ * @param context 扩展上下文，用于获取插件的安装路径。
+ */
+async function ensurePromptsAreCopied(context: vscode.ExtensionContext): Promise<void> {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+        // 没有打开的工作区，无需执行任何操作
+        return;
+    }
+    const workspaceRoot = workspaceFolders[0].uri;
+    const codewikiDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki');
+    const sourcePromptsDir = vscode.Uri.joinPath(context.extensionUri, 'dist', 'prompts');
+
+    try {
+        // 检查 .codewiki 目录是否存在
+        await vscode.workspace.fs.stat(codewikiDir);
+    } catch (error) {
+        // 如果目录不存在 (FileNotFound error)，则创建它
+        if (error instanceof vscode.FileSystemError && error.code === 'FileNotFound') {
+            console.log("'.codewiki' directory not found. Creating it and copying prompts...");
+            await vscode.workspace.fs.createDirectory(codewikiDir);
+        } else {
+            // 对于其他错误，打印并重新抛出
+            console.error("Error checking .codewiki directory:", error);
+            throw error;
+        }
+    }
+
+    // 无论目录是已存在还是刚创建，都检查并复制所有提示词文件
+    try {
+        const bundledPromptFiles = await vscode.workspace.fs.readDirectory(sourcePromptsDir);
+        for (const [fileName, fileType] of bundledPromptFiles) {
+            if (fileType === vscode.FileType.File) {
+                const sourceUri = vscode.Uri.joinPath(sourcePromptsDir, fileName);
+                const targetUri = vscode.Uri.joinPath(codewikiDir, fileName);
+
+                try {
+                    // 尝试访问目标文件，如果不存在则会抛出错误
+                    await vscode.workspace.fs.stat(targetUri);
+                } catch {
+                    // 文件不存在，执行复制操作
+                    console.log(`Prompt file '${fileName}' not found in .codewiki. Copying...`);
+                    await vscode.workspace.fs.copy(sourceUri, targetUri);
+                }
+            }
+        }
+    } catch (e) {
+        console.error("Failed to copy prompt files:", e);
+        vscode.window.showErrorMessage("CodeWiki: Failed to initialize required prompt files. Please try reloading the window.");
+    }
+}
+
 
 export async function activate(context: vscode.ExtensionContext) {
+    // --- 新增：在所有服务初始化之前，确保提示词已就绪 ---
+    await ensurePromptsAreCopied(context);
+    // --------------------------------------------------
+
     // --- 服务初始化 ---
     const stateManager = new StateManager(context.globalState);
     const llmService = new LLMService();

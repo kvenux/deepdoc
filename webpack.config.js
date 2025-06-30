@@ -1,8 +1,10 @@
+// webpack.config.js (修改后完整文件)
 //@ts-check
 
 'use strict';
 
 const path = require('path');
+const CopyWebpackPlugin = require('copy-webpack-plugin'); // --- 新增: 引入插件
 
 /** @type {import('webpack').Configuration} */
 const extensionConfig = {
@@ -29,6 +31,15 @@ const extensionConfig = {
       }
     ]
   },
+  // --- 新增: 配置插件 ---
+  plugins: [
+    new CopyWebpackPlugin({
+      patterns: [
+        { from: 'prompts', to: 'prompts' },
+        { from: 'resources', to: 'resources' }
+      ]
+    })
+  ],
   devtool: 'nosources-source-map',
   infrastructureLogging: {
     level: "log",
