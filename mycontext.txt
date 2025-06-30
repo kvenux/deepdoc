@@ -41,6 +41,7 @@ src
     │   ├── ChatHistoryView.ts
     │   ├── ChatView.ts
     │   ├── FocusEditorView.ts
+    │   ├── PerformanceSettingsView.ts
     │   ├── PromptEditorView.ts
     │   ├── PromptManagerView.ts
     │   ├── SettingsView.ts
@@ -71,6 +72,15 @@ export interface ModelConfig {
     isDefault?: boolean;
 }
 
+/**
+ * 新增：代表性能和限制相关的配置。
+ */
+export interface PerformanceConfig {
+    concurrencyLimit: number; // LLM 并发请求数
+    minInterval: number;      // LLM 请求最小间隔 (ms)
+    maxTokensPerBatch: number; // Map-Reduce 每批最大 Token 数
+    maxTokensForDirectAnalysis: number; // 直接分析的最大 Token 阈值
+}
 
 /**
  * 新增：代表一个已完成并被持久化的 Agent 运行记录中单个步骤的状态。
@@ -238,7 +248,7 @@ export interface AgentResult {
 // src/extension/CodeWikiViewProvider.ts (修改后完整文件)
 
 import * as vscode from 'vscode';
-import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig, AgentPlan, TextChatMessage } from '../common/types';
+import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig, AgentPlan, TextChatMessage, PerformanceConfig } from '../common/types';
 import { StateManager } from './StateManager';
 import { LLMService } from './services/LLMService';
 import { AgentService } from './services/AgentService';
@@ -321,6 +331,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     // --- highlight-end ---
                     const modelConfigs = await this._stateManager.getModelConfigs();
                     const prompts = await this._stateManager.getPrompts();
+                    const performanceConfig = await this._stateManager.getPerformanceConfig();
 
                     // If there are conversations, set the most recent one as active.
                     if (source === 'sidebar' && conversations.length > 0) {
@@ -334,7 +345,8 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                         payload: {
                             conversations,
                             modelConfigs,
-                            prompts
+                            prompts,
+                            performanceConfig // 发送新配置到前端
                         }
                     });
                     break;
@@ -854,6 +866,18 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+
+            case 'savePerformanceConfig':
+                {
+                    await this._stateManager.savePerformanceConfig(data.payload as PerformanceConfig);
+                    // 将新配置应用到 LLMService
+                    const perfConfig = await this._stateManager.getPerformanceConfig();
+                    this._llmService.concurrencyLimit = perfConfig.concurrencyLimit;
+                    this._llmService.minInterval = perfConfig.minInterval;
+                    console.log(`Performance settings updated: Concurrency=${perfConfig.concurrencyLimit}, Interval=${perfConfig.minInterval}ms`);
+                    break;
+                }
+
         }
     }
 
@@ -904,11 +928,23 @@ function getNonce() {
 
 --- file_path: extension/StateManager.ts ---
 import * as vscode from 'vscode';
-import { Conversation, ModelConfig, Prompt } from '../common/types';
+import { Conversation, ModelConfig, Prompt, PerformanceConfig } from '../common/types';
 
 const CONVERSATIONS_KEY = 'codewiki_conversations';
 const PROMPTS_KEY = 'codewiki_prompts';
 const MODEL_CONFIGS_KEY = 'codewiki_model_configs';
+const PERFORMANCE_CONFIG_KEY = 'codewiki_performance_config'; // 新增 Key
+
+/**
+ * 默认的性能配置
+ */
+const DEFAULT_PERFORMANCE_CONFIG: PerformanceConfig = {
+    concurrencyLimit: 5,   // 默认并发数
+    minInterval: 10000,     // 默认请求间隔 1 秒
+    maxTokensPerBatch: 64000, // 默认 Map-Reduce 批处理大小
+    maxTokensForDirectAnalysis: 64000 // 默认直接分析阈值
+};
+
 
 /**
  * Manages the state of the extension, persisting data in VS Code's global state.
@@ -990,6 +1026,18 @@ export class StateManager {
 
         await this.globalState.update(MODEL_CONFIGS_KEY, configs);
     }
+
+     //== Performance Config Management ==//
+
+    public async getPerformanceConfig(): Promise<PerformanceConfig> {
+        const savedConfig = this.globalState.get<Partial<PerformanceConfig>>(PERFORMANCE_CONFIG_KEY, {});
+        // 合并已保存的配置和默认配置，确保所有字段都有值
+        return { ...DEFAULT_PERFORMANCE_CONFIG, ...savedConfig };
+    }
+
+    public async savePerformanceConfig(config: PerformanceConfig): Promise<void> {
+        await this.globalState.update(PERFORMANCE_CONFIG_KEY, config);
+    }
 }
 
 
@@ -999,7 +1047,7 @@ export class StateManager {
 // src/extension/agents/AgentContext.ts (修改后完整文件)
 
 import * as vscode from 'vscode';
-import { ModelConfig } from '../../common/types';
+import { ModelConfig, PerformanceConfig } from '../../common/types';
 import { LLMService } from '../services/LLMService';
 import { AgentLogger } from '../services/logging';
 import { StatsTracker } from '../services/StatsTracker'; // <-- 新增 import
@@ -1015,6 +1063,7 @@ export interface AgentContext {
     logger: AgentLogger;
     modelConfig: ModelConfig;
     statsTracker: StatsTracker; // <-- 新增
+    performanceConfig: PerformanceConfig; // 新增
 
     // 可选的运行目录，用于记录详细的过程文件。
     // 如果提供了这个目录，执行器等组件可以将其中间产物写入文件。
@@ -1206,7 +1255,7 @@ export class MapReduceExecutor {
     constructor(private readonly context: AgentContext) { }
 
     public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<ExecutorResult> {
-        const { logger, llmService, modelConfig, runDir, statsTracker } = this.context; // <-- 获取 statsTracker
+        const { logger, llmService, modelConfig, runDir, statsTracker, performanceConfig } = this.context;
         let tokenizer: Tiktoken | null = null;
 
         try {
@@ -1233,7 +1282,7 @@ export class MapReduceExecutor {
             const allFiles = await Promise.all(fileDataPromises);
             const totalTokensInModule = allFiles.reduce((sum, file) => sum + file.tokenCount, 0);
 
-            const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || 12000;
+            const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || performanceConfig.maxTokensPerBatch;
             const batches: { files: FileData[], tokenCount: number }[] = [];
             let currentBatch: FileData[] = [];
             let currentBatchTokens = 0;
@@ -1536,14 +1585,16 @@ interface PromptsCollection {
 }
 
 export class ProjectDocumentationOrchestrator {
-    private maxTokensForDirectAnalysis: number = 18000;
+    private maxTokensForDirectAnalysis!: number;
     private tokenizer!: Tiktoken;
     private runDir!: vscode.Uri;
 
     constructor(
         private readonly context: AgentContext,
         private readonly prompts: PromptsCollection
-    ) { }
+    ) {
+        this.maxTokensForDirectAnalysis = this.context.performanceConfig.maxTokensForDirectAnalysis;
+    }
 
 
     public async run(runId: string, sourcePath: string) {
@@ -2059,13 +2110,72 @@ import * as vscode from 'vscode';
 import { CodeWikiViewProvider } from './CodeWikiViewProvider';
 import { StateManager } from './StateManager';
 import { LLMService } from './services/LLMService';
-import { AgentService } from './services/AgentService'; // <-- 新的 import
+import { AgentService } from './services/AgentService';
+
+/**
+ * 检查并确保提示词文件已复制到用户工作区的 .codewiki 目录中。
+ * 如果 .codewiki 目录或其中的提示词文件不存在，则会创建它们。
+ * @param context 扩展上下文，用于获取插件的安装路径。
+ */
+async function ensurePromptsAreCopied(context: vscode.ExtensionContext): Promise<void> {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+        // 没有打开的工作区，无需执行任何操作
+        return;
+    }
+    const workspaceRoot = workspaceFolders[0].uri;
+    const codewikiDir = vscode.Uri.joinPath(workspaceRoot, '.codewiki');
+    const sourcePromptsDir = vscode.Uri.joinPath(context.extensionUri, 'dist', 'prompts');
+
+    try {
+        // 检查 .codewiki 目录是否存在
+        await vscode.workspace.fs.stat(codewikiDir);
+    } catch (error) {
+        // 如果目录不存在 (FileNotFound error)，则创建它
+        if (error instanceof vscode.FileSystemError && error.code === 'FileNotFound') {
+            console.log("'.codewiki' directory not found. Creating it and copying prompts...");
+            await vscode.workspace.fs.createDirectory(codewikiDir);
+        } else {
+            // 对于其他错误，打印并重新抛出
+            console.error("Error checking .codewiki directory:", error);
+            throw error;
+        }
+    }
+
+    // 无论目录是已存在还是刚创建，都检查并复制所有提示词文件
+    try {
+        const bundledPromptFiles = await vscode.workspace.fs.readDirectory(sourcePromptsDir);
+        for (const [fileName, fileType] of bundledPromptFiles) {
+            if (fileType === vscode.FileType.File) {
+                const sourceUri = vscode.Uri.joinPath(sourcePromptsDir, fileName);
+                const targetUri = vscode.Uri.joinPath(codewikiDir, fileName);
+
+                try {
+                    // 尝试访问目标文件，如果不存在则会抛出错误
+                    await vscode.workspace.fs.stat(targetUri);
+                } catch {
+                    // 文件不存在，执行复制操作
+                    console.log(`Prompt file '${fileName}' not found in .codewiki. Copying...`);
+                    await vscode.workspace.fs.copy(sourceUri, targetUri);
+                }
+            }
+        }
+    } catch (e) {
+        console.error("Failed to copy prompt files:", e);
+        vscode.window.showErrorMessage("CodeWiki: Failed to initialize required prompt files. Please try reloading the window.");
+    }
+}
+
 
 export async function activate(context: vscode.ExtensionContext) {
+    // --- 新增：在所有服务初始化之前，确保提示词已就绪 ---
+    await ensurePromptsAreCopied(context);
+    // --------------------------------------------------
+
     // --- 服务初始化 ---
     const stateManager = new StateManager(context.globalState);
     const llmService = new LLMService();
-    const agentService = new AgentService(llmService); // <-- 创建 AgentService
+    const agentService = new AgentService(llmService, stateManager); 
 
     // 获取默认模型并初始化服务
     const modelConfigs = await stateManager.getModelConfigs();
@@ -2077,6 +2187,10 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     // --- 结束服务初始化 ---
 
+    // 首次激活时，也应用一次性能配置
+    const perfConfig = await stateManager.getPerformanceConfig();
+    llmService.concurrencyLimit = perfConfig.concurrencyLimit;
+    llmService.minInterval = perfConfig.minInterval;
 
     const provider = new CodeWikiViewProvider(context.extensionUri, context, agentService); // <-- 注入 AgentService
 
@@ -2112,7 +2226,8 @@ export function deactivate() {}
 
 import * as vscode from 'vscode';
 import { v4 as uuidv4 } from 'uuid';
-import { ModelConfig, AgentPlan } from '../../common/types';
+import { ModelConfig, AgentPlan, PerformanceConfig } from '../../common/types';
+import { StateManager } from '../StateManager';
 import { AgentContext } from '../agents/AgentContext';
 import { ProjectDocumentationOrchestrator } from '../agents/orchestrators/ProjectDocumentationOrchestrator';
 import { ToolChainExecutor } from '../agents/executors/ToolChainExecutor';
@@ -2190,7 +2305,8 @@ export class AgentService {
     private toolRegistry: ToolRegistry;
     private activeRuns = new Map<string, { logger: AgentLogger }>();
 
-    constructor(private llmService: LLMService) {
+    // 注入 StateManager 以获取配置
+    constructor(private llmService: LLMService, private stateManager: StateManager) {
         this.toolRegistry = new ToolRegistry(this.llmService);
     }
 
@@ -2250,6 +2366,13 @@ export class AgentService {
             }
         });
 
+        // 从 StateManager 获取最新的性能配置
+        const performanceConfig = await this.stateManager.getPerformanceConfig();
+
+        // 在运行前更新 LLMService 的参数
+        this.llmService.concurrencyLimit = performanceConfig.concurrencyLimit;
+        this.llmService.minInterval = performanceConfig.minInterval;
+
         const statsTracker = new StatsTracker();
 
         const context: AgentContext = {
@@ -2257,7 +2380,8 @@ export class AgentService {
             llmService: this.llmService,
             toolRegistry: this.toolRegistry,
             modelConfig,
-            statsTracker // 注入到上下文中
+            statsTracker,
+            performanceConfig  // 注入到上下文中
 
         };
 
@@ -2352,13 +2476,21 @@ export class AgentService {
     ) {
         const logger = new WebviewLogger(webview);
         const statsTracker = new StatsTracker(); // <-- 为 webview action 也创建 tracker
+        const performanceConfig = await this.stateManager.getPerformanceConfig();
+
+        // 在运行前更新 LLMService 的参数
+        this.llmService.concurrencyLimit = performanceConfig.concurrencyLimit;
+        this.llmService.minInterval = performanceConfig.minInterval;
+        
         const context: AgentContext = {
             logger,
             llmService: this.llmService,
             toolRegistry: this.toolRegistry,
             modelConfig,
             statsTracker,
+            performanceConfig, // <-- 将获取到的配置添加到上下文中
         };
+
         const runId = uuidv4();
 
         try {
@@ -2456,12 +2588,15 @@ export class LLMService {
     private lastRequestTime = 0;
 
     // --- 配置 ---
-    // 每秒最多发送1个请求（1 RPS），设置为1500ms以提供缓冲
-    private readonly minInterval = 10000;
-    // 最大并发请求数，防止过多请求同时进行
-    private readonly concurrencyLimit = 10;
+    public minInterval: number;
+    public concurrencyLimit: number;
 
-    constructor() { }
+    constructor() {
+        // 在构造函数中设置一个临时的默认值，它们将被 StateManager 的值覆盖
+        this.minInterval = 10000;
+        this.concurrencyLimit = 10;
+    }
+
 
     public async createModel(options: CreateModelOptions): Promise<BaseChatModel> {
         const { modelConfig, temperature = 0.7, streaming = false } = options;
@@ -3481,12 +3616,14 @@ export class AgentRunBlock {
     private stepElementsCache: Map<string, HTMLElement> = new Map();
     private executionStepsOuterContainer: HTMLElement | null = null; // Cache this
     private runId: string | null = null;
+    private onCancel?: () => void; // 新增 onCancel 属性
 
     constructor(
         container: HTMLElement,
         // 构造函数现在可以接收一个 AgentPlan（用于新的运行）或一个 AgentRunRecord（用于从历史恢复）
         planOrRecord: AgentPlan | AgentRunRecord,
-        onExecute?: (params: Record<string, any>) => void
+        onExecute?: (params: Record<string, any>) => void,
+        onCancel?: () => void // 在构造函数中接收回调
     ) {
         this.element = container;
         this.element.className = 'agent-run-block';
@@ -3514,10 +3651,12 @@ export class AgentRunBlock {
                 return [key, fullStepState];
             }));
             this.onExecute = null; // 历史记录是只读的
+            this.onCancel = undefined; // 历史记录没有取消功能
         } else {
             // 开始一个新的运行
             this.plan = planOrRecord;
             this.onExecute = onExecute || null;
+            this.onCancel = onCancel; // 保存回调
             this.status = 'planning';
         }
 
@@ -4272,7 +4411,13 @@ export class AgentRunBlock {
                     return;
                 }
                 if (cancelBtn) {
-                    this.element.remove();
+                    // 如果 onCancel 回调存在，就调用它
+                    if (this.onCancel) {
+                        this.onCancel();
+                    } else {
+                        // 否则，作为后备，只移除元素（不应该发生）
+                        this.element.remove();
+                    }
                     return;
                 }
                 if (stopBtn) {
@@ -4357,19 +4502,19 @@ const COMMAND_TREE: (CommandNode | CommandLeaf)[] = [
                 id: 'docgen-project',
                 name: 'DocGen-Project',
                 agentId: 'docgen-project',
-                description: '为整个项目生成高级设计文档'
+                description: '生成项目级软件实现设计文档'
             },
             {
                 id: 'docgen-module-direct',
                 name: 'DocGen-Module-Direct',
                 agentId: 'docgen-module-direct',
-                description: '对小模块进行直接、全面的分析'
+                description: '采用直接分析的方式，生成模块级详细设计文档'
             },
             {
                 id: 'docgen-module-mapreduce',
                 name: 'DocGen-Module-MapReduce',
                 agentId: 'docgen-module-mapreduce',
-                description: '对大模块进行分批摘要总结分析'
+                description: '对大模块进行分批摘要总结分析，生成模块级详细设计文档'
             }
         ]
     },
@@ -4973,6 +5118,13 @@ button.streaming, .chat-sticky-bottom button[data-action="send-or-save"].streami
     margin-bottom: 5px;
     font-size: 0.9em;
     color: var(--vscode-descriptionForeground);
+}
+
+.form-group-description {
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+    margin-top: 5px;
+    margin-bottom: 10px;
 }
 
 .config-form input {
@@ -6005,6 +6157,85 @@ button:hover {
     color: var(--vscode-editor-foreground);
 }
 
+/*====== Chat View Empty State ======*/
+.chat-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    padding: 20px;
+    box-sizing: border-box;
+    text-align: center;
+    color: var(--vscode-descriptionForeground);
+}
+
+.chat-empty-state .empty-state-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+    color: var(--vscode-editor-foreground);
+}
+
+.chat-empty-state .empty-state-icon .codicon {
+    font-size: 96px; /* 这直接应用到了 <i> 元素上 */
+}
+
+.chat-empty-state h2 {
+    margin: 0 0 8px 0;
+    font-size: 1.5em;
+    font-weight: 600;
+    color: var(--vscode-editor-foreground);
+}
+
+.chat-empty-state p {
+    margin: 0 0 24px 0;
+    font-size: 1.1em;
+}
+
+.example-prompts {
+    width: 100%;
+    max-width: 500px;
+}
+
+.example-prompts .example-prompt-title {
+    margin-bottom: 12px;
+    font-weight: bold;
+}
+
+.example-prompts .example-prompt {
+    background-color: var(--vscode-sideBar-sectionHeader-background);
+    border: 1px solid var(--vscode-editorGroup-border);
+    padding: 12px;
+    border-radius: 5px;
+    margin-bottom: 8px;
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.95em;
+    text-align: left;
+}
+
+.example-prompts .example-prompt code {
+    background-color: var(--vscode-textCodeBlock-background);
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+
+/* 1. 隐藏顶部工具栏中的 "Prompts" 导航图标 */
+#nav-prompts {
+    display: none;
+}
+
+/* 2. 隐藏聊天视图中 "Prompt:" 的标签和下拉选择器 */
+.chat-quick-actions label[for="prompt-selector"],
+#prompt-selector {
+    display: none;
+}
+
+/* 3. (可选但推荐) 隐藏 Focus Editor 视图中的 "Prompt:" 标签和下拉选择器 */
+.focus-editor-container .chat-quick-actions label[for="prompt-selector"],
+.focus-editor-container #prompt-selector {
+    display: none;
+}
+
 --------------------------------------------------------------------------------
 
 --- file_path: webview/main.ts ---
@@ -6025,9 +6256,8 @@ import { ChatView } from './ChatView';
 import { SettingsView } from './SettingsView';
 import { WelcomeView } from './WelcomeView';
 import { ChatHistoryView } from './ChatHistoryView';
-import { PromptManagerView } from './PromptManagerView';
-import { PromptEditorView } from './PromptEditorView';
 import { FocusEditorView } from './FocusEditorView';
+import { PerformanceSettingsView } from './PerformanceSettingsView';
 
 export class App {
     private chatView: ChatView;
@@ -6035,8 +6265,8 @@ export class App {
     private settingsView: SettingsView;
     private welcomeView: WelcomeView;
     private chatHistoryView: ChatHistoryView;
-    private promptManagerView: PromptManagerView;
-    private promptEditorView: PromptEditorView;
+    private performanceSettingsView: PerformanceSettingsView;
+
 
     constructor(private readonly parent: HTMLElement) {
         this.parent.innerHTML = this.render();
@@ -6047,9 +6277,8 @@ export class App {
             this.parent.querySelector('#view-history') as HTMLElement,
             this.navigateTo.bind(this)
         );
-        this.promptManagerView = new PromptManagerView(this.parent.querySelector('#view-prompts') as HTMLElement);
-        this.promptEditorView = new PromptEditorView(this.parent.querySelector('#view-prompt-editor') as HTMLElement);
         this.settingsView = new SettingsView(this.parent.querySelector('#view-settings') as HTMLElement);
+        this.performanceSettingsView = new PerformanceSettingsView(this.parent.querySelector('#view-performance-settings') as HTMLElement);
     }
 
     public initialize() {
@@ -6070,6 +6299,7 @@ export class App {
         this.parent.querySelector('#nav-history')?.addEventListener('click', () => this.navigateTo('history'));
         this.parent.querySelector('#nav-prompts')?.addEventListener('click', () => this.navigateTo('prompts'));
         this.parent.querySelector('#nav-settings')?.addEventListener('click', () => this.navigateTo('settings'));
+        this.parent.querySelector('#nav-performance-settings')?.addEventListener('click', () => this.navigateTo('performance-settings'));
 
         // Listen for messages from the extension host
         window.addEventListener('message', event => {
@@ -6078,22 +6308,12 @@ export class App {
                 case 'initialize':
                     this.chatView.setConversations(message.payload.conversations);
                     this.chatHistoryView.setConversations(message.payload.conversations);
-                    this.promptManagerView.update(message.payload.prompts);
-                    this.chatView.setPrompts(message.payload.prompts);
+                    // this.promptManagerView.update(message.payload.prompts);
+                    // this.chatView.setPrompts(message.payload.prompts);
                     this.chatView.setModelConfigs(message.payload.modelConfigs);
                     this.settingsView.setModelConfigs(message.payload.modelConfigs);
-                    break;
-                case 'showPromptEditor':
-                    this.navigateTo('prompt-editor', message.payload);
-                    break;
-                case 'showPromptManager':
-                    this.navigateTo('prompts');
-                    break;
-                case 'updatePrompts':
-                    this.promptManagerView.update(message.payload);
-                    this.chatView.setPrompts(message.payload);
-                    if (this.focusEditorView) {
-                        this.focusEditorView.setPrompts(message.payload);
+                    if (message.payload.performanceConfig) {
+                        this.performanceSettingsView.setPerformanceConfig(message.payload.performanceConfig);
                     }
                     break;
                 case 'setActiveConversation':
@@ -6160,15 +6380,14 @@ export class App {
 
         let activeNav = view;
 
+        if (view === 'performance-settings') {
+            activeNav = 'performance-settings';
+        } else if (view === 'settings') {
+            activeNav = 'settings';
+        }
+
         if (view === 'chat' && typeof data === 'string') {
             vscode.postMessage({ command: 'loadConversation', payload: { id: data } });
-        } else if (view === 'prompt-editor') {
-            activeNav = 'prompts';
-            const editorContainer = this.parent.querySelector('#view-prompt-editor') as HTMLElement;
-            if (editorContainer) {
-                editorContainer.style.display = 'block';
-            }
-            this.promptEditorView.show(data?.prompt);
         } else if (view === 'focus-editor') {
             const container = this.parent.querySelector('#view-focus-editor') as HTMLElement;
             if (!this.focusEditorView) {
@@ -6192,34 +6411,46 @@ export class App {
             return; // Skip nav update for focus editor
         }
 
-        if (view !== 'prompt-editor') {
-            const targetView = this.parent.querySelector(`#view-${view}`);
-            if (targetView) {
-                (targetView as HTMLElement).style.display = 'flex';
-            }
+        // 找到目标视图并显示它
+        const targetView = this.parent.querySelector(`#view-${view}`);
+        if (targetView) {
+            // --- 确保这里是 'flex' ---
+            (targetView as HTMLElement).style.display = 'flex';
+        } else {
+            // 如果找不到视图，打印一个错误，这有助于调试
+            console.error(`NavigateTo: Could not find view with id #view-${view}`);
         }
 
+        // 更新顶部导航栏图标的激活状态
         this.parent.querySelectorAll('.nav-icon').forEach(icon => icon.classList.remove('active'));
-        this.parent.querySelector(`#nav-${activeNav}`)?.classList.add('active');
+        const navIcon = this.parent.querySelector(`#nav-${activeNav}`);
+        if (navIcon) {
+            navIcon.classList.add('active');
+        } else {
+            console.error(`NavigateTo: Could not find nav icon with id #nav-${activeNav}`);
+        }
     }
 
     private render(): string {
+        // 更新工具栏 HTML
         return `
             <div class="top-toolbar">
                 <div id="nav-new-chat" class="nav-icon" title="New Chat"><i class="codicon codicon-add"></i></div>
                 <div class="nav-separator"></div>
                 <div id="nav-chat" class="nav-icon" title="Chat"><i class="codicon codicon-comment-discussion"></i></div>
                 <div id="nav-history" class="nav-icon" title="History"><i class="codicon codicon-history"></i></div>
-                <div id="nav-prompts" class="nav-icon" title="Prompts"><i class="codicon codicon-symbol-keyword"></i></div>
-                <div id="nav-settings" class="nav-icon" title="Settings"><i class="codicon codicon-settings-gear"></i></div>
+                <!-- <div id="nav-prompts" class="nav-icon" title="Prompts"><i class="codicon codicon-symbol-keyword"></i></div> -->
+                <div id="nav-settings" class="nav-icon" title="Model Settings"><i class="codicon codicon-server-environment"></i></div>
+                <div id="nav-performance-settings" class="nav-icon" title="Performance Settings"><i class="codicon codicon-settings-gear"></i></div>
             </div>
             <div class="main-content">
                 <div id="view-welcome" class="view"></div>
                 <div id="view-chat" class="view"></div>
                 <div id="view-history" class="view"></div>
-                <div id="view-prompts" class="view"></div>
-                <div id="view-prompt-editor" class="view"></div>
+                <!-- <div id="view-prompts" class="view"></div> -->
+                <!-- <div id="view-prompt-editor" class="view"></div> -->
                 <div id="view-settings" class="view"></div>
+                <div id="view-performance-settings" class="view"></div>
                 <div id="view-focus-editor" class="view"></div>
             </div>
         `;
@@ -6385,9 +6616,16 @@ export class ChatView {
 
     public setConversations(conversations: Conversation[]) {
         if (conversations.length > 0) {
-            const activeConversation = conversations[conversations.length - 1];
-            this.messages = activeConversation.messages;
-            this.activeConversationId = activeConversation.id;
+            // 找到最后一个非空对话
+            const lastNonEmptyConversation = [...conversations].reverse().find(c => c.messages.length > 0);
+            if (lastNonEmptyConversation) {
+                this.messages = lastNonEmptyConversation.messages;
+                this.activeConversationId = lastNonEmptyConversation.id;
+            } else {
+                // 如果所有对话都是空的，则清空当前状态
+                this.messages = [];
+                this.activeConversationId = null;
+            }
         } else {
             this.messages = [];
         }
@@ -6508,13 +6746,31 @@ export class ChatView {
             if (command.startsWith('agent:')) {
                 if (command === 'agent:planGenerated' && this.activeAgentRunContainer) {
                     const plan: AgentPlan = payload;
+                    
+                    // 定义执行回调
                     const onExecute = (params: Record<string, any>) => {
                         vscode.postMessage({
                             command: 'agent:execute',
                             payload: { agentId: plan.agentId, parameters: params }
                         });
                     };
-                    this.activeAgentRunBlock = new AgentRunBlock(this.activeAgentRunContainer, plan, onExecute);
+
+                    // 定义取消回调
+                    const onCancel = () => {
+                        // 清理父组件的状态
+                        this.activeAgentRunBlock = null;
+                        this.activeAgentRunContainer = null;
+                        // 重新渲染，此时会因为状态已清理而显示欢迎界面
+                        this.renderMessages();
+                    };
+                    
+                    // 创建 AgentRunBlock 实例，并传入所有回调
+                    this.activeAgentRunBlock = new AgentRunBlock(
+                        this.activeAgentRunContainer, 
+                        plan, 
+                        onExecute, 
+                        onCancel // 传入新的 onCancel 回调
+                    );
                     return;
                 }
                 
@@ -6865,6 +7121,13 @@ export class ChatView {
 
     private renderMessages() {
         this.messageContainer.innerHTML = '';
+
+        // 检查是否应该显示空状态
+        if (this.messages.length === 0 && !this.activeAgentRunContainer) {
+            this.messageContainer.innerHTML = this.renderEmptyState();
+            return; // 显示空状态后直接返回
+        }
+
         this.messages.forEach((msg, index) => {
             
             if (msg.type === 'agent_run') {
@@ -6890,6 +7153,28 @@ export class ChatView {
         }
 
         this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
+    }
+
+    /**
+     * 新增：渲染聊天视图的空状态（欢迎和引导信息）。
+     * @returns 返回包含空状态内容的 HTML 字符串。
+     */
+    private renderEmptyState(): string {
+        return `
+            <div class="chat-empty-state">
+                <div class="empty-state-icon">
+                    <i class="codicon codicon-book"></i>
+                </div>
+                <h1>CodeWiki</h1>
+                <h3>您的智能软件设计助手</h3>
+                <div class="example-prompts">
+                    <div class="example-prompt-title">您可以尝试这样开始：</div>
+                    <div class="example-prompt">使用 <code>@DocGen->DocGen-Project</code> 为当前项目生成一份软件实现设计文档</div>
+                    <div class="example-prompt">使用 <code>@DocGen->DocGen-Module-Direct</code> 为模块生成详细实现设计文档</div>
+                    <div class="example-prompt">使用 <code>@DocGen->DocGen-Module-MapReduce</code> 用摘要总结迭代多轮的方式，为模块生成详细实现设计文档</div>
+                </div>
+            </div>
+        `;
     }
 
     private renderBottomInput() {
@@ -6993,12 +7278,15 @@ export class ChatView {
 
         // 2. 在消息列表中创建一个新的 div 容器，作为 AgentRunBlock 的占位符
         this.activeAgentRunContainer = document.createElement('div');
-        this.messageContainer.appendChild(this.activeAgentRunContainer);
         
-        // 确保视图滚动到底部，以便用户能看到新创建的容器（即使它现在是空的）
+        // 3. 关键：立即调用 renderMessages() 来更新视图
+        //    这将根据新的 activeAgentRunContainer 状态清除欢迎界面
+        this.renderMessages();
+        
+        // 确保视图滚动到底部，以便用户能看到新创建的容器
         this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
 
-        // 3. 向后端发送消息，请求这个 Agent 的执行计划
+        // 4. 向后端发送消息，请求这个 Agent 的执行计划
         vscode.postMessage({
             command: 'agent:getPlan',
             payload: {
@@ -7430,6 +7718,93 @@ export class FocusEditorView {
 
 }
 
+
+--------------------------------------------------------------------------------
+
+--- file_path: webview/views/PerformanceSettingsView.ts ---
+// --- file_path: webview/views/PerformanceSettingsView.ts ---
+import { PerformanceConfig } from "../../common/types";
+import { vscode } from "../vscode";
+
+export class PerformanceSettingsView {
+    private config: PerformanceConfig | null = null;
+
+    constructor(private readonly parent: HTMLElement) {
+        // 初始渲染为空，等待数据
+        this.parent.innerHTML = '';
+        this.setupEventListeners();
+    }
+
+    public setPerformanceConfig(config: PerformanceConfig) {
+        this.config = config;
+        this.render();
+    }
+
+    private setupEventListeners() {
+        this.parent.addEventListener('click', (event) => {
+            const target = event.target as HTMLElement;
+            const button = target.closest('button');
+            if (!button || !button.matches('.btn-save-perf')) return;
+
+            this.saveConfig();
+        });
+    }
+
+    private saveConfig() {
+        const form = this.parent.querySelector('#perf-config-form') as HTMLFormElement;
+        if (!form || !this.config) return;
+
+        const newConfig: PerformanceConfig = {
+            concurrencyLimit: parseInt((form.querySelector('input[name="concurrencyLimit"]') as HTMLInputElement).value, 10) || this.config.concurrencyLimit,
+            minInterval: parseInt((form.querySelector('input[name="minInterval"]') as HTMLInputElement).value, 10) || this.config.minInterval,
+            maxTokensPerBatch: parseInt((form.querySelector('input[name="maxTokensPerBatch"]') as HTMLInputElement).value, 10) || this.config.maxTokensPerBatch,
+            maxTokensForDirectAnalysis: parseInt((form.querySelector('input[name="maxTokensForDirectAnalysis"]') as HTMLInputElement).value, 10) || this.config.maxTokensForDirectAnalysis,
+        };
+
+        vscode.postMessage({ command: 'savePerformanceConfig', payload: newConfig });
+        vscode.postMessage({ command: 'info', payload: 'Performance settings saved.' });
+    }
+
+    private render() {
+        if (!this.config) {
+            this.parent.innerHTML = `<p>Loading performance settings...</p>`;
+            return;
+        }
+
+        this.parent.innerHTML = `
+            <div class="settings-container">
+                <div class="view-header">
+                    <h2>性能与限制设置</h2>
+                </div>
+                <form class="config-form" id="perf-config-form">
+                    <div class="form-group">
+                        <label for="concurrencyLimit">LLM 最大并发请求数</label>
+                        <input type="number" id="concurrencyLimit" name="concurrencyLimit" value="${this.config.concurrencyLimit}">
+                        <div class="form-group-description">同时向语言模型发送的最大请求数量。较低的值可以避免超出 API 速率限制。</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="minInterval">LLM 请求最小间隔 (毫秒)</label>
+                        <input type="number" id="minInterval" name="minInterval" value="${this.config.minInterval}">
+                        <div class="form-group-description">两次连续的 LLM 请求之间的最小时间间隔，用于控制请求频率。</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="maxTokensPerBatch">Map-Reduce 每批最大 Token 数</label>
+                        <input type="number" id="maxTokensPerBatch" name="maxTokensPerBatch" value="${this.config.maxTokensPerBatch}">
+                        <div class="form-group-description">在使用 Map-Reduce 策略分析大模块时，每个批次包含的最大 Token 数量。</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="maxTokensForDirectAnalysis">直接分析最大 Token 阈值</label>
+                        <input type="number" id="maxTokensForDirectAnalysis" name="maxTokensForDirectAnalysis" value="${this.config.maxTokensForDirectAnalysis}">
+                        <div class="form-group-description">当模块总 Token 数低于此值时，将使用直接分析策略，否则切换到 Map-Reduce。</div>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn-save-perf">保存设置</button>
+                    </div>
+                </form>
+            </div>
+        `;
+    }
+}
 
 --------------------------------------------------------------------------------
 

@@ -9,9 +9,6 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [
-    "onView:codewiki.mainView"
-  ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -28,7 +25,8 @@
         {
           "id": "codewiki.mainView",
           "type": "webview",
-          "name": "CodeWiki"
+          "name": "CodeWiki",
+          "icon": "$(book)"
         }
       ]
     },
@@ -47,6 +45,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "webpack",
     "watch": "webpack --watch",
+    "build": "npm run compile && node ./scripts/copy-assets.js",
     "lint": "eslint src --ext ts"
   },
   "devDependencies": {

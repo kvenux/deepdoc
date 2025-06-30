@@ -5,6 +5,7 @@ import { CodeWikiViewProvider } from './CodeWikiViewProvider';
 import { StateManager } from './StateManager';
 import { LLMService } from './services/LLMService';
 import { AgentService } from './services/AgentService';
+import { init } from 'tiktoken/init';
 
 /**
  * 检查并确保提示词文件已复制到用户工作区的 .codewiki 目录中。
@@ -60,8 +61,33 @@ async function ensurePromptsAreCopied(context: vscode.ExtensionContext): Promise
     }
 }
 
+// --- 新增：tiktoken 初始化函数 ---
+async function initializeTiktoken(context: vscode.ExtensionContext): Promise<void> {
+    try {
+        // 构建 WASM 文件在扩展安装目录中的绝对路径
+        const wasmUri = vscode.Uri.joinPath(context.extensionUri, 'dist', 'tiktoken_bg.wasm');
+        
+        // 读取 WASM 文件的二进制内容
+        const wasmBytes = await vscode.workspace.fs.readFile(wasmUri);
+
+        // 初始化 tiktoken
+        await init((imports) => WebAssembly.instantiate(wasmBytes, imports));
+        console.log("tiktoken initialized successfully.");
+
+    } catch (err) {
+        console.error("Failed to initialize tiktoken:", err);
+        // 这是一个严重错误，可以考虑向用户显示一个错误消息
+        vscode.window.showErrorMessage("CodeWiki: Failed to load a critical component (tiktoken). Token counting will not work.");
+        // 你可以选择在这里抛出错误，以阻止插件继续加载
+        throw err;
+    }
+}
+
 
 export async function activate(context: vscode.ExtensionContext) {
+    // --- 新增：最先执行 tiktoken 初始化 ---
+    await initializeTiktoken(context);
+
     // --- 新增：在所有服务初始化之前，确保提示词已就绪 ---
     await ensurePromptsAreCopied(context);
     // --------------------------------------------------
