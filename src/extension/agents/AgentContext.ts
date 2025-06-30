@@ -1,7 +1,7 @@
 // src/extension/agents/AgentContext.ts (修改后完整文件)
 
 import * as vscode from 'vscode';
-import { ModelConfig } from '../../common/types';
+import { ModelConfig, PerformanceConfig } from '../../common/types';
 import { LLMService } from '../services/LLMService';
 import { AgentLogger } from '../services/logging';
 import { StatsTracker } from '../services/StatsTracker'; // <-- 新增 import
@@ -17,6 +17,7 @@ export interface AgentContext {
     logger: AgentLogger;
     modelConfig: ModelConfig;
     statsTracker: StatsTracker; // <-- 新增
+    performanceConfig: PerformanceConfig; // 新增
 
     // 可选的运行目录，用于记录详细的过程文件。
     // 如果提供了这个目录，执行器等组件可以将其中间产物写入文件。

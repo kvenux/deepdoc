@@ -184,13 +184,31 @@ export class ChatView {
             if (command.startsWith('agent:')) {
                 if (command === 'agent:planGenerated' && this.activeAgentRunContainer) {
                     const plan: AgentPlan = payload;
+                    
+                    // 定义执行回调
                     const onExecute = (params: Record<string, any>) => {
                         vscode.postMessage({
                             command: 'agent:execute',
                             payload: { agentId: plan.agentId, parameters: params }
                         });
                     };
-                    this.activeAgentRunBlock = new AgentRunBlock(this.activeAgentRunContainer, plan, onExecute);
+
+                    // 定义取消回调
+                    const onCancel = () => {
+                        // 清理父组件的状态
+                        this.activeAgentRunBlock = null;
+                        this.activeAgentRunContainer = null;
+                        // 重新渲染，此时会因为状态已清理而显示欢迎界面
+                        this.renderMessages();
+                    };
+                    
+                    // 创建 AgentRunBlock 实例，并传入所有回调
+                    this.activeAgentRunBlock = new AgentRunBlock(
+                        this.activeAgentRunContainer, 
+                        plan, 
+                        onExecute, 
+                        onCancel // 传入新的 onCancel 回调
+                    );
                     return;
                 }
                 
@@ -698,12 +716,15 @@ export class ChatView {
 
         // 2. 在消息列表中创建一个新的 div 容器，作为 AgentRunBlock 的占位符
         this.activeAgentRunContainer = document.createElement('div');
-        this.messageContainer.appendChild(this.activeAgentRunContainer);
         
-        // 确保视图滚动到底部，以便用户能看到新创建的容器（即使它现在是空的）
+        // 3. 关键：立即调用 renderMessages() 来更新视图
+        //    这将根据新的 activeAgentRunContainer 状态清除欢迎界面
+        this.renderMessages();
+        
+        // 确保视图滚动到底部，以便用户能看到新创建的容器
         this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
 
-        // 3. 向后端发送消息，请求这个 Agent 的执行计划
+        // 4. 向后端发送消息，请求这个 Agent 的执行计划
         vscode.postMessage({
             command: 'agent:getPlan',
             payload: {

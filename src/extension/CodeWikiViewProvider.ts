@@ -1,7 +1,7 @@
 // src/extension/CodeWikiViewProvider.ts (修改后完整文件)
 
 import * as vscode from 'vscode';
-import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig, AgentPlan, TextChatMessage } from '../common/types';
+import { PostMessage, Conversation, ChatMessage, Prompt, ModelConfig, AgentPlan, TextChatMessage, PerformanceConfig } from '../common/types';
 import { StateManager } from './StateManager';
 import { LLMService } from './services/LLMService';
 import { AgentService } from './services/AgentService';
@@ -84,6 +84,7 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                     // --- highlight-end ---
                     const modelConfigs = await this._stateManager.getModelConfigs();
                     const prompts = await this._stateManager.getPrompts();
+                    const performanceConfig = await this._stateManager.getPerformanceConfig();
 
                     // If there are conversations, set the most recent one as active.
                     if (source === 'sidebar' && conversations.length > 0) {
@@ -97,7 +98,8 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                         payload: {
                             conversations,
                             modelConfigs,
-                            prompts
+                            prompts,
+                            performanceConfig // 发送新配置到前端
                         }
                     });
                     break;
@@ -617,6 +619,18 @@ export class CodeWikiViewProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+
+            case 'savePerformanceConfig':
+                {
+                    await this._stateManager.savePerformanceConfig(data.payload as PerformanceConfig);
+                    // 将新配置应用到 LLMService
+                    const perfConfig = await this._stateManager.getPerformanceConfig();
+                    this._llmService.concurrencyLimit = perfConfig.concurrencyLimit;
+                    this._llmService.minInterval = perfConfig.minInterval;
+                    console.log(`Performance settings updated: Concurrency=${perfConfig.concurrencyLimit}, Interval=${perfConfig.minInterval}ms`);
+                    break;
+                }
+
         }
     }
 

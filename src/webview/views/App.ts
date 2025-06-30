@@ -3,9 +3,8 @@ import { ChatView } from './ChatView';
 import { SettingsView } from './SettingsView';
 import { WelcomeView } from './WelcomeView';
 import { ChatHistoryView } from './ChatHistoryView';
-import { PromptManagerView } from './PromptManagerView';
-import { PromptEditorView } from './PromptEditorView';
 import { FocusEditorView } from './FocusEditorView';
+import { PerformanceSettingsView } from './PerformanceSettingsView';
 
 export class App {
     private chatView: ChatView;
@@ -13,8 +12,8 @@ export class App {
     private settingsView: SettingsView;
     private welcomeView: WelcomeView;
     private chatHistoryView: ChatHistoryView;
-    private promptManagerView: PromptManagerView;
-    private promptEditorView: PromptEditorView;
+    private performanceSettingsView: PerformanceSettingsView;
+
 
     constructor(private readonly parent: HTMLElement) {
         this.parent.innerHTML = this.render();
@@ -25,9 +24,8 @@ export class App {
             this.parent.querySelector('#view-history') as HTMLElement,
             this.navigateTo.bind(this)
         );
-        this.promptManagerView = new PromptManagerView(this.parent.querySelector('#view-prompts') as HTMLElement);
-        this.promptEditorView = new PromptEditorView(this.parent.querySelector('#view-prompt-editor') as HTMLElement);
         this.settingsView = new SettingsView(this.parent.querySelector('#view-settings') as HTMLElement);
+        this.performanceSettingsView = new PerformanceSettingsView(this.parent.querySelector('#view-performance-settings') as HTMLElement);
     }
 
     public initialize() {
@@ -48,6 +46,7 @@ export class App {
         this.parent.querySelector('#nav-history')?.addEventListener('click', () => this.navigateTo('history'));
         this.parent.querySelector('#nav-prompts')?.addEventListener('click', () => this.navigateTo('prompts'));
         this.parent.querySelector('#nav-settings')?.addEventListener('click', () => this.navigateTo('settings'));
+        this.parent.querySelector('#nav-performance-settings')?.addEventListener('click', () => this.navigateTo('performance-settings'));
 
         // Listen for messages from the extension host
         window.addEventListener('message', event => {
@@ -56,22 +55,12 @@ export class App {
                 case 'initialize':
                     this.chatView.setConversations(message.payload.conversations);
                     this.chatHistoryView.setConversations(message.payload.conversations);
-                    this.promptManagerView.update(message.payload.prompts);
-                    this.chatView.setPrompts(message.payload.prompts);
+                    // this.promptManagerView.update(message.payload.prompts);
+                    // this.chatView.setPrompts(message.payload.prompts);
                     this.chatView.setModelConfigs(message.payload.modelConfigs);
                     this.settingsView.setModelConfigs(message.payload.modelConfigs);
-                    break;
-                case 'showPromptEditor':
-                    this.navigateTo('prompt-editor', message.payload);
-                    break;
-                case 'showPromptManager':
-                    this.navigateTo('prompts');
-                    break;
-                case 'updatePrompts':
-                    this.promptManagerView.update(message.payload);
-                    this.chatView.setPrompts(message.payload);
-                    if (this.focusEditorView) {
-                        this.focusEditorView.setPrompts(message.payload);
+                    if (message.payload.performanceConfig) {
+                        this.performanceSettingsView.setPerformanceConfig(message.payload.performanceConfig);
                     }
                     break;
                 case 'setActiveConversation':
@@ -138,15 +127,14 @@ export class App {
 
         let activeNav = view;
 
+        if (view === 'performance-settings') {
+            activeNav = 'performance-settings';
+        } else if (view === 'settings') {
+            activeNav = 'settings';
+        }
+
         if (view === 'chat' && typeof data === 'string') {
             vscode.postMessage({ command: 'loadConversation', payload: { id: data } });
-        } else if (view === 'prompt-editor') {
-            activeNav = 'prompts';
-            const editorContainer = this.parent.querySelector('#view-prompt-editor') as HTMLElement;
-            if (editorContainer) {
-                editorContainer.style.display = 'block';
-            }
-            this.promptEditorView.show(data?.prompt);
         } else if (view === 'focus-editor') {
             const container = this.parent.querySelector('#view-focus-editor') as HTMLElement;
             if (!this.focusEditorView) {
@@ -170,34 +158,46 @@ export class App {
             return; // Skip nav update for focus editor
         }
 
-        if (view !== 'prompt-editor') {
-            const targetView = this.parent.querySelector(`#view-${view}`);
-            if (targetView) {
-                (targetView as HTMLElement).style.display = 'flex';
-            }
+        // 找到目标视图并显示它
+        const targetView = this.parent.querySelector(`#view-${view}`);
+        if (targetView) {
+            // --- 确保这里是 'flex' ---
+            (targetView as HTMLElement).style.display = 'flex';
+        } else {
+            // 如果找不到视图，打印一个错误，这有助于调试
+            console.error(`NavigateTo: Could not find view with id #view-${view}`);
         }
 
+        // 更新顶部导航栏图标的激活状态
         this.parent.querySelectorAll('.nav-icon').forEach(icon => icon.classList.remove('active'));
-        this.parent.querySelector(`#nav-${activeNav}`)?.classList.add('active');
+        const navIcon = this.parent.querySelector(`#nav-${activeNav}`);
+        if (navIcon) {
+            navIcon.classList.add('active');
+        } else {
+            console.error(`NavigateTo: Could not find nav icon with id #nav-${activeNav}`);
+        }
     }
 
     private render(): string {
+        // 更新工具栏 HTML
         return `
             <div class="top-toolbar">
                 <div id="nav-new-chat" class="nav-icon" title="New Chat"><i class="codicon codicon-add"></i></div>
                 <div class="nav-separator"></div>
                 <div id="nav-chat" class="nav-icon" title="Chat"><i class="codicon codicon-comment-discussion"></i></div>
                 <div id="nav-history" class="nav-icon" title="History"><i class="codicon codicon-history"></i></div>
-                <div id="nav-prompts" class="nav-icon" title="Prompts"><i class="codicon codicon-symbol-keyword"></i></div>
-                <div id="nav-settings" class="nav-icon" title="Settings"><i class="codicon codicon-settings-gear"></i></div>
+                <!-- <div id="nav-prompts" class="nav-icon" title="Prompts"><i class="codicon codicon-symbol-keyword"></i></div> -->
+                <div id="nav-settings" class="nav-icon" title="Model Settings"><i class="codicon codicon-server-environment"></i></div>
+                <div id="nav-performance-settings" class="nav-icon" title="Performance Settings"><i class="codicon codicon-settings-gear"></i></div>
             </div>
             <div class="main-content">
                 <div id="view-welcome" class="view"></div>
                 <div id="view-chat" class="view"></div>
                 <div id="view-history" class="view"></div>
-                <div id="view-prompts" class="view"></div>
-                <div id="view-prompt-editor" class="view"></div>
+                <!-- <div id="view-prompts" class="view"></div> -->
+                <!-- <div id="view-prompt-editor" class="view"></div> -->
                 <div id="view-settings" class="view"></div>
+                <div id="view-performance-settings" class="view"></div>
                 <div id="view-focus-editor" class="view"></div>
             </div>
         `;

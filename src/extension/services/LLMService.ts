@@ -60,12 +60,15 @@ export class LLMService {
     private lastRequestTime = 0;
 
     // --- 配置 ---
-    // 每秒最多发送1个请求（1 RPS），设置为1500ms以提供缓冲
-    private readonly minInterval = 10000;
-    // 最大并发请求数，防止过多请求同时进行
-    private readonly concurrencyLimit = 10;
+    public minInterval: number;
+    public concurrencyLimit: number;
 
-    constructor() { }
+    constructor() {
+        // 在构造函数中设置一个临时的默认值，它们将被 StateManager 的值覆盖
+        this.minInterval = 10000;
+        this.concurrencyLimit = 10;
+    }
+
 
     public async createModel(options: CreateModelOptions): Promise<BaseChatModel> {
         const { modelConfig, temperature = 0.7, streaming = false } = options;

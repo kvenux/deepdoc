@@ -293,6 +293,13 @@ button.streaming, .chat-sticky-bottom button[data-action="send-or-save"].streami
     color: var(--vscode-descriptionForeground);
 }
 
+.form-group-description {
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+    margin-top: 5px;
+    margin-bottom: 10px;
+}
+
 .config-form input {
     width: calc(100% - 20px);
     margin-bottom: 5px;

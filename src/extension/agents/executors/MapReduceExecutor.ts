@@ -53,7 +53,7 @@ export class MapReduceExecutor {
     constructor(private readonly context: AgentContext) { }
 
     public async run(runId: string, yamlContent: string, userInputs: Record<string, any>): Promise<ExecutorResult> {
-        const { logger, llmService, modelConfig, runDir, statsTracker } = this.context; // <-- 获取 statsTracker
+        const { logger, llmService, modelConfig, runDir, statsTracker, performanceConfig } = this.context;
         let tokenizer: Tiktoken | null = null;
 
         try {
@@ -80,7 +80,7 @@ export class MapReduceExecutor {
             const allFiles = await Promise.all(fileDataPromises);
             const totalTokensInModule = allFiles.reduce((sum, file) => sum + file.tokenCount, 0);
 
-            const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || 12000;
+            const MAX_TOKENS_PER_BATCH = actionPrompt.max_tokens_per_batch || performanceConfig.maxTokensPerBatch;
             const batches: { files: FileData[], tokenCount: number }[] = [];
             let currentBatch: FileData[] = [];
             let currentBatchTokens = 0;

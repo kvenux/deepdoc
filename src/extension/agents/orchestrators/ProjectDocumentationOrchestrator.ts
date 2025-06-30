@@ -49,14 +49,16 @@ interface PromptsCollection {
 }
 
 export class ProjectDocumentationOrchestrator {
-    private maxTokensForDirectAnalysis: number = 18000;
+    private maxTokensForDirectAnalysis!: number;
     private tokenizer!: Tiktoken;
     private runDir!: vscode.Uri;
 
     constructor(
         private readonly context: AgentContext,
         private readonly prompts: PromptsCollection
-    ) { }
+    ) {
+        this.maxTokensForDirectAnalysis = this.context.performanceConfig.maxTokensForDirectAnalysis;
+    }
 
 
     public async run(runId: string, sourcePath: string) {

@@ -69,7 +69,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // --- 服务初始化 ---
     const stateManager = new StateManager(context.globalState);
     const llmService = new LLMService();
-    const agentService = new AgentService(llmService); // <-- 创建 AgentService
+    const agentService = new AgentService(llmService, stateManager); 
 
     // 获取默认模型并初始化服务
     const modelConfigs = await stateManager.getModelConfigs();
@@ -81,6 +81,10 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     // --- 结束服务初始化 ---
 
+    // 首次激活时，也应用一次性能配置
+    const perfConfig = await stateManager.getPerformanceConfig();
+    llmService.concurrencyLimit = perfConfig.concurrencyLimit;
+    llmService.minInterval = perfConfig.minInterval;
 
     const provider = new CodeWikiViewProvider(context.extensionUri, context, agentService); // <-- 注入 AgentService
 

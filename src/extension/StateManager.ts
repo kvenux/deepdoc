@@ -1,9 +1,21 @@
 import * as vscode from 'vscode';
-import { Conversation, ModelConfig, Prompt } from '../common/types';
+import { Conversation, ModelConfig, Prompt, PerformanceConfig } from '../common/types';
 
 const CONVERSATIONS_KEY = 'codewiki_conversations';
 const PROMPTS_KEY = 'codewiki_prompts';
 const MODEL_CONFIGS_KEY = 'codewiki_model_configs';
+const PERFORMANCE_CONFIG_KEY = 'codewiki_performance_config'; // 新增 Key
+
+/**
+ * 默认的性能配置
+ */
+const DEFAULT_PERFORMANCE_CONFIG: PerformanceConfig = {
+    concurrencyLimit: 5,   // 默认并发数
+    minInterval: 10000,     // 默认请求间隔 1 秒
+    maxTokensPerBatch: 64000, // 默认 Map-Reduce 批处理大小
+    maxTokensForDirectAnalysis: 64000 // 默认直接分析阈值
+};
+
 
 /**
  * Manages the state of the extension, persisting data in VS Code's global state.
@@ -84,5 +96,17 @@ export class StateManager {
         }
 
         await this.globalState.update(MODEL_CONFIGS_KEY, configs);
+    }
+
+     //== Performance Config Management ==//
+
+    public async getPerformanceConfig(): Promise<PerformanceConfig> {
+        const savedConfig = this.globalState.get<Partial<PerformanceConfig>>(PERFORMANCE_CONFIG_KEY, {});
+        // 合并已保存的配置和默认配置，确保所有字段都有值
+        return { ...DEFAULT_PERFORMANCE_CONFIG, ...savedConfig };
+    }
+
+    public async savePerformanceConfig(config: PerformanceConfig): Promise<void> {
+        await this.globalState.update(PERFORMANCE_CONFIG_KEY, config);
     }
 }

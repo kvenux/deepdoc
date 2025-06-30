@@ -2,7 +2,8 @@
 
 import * as vscode from 'vscode';
 import { v4 as uuidv4 } from 'uuid';
-import { ModelConfig, AgentPlan } from '../../common/types';
+import { ModelConfig, AgentPlan, PerformanceConfig } from '../../common/types';
+import { StateManager } from '../StateManager';
 import { AgentContext } from '../agents/AgentContext';
 import { ProjectDocumentationOrchestrator } from '../agents/orchestrators/ProjectDocumentationOrchestrator';
 import { ToolChainExecutor } from '../agents/executors/ToolChainExecutor';
@@ -80,7 +81,8 @@ export class AgentService {
     private toolRegistry: ToolRegistry;
     private activeRuns = new Map<string, { logger: AgentLogger }>();
 
-    constructor(private llmService: LLMService) {
+    // 注入 StateManager 以获取配置
+    constructor(private llmService: LLMService, private stateManager: StateManager) {
         this.toolRegistry = new ToolRegistry(this.llmService);
     }
 
@@ -140,6 +142,13 @@ export class AgentService {
             }
         });
 
+        // 从 StateManager 获取最新的性能配置
+        const performanceConfig = await this.stateManager.getPerformanceConfig();
+
+        // 在运行前更新 LLMService 的参数
+        this.llmService.concurrencyLimit = performanceConfig.concurrencyLimit;
+        this.llmService.minInterval = performanceConfig.minInterval;
+
         const statsTracker = new StatsTracker();
 
         const context: AgentContext = {
@@ -147,7 +156,8 @@ export class AgentService {
             llmService: this.llmService,
             toolRegistry: this.toolRegistry,
             modelConfig,
-            statsTracker // 注入到上下文中
+            statsTracker,
+            performanceConfig  // 注入到上下文中
 
         };
 
@@ -242,13 +252,21 @@ export class AgentService {
     ) {
         const logger = new WebviewLogger(webview);
         const statsTracker = new StatsTracker(); // <-- 为 webview action 也创建 tracker
+        const performanceConfig = await this.stateManager.getPerformanceConfig();
+
+        // 在运行前更新 LLMService 的参数
+        this.llmService.concurrencyLimit = performanceConfig.concurrencyLimit;
+        this.llmService.minInterval = performanceConfig.minInterval;
+        
         const context: AgentContext = {
             logger,
             llmService: this.llmService,
             toolRegistry: this.toolRegistry,
             modelConfig,
             statsTracker,
+            performanceConfig, // <-- 将获取到的配置添加到上下文中
         };
+
         const runId = uuidv4();
 
         try {

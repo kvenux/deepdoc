@@ -29,12 +29,14 @@ export class AgentRunBlock {
     private stepElementsCache: Map<string, HTMLElement> = new Map();
     private executionStepsOuterContainer: HTMLElement | null = null; // Cache this
     private runId: string | null = null;
+    private onCancel?: () => void; // 新增 onCancel 属性
 
     constructor(
         container: HTMLElement,
         // 构造函数现在可以接收一个 AgentPlan（用于新的运行）或一个 AgentRunRecord（用于从历史恢复）
         planOrRecord: AgentPlan | AgentRunRecord,
-        onExecute?: (params: Record<string, any>) => void
+        onExecute?: (params: Record<string, any>) => void,
+        onCancel?: () => void // 在构造函数中接收回调
     ) {
         this.element = container;
         this.element.className = 'agent-run-block';
@@ -62,10 +64,12 @@ export class AgentRunBlock {
                 return [key, fullStepState];
             }));
             this.onExecute = null; // 历史记录是只读的
+            this.onCancel = undefined; // 历史记录没有取消功能
         } else {
             // 开始一个新的运行
             this.plan = planOrRecord;
             this.onExecute = onExecute || null;
+            this.onCancel = onCancel; // 保存回调
             this.status = 'planning';
         }
 
@@ -820,7 +824,13 @@ export class AgentRunBlock {
                     return;
                 }
                 if (cancelBtn) {
-                    this.element.remove();
+                    // 如果 onCancel 回调存在，就调用它
+                    if (this.onCancel) {
+                        this.onCancel();
+                    } else {
+                        // 否则，作为后备，只移除元素（不应该发生）
+                        this.element.remove();
+                    }
                     return;
                 }
                 if (stopBtn) {

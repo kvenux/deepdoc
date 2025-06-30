@@ -19,6 +19,15 @@ export interface ModelConfig {
     isDefault?: boolean;
 }
 
+/**
+ * 新增：代表性能和限制相关的配置。
+ */
+export interface PerformanceConfig {
+    concurrencyLimit: number; // LLM 并发请求数
+    minInterval: number;      // LLM 请求最小间隔 (ms)
+    maxTokensPerBatch: number; // Map-Reduce 每批最大 Token 数
+    maxTokensForDirectAnalysis: number; // 直接分析的最大 Token 阈值
+}
 
 /**
  * 新增：代表一个已完成并被持久化的 Agent 运行记录中单个步骤的状态。
