@@ -804,6 +804,13 @@ button:hover {
     margin-bottom: 5px;
 }
 
+.parameter-description {
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+    margin-bottom: 8px; 
+    font-style: italic; 
+}
+
 .parameter-item input {
     width: calc(100% - 16px);
     background-color: var(--vscode-input-background);

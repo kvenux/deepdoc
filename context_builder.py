@@ -45,6 +45,9 @@ EXCLUDE_DIRS = [
 
 # 3. 要忽略的特定文件或模式 (使用 glob 模式)
 EXCLUDE_FILES = [
+    '*.json',
+    '*.yml',
+    '*.md',
     '*.log',
     '*.lock',
     '*.svg',

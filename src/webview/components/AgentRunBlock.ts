@@ -673,7 +673,8 @@ export class AgentRunBlock {
         return `
             <div class="parameter-item">
                 <label for="param-${param.name}">${param.name}</label>
-                <input type="text" id="param-${param.name}" name="${param.name}" placeholder="${param.description}" class="${isInvalid}" value="${value}" ${isReadOnly ? 'disabled' : ''}>
+                <div class="parameter-description">${param.description}</div>
+                <input type="text" id="param-${param.name}" name="${param.name}" class="${isInvalid}" value="${value}" ${isReadOnly ? 'disabled' : ''}>
                 ${param.error ? `<div class="error-text">${param.error}</div>` : ''}
             </div>
         `;

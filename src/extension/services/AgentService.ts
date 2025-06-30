@@ -26,7 +26,14 @@ const AGENT_DEFINITIONS: Record<string, AgentPlan> = {
             { name: "分析: 并行处理模块", description: "对每个模块进行深入分析，可能使用直接或Map-Reduce策略。", promptFiles: ['module_analysis_direct.yml', 'module_analysis_mapreduce.yml'] },
             { name: "综合: 生成最终文档", description: "将所有模块的分析结果汇编成一篇完整的技术文档。", promptFiles: ['project_synthesis.yml'] }
         ],
-        parameters: [] // 此Agent无需用户输入额外参数
+        parameters: [
+            { 
+                name: 'source_path', 
+                description: '要分析的源代码根目录（相对于工作区根目录）', 
+                type: 'path',
+                value: '.' // 默认值为项目根目录
+            }
+        ]
     },
     'docgen-module-direct': {
         agentId: 'docgen-module-direct',
@@ -164,9 +171,11 @@ export class AgentService {
                         mapReduceAnalysisPrompt: await loadPromptFile(workspaceRoot, 'module_analysis_mapreduce.yml'),
                         synthesisPrompt: await loadPromptFile(workspaceRoot, 'project_synthesis.yml'),
                     };
+                    const sourcePathParam = agentPlan.parameters.find(p => p.name === 'source_path');
+                    const sourcePath = (sourcePathParam?.value as string) || '.'; // 如果未提供，则回退到默认值
                     const orchestrator = new ProjectDocumentationOrchestrator(context, projPrompts);
                     // Orchestrator 只负责执行，不负责上报最终状态
-                    await orchestrator.run(runId);
+                    await orchestrator.run(runId, sourcePath);
                     break;
                 }
 

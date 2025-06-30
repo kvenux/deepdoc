@@ -58,7 +58,9 @@ export class ProjectDocumentationOrchestrator {
         private readonly prompts: PromptsCollection
     ) { }
 
-    public async run(runId: string) {
+
+    public async run(runId: string, sourcePath: string) {
+
         this.tokenizer = get_encoding("cl100k_base");
 
         const { logger } = this.context;
@@ -75,7 +77,10 @@ export class ProjectDocumentationOrchestrator {
         await vscode.workspace.fs.createDirectory(this.runDir);
         logger.info(`日志和结果将保存在: ${this.runDir.fsPath}`);
 
-        const plan = await this.runPlanningPhase(runId);
+        logger.info(`开始分析项目文档，目标路径: '${sourcePath}'`);
+
+
+        const plan = await this.runPlanningPhase(runId, sourcePath);
         const moduleDocs = await this.runModuleAnalysisPhase(runId, plan);
         const finalDoc = await this.runSynthesisPhase(runId, plan, moduleDocs);
 
@@ -89,7 +94,9 @@ export class ProjectDocumentationOrchestrator {
         }
     }
 
-    private async runPlanningPhase(runId: string): Promise<PlannerOutput> {
+
+    private async runPlanningPhase(runId: string, sourcePath: string): Promise<PlannerOutput> {
+
         const { logger, toolRegistry, llmService, modelConfig, statsTracker } = this.context; // <-- 添加 statsTracker
         const taskId = uuidv4();
         const stepName = "规划: 分析项目结构"; // This is the stepName
@@ -103,7 +110,9 @@ export class ProjectDocumentationOrchestrator {
         }
 
         const treeTool = toolRegistry.getTool('get_directory_tree')!;
-        const fileTree = await treeTool.call({ path: '.', language: 'unknown' }) as string;
+
+        const fileTree = await treeTool.call({ path: sourcePath, language: 'unknown' }) as string;
+
         logger.onStepUpdate({ runId, taskId, type: 'input', data: { name: "文件树", content: fileTree } });
 
         const plannerLlm = await llmService.createModel({ modelConfig, temperature: 0.1 });
@@ -146,6 +155,7 @@ export class ProjectDocumentationOrchestrator {
         }
     }
 
+
     private async runModuleAnalysisPhase(runId: string, plan: PlannerOutput): Promise<ModuleDoc[]> {
         const { logger, llmService, toolRegistry } = this.context;
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri;
@@ -164,6 +174,7 @@ export class ProjectDocumentationOrchestrator {
                 return null;
             }
             try {
+                // 直接使用 modulePath，因为它已经是相对于工作区根目录的
                 const absoluteUri = vscode.Uri.joinPath(workspaceRoot, modulePath);
                 const stat = await vscode.workspace.fs.stat(absoluteUri);
                 if (stat.type !== vscode.FileType.Directory) {
@@ -178,35 +189,38 @@ export class ProjectDocumentationOrchestrator {
         });
 
         const validDirectoryModules = (await Promise.all(pathCheckPromises)).filter((m): m is Module => m !== null);
-
+        
         let modules = validDirectoryModules.map(m => ({
             ...m,
             normalizedPath: m.path.trim().replace(/^\.?[\\\/]/, '').replace(/[\\\/]$/, '')
         }));
 
-        modules.sort((a, b) => (b.normalizedPath?.length || 0) - (a.normalizedPath?.length || 0));
-
+        // BUG修复：重构去重逻辑，使其更健壮，不再依赖排序，并且避免在迭代时修改集合
         const finalModules: Module[] = [];
-        const coveredPaths = new Set<string>();
+        const candidatePaths = new Set(modules.map(m => m.normalizedPath).filter((p): p is string => !!p));
+        const pathsToRemove = new Set<string>();
 
-        for (const currentModule of modules) {
-            if (!currentModule.normalizedPath) continue;
-            let isCovered = false;
-            for (const coveredPath of coveredPaths) {
-                if (coveredPath.startsWith(currentModule.normalizedPath + '/')) {
-                    isCovered = true;
-                    break;
+        // 识别出所有作为其他路径父目录的路径
+        for (const path1 of candidatePaths) {
+            for (const path2 of candidatePaths) {
+                if (path1 !== path2 && path2.startsWith(path1 + '/')) {
+                    // path1 是 path2 的父级，所以它应该被移除
+                    pathsToRemove.add(path1);
                 }
             }
-            if (!isCovered) {
-                finalModules.push(currentModule);
-                coveredPaths.add(currentModule.normalizedPath);
-            } else {
-                logger.warn(`- 跳过模块 '${currentModule.name}' (路径: '${currentModule.path}'), 因其包含已被选中的更具体的子模块。`);
+        }
+        
+        // 从候选路径中移除所有被标记为“要移除”的父路径
+        const pathsToKeep = new Set([...candidatePaths].filter(p => !pathsToRemove.has(p)));
+
+        // 最后，根据保留的路径集合，构建最终的模块列表
+        for (const module of modules) {
+            if (module.normalizedPath && pathsToKeep.has(module.normalizedPath)) {
+                finalModules.push(module);
+            } else if (module.normalizedPath) {
+                 logger.warn(`- 跳过模块 '${module.name}' (路径: '${module.path}'), 因其是另一个更具体模块的父目录或路径无效。`);
             }
         }
-
-        finalModules.reverse();
 
         const finalPlan: PlannerOutput = {
             ...plan,
@@ -255,6 +269,7 @@ export class ProjectDocumentationOrchestrator {
         const moduleContext: AgentContext = { ...this.context, runDir: moduleAnalysisDir };
 
         const contentTool = this.context.toolRegistry.getTool('get_all_files_content') as any;
+        // 构造模块的完整路径（相对于工作区根目录）
         const allContent = await contentTool.call({ path: module.path, language }) as string;
         const tokenCount = this.tokenizer.encode(allContent).length;
 
@@ -289,6 +304,7 @@ export class ProjectDocumentationOrchestrator {
             }
         });
         try {
+            // 将完整的模块路径传递给执行器
             const result: ExecutorResult = await executor.run(runId, promptYaml, { module_path: module.path, language, task_description: module.description });
             const docContent = result.finalContent;
             const docPath = vscode.Uri.joinPath(this.runDir, `module_${module.name.replace(/[\s\/]/g, '_')}.md`);
