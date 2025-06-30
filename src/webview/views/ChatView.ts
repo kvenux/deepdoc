@@ -54,9 +54,16 @@ export class ChatView {
 
     public setConversations(conversations: Conversation[]) {
         if (conversations.length > 0) {
-            const activeConversation = conversations[conversations.length - 1];
-            this.messages = activeConversation.messages;
-            this.activeConversationId = activeConversation.id;
+            // 找到最后一个非空对话
+            const lastNonEmptyConversation = [...conversations].reverse().find(c => c.messages.length > 0);
+            if (lastNonEmptyConversation) {
+                this.messages = lastNonEmptyConversation.messages;
+                this.activeConversationId = lastNonEmptyConversation.id;
+            } else {
+                // 如果所有对话都是空的，则清空当前状态
+                this.messages = [];
+                this.activeConversationId = null;
+            }
         } else {
             this.messages = [];
         }
@@ -534,6 +541,13 @@ export class ChatView {
 
     private renderMessages() {
         this.messageContainer.innerHTML = '';
+
+        // 检查是否应该显示空状态
+        if (this.messages.length === 0 && !this.activeAgentRunContainer) {
+            this.messageContainer.innerHTML = this.renderEmptyState();
+            return; // 显示空状态后直接返回
+        }
+
         this.messages.forEach((msg, index) => {
             
             if (msg.type === 'agent_run') {
@@ -559,6 +573,28 @@ export class ChatView {
         }
 
         this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
+    }
+
+    /**
+     * 新增：渲染聊天视图的空状态（欢迎和引导信息）。
+     * @returns 返回包含空状态内容的 HTML 字符串。
+     */
+    private renderEmptyState(): string {
+        return `
+            <div class="chat-empty-state">
+                <div class="empty-state-icon">
+                    <i class="codicon codicon-book"></i>
+                </div>
+                <h1>CodeWiki</h1>
+                <h3>您的智能软件设计助手</h3>
+                <div class="example-prompts">
+                    <div class="example-prompt-title">您可以尝试这样开始：</div>
+                    <div class="example-prompt">使用 <code>@DocGen->DocGen-Project</code> 为当前项目生成一份软件实现设计文档</div>
+                    <div class="example-prompt">使用 <code>@DocGen->DocGen-Module-Direct</code> 为模块生成详细实现设计文档</div>
+                    <div class="example-prompt">使用 <code>@DocGen->DocGen-Module-MapReduce</code> 用摘要总结迭代多轮的方式，为模块生成详细实现设计文档</div>
+                </div>
+            </div>
+        `;
     }
 
     private renderBottomInput() {

@@ -1322,3 +1322,82 @@ button:hover {
     font-weight: 600;
     color: var(--vscode-editor-foreground);
 }
+
+/*====== Chat View Empty State ======*/
+.chat-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    padding: 20px;
+    box-sizing: border-box;
+    text-align: center;
+    color: var(--vscode-descriptionForeground);
+}
+
+.chat-empty-state .empty-state-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+    color: var(--vscode-editor-foreground);
+}
+
+.chat-empty-state .empty-state-icon .codicon {
+    font-size: 96px; /* 这直接应用到了 <i> 元素上 */
+}
+
+.chat-empty-state h2 {
+    margin: 0 0 8px 0;
+    font-size: 1.5em;
+    font-weight: 600;
+    color: var(--vscode-editor-foreground);
+}
+
+.chat-empty-state p {
+    margin: 0 0 24px 0;
+    font-size: 1.1em;
+}
+
+.example-prompts {
+    width: 100%;
+    max-width: 500px;
+}
+
+.example-prompts .example-prompt-title {
+    margin-bottom: 12px;
+    font-weight: bold;
+}
+
+.example-prompts .example-prompt {
+    background-color: var(--vscode-sideBar-sectionHeader-background);
+    border: 1px solid var(--vscode-editorGroup-border);
+    padding: 12px;
+    border-radius: 5px;
+    margin-bottom: 8px;
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.95em;
+    text-align: left;
+}
+
+.example-prompts .example-prompt code {
+    background-color: var(--vscode-textCodeBlock-background);
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+
+/* 1. 隐藏顶部工具栏中的 "Prompts" 导航图标 */
+#nav-prompts {
+    display: none;
+}
+
+/* 2. 隐藏聊天视图中 "Prompt:" 的标签和下拉选择器 */
+.chat-quick-actions label[for="prompt-selector"],
+#prompt-selector {
+    display: none;
+}
+
+/* 3. (可选但推荐) 隐藏 Focus Editor 视图中的 "Prompt:" 标签和下拉选择器 */
+.focus-editor-container .chat-quick-actions label[for="prompt-selector"],
+.focus-editor-container #prompt-selector {
+    display: none;
+}

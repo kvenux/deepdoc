@@ -30,19 +30,19 @@ const COMMAND_TREE: (CommandNode | CommandLeaf)[] = [
                 id: 'docgen-project',
                 name: 'DocGen-Project',
                 agentId: 'docgen-project',
-                description: '为整个项目生成高级设计文档'
+                description: '生成项目级软件实现设计文档'
             },
             {
                 id: 'docgen-module-direct',
                 name: 'DocGen-Module-Direct',
                 agentId: 'docgen-module-direct',
-                description: '对小模块进行直接、全面的分析'
+                description: '采用直接分析的方式，生成模块级详细设计文档'
             },
             {
                 id: 'docgen-module-mapreduce',
                 name: 'DocGen-Module-MapReduce',
                 agentId: 'docgen-module-mapreduce',
-                description: '对大模块进行分批摘要总结分析'
+                description: '对大模块进行分批摘要总结分析，生成模块级详细设计文档'
             }
         ]
     },
