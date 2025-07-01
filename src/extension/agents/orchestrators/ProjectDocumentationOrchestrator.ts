@@ -159,16 +159,17 @@ export class ProjectDocumentationOrchestrator {
 
 
     private async runModuleAnalysisPhase(runId: string, plan: PlannerOutput): Promise<ModuleDoc[]> {
-        const { logger, llmService, toolRegistry } = this.context;
+        const { logger, toolRegistry } = this.context;
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri;
         if (!workspaceRoot) {
             throw new Error("No workspace folder open.");
         }
 
-        const filterTaskId = uuidv4();
+        // 步骤 1: 路径验证和去重（和之前一样）
         const filterStepName = "过滤和验证模块";
+        const filterTaskId = uuidv4();
         logger.onStepStart({ runId, taskId: filterTaskId, stepName: filterStepName, status: 'running' });
-
+        // --- (这部分路径检查和去重逻辑保持不变) ---
         const pathCheckPromises = plan.modules.map(async (m) => {
             const modulePath = m.path.trim();
             if (modulePath === '.' || modulePath === './' || modulePath === '' || modulePath === '/') {
@@ -176,7 +177,6 @@ export class ProjectDocumentationOrchestrator {
                 return null;
             }
             try {
-                // 直接使用 modulePath，因为它已经是相对于工作区根目录的
                 const absoluteUri = vscode.Uri.joinPath(workspaceRoot, modulePath);
                 const stat = await vscode.workspace.fs.stat(absoluteUri);
                 if (stat.type !== vscode.FileType.Directory) {
@@ -189,76 +189,108 @@ export class ProjectDocumentationOrchestrator {
                 return null;
             }
         });
-
         const validDirectoryModules = (await Promise.all(pathCheckPromises)).filter((m): m is Module => m !== null);
-        
-        let modules = validDirectoryModules.map(m => ({
+        let modulesWithNormalizedPath = validDirectoryModules.map(m => ({
             ...m,
             normalizedPath: m.path.trim().replace(/^\.?[\\\/]/, '').replace(/[\\\/]$/, '')
         }));
-
-        // BUG修复：重构去重逻辑，使其更健壮，不再依赖排序，并且避免在迭代时修改集合
-        const finalModules: Module[] = [];
-        const candidatePaths = new Set(modules.map(m => m.normalizedPath).filter((p): p is string => !!p));
+        const finalModulesPreFilter: Module[] = [];
+        const candidatePaths = new Set(modulesWithNormalizedPath.map(m => m.normalizedPath).filter((p): p is string => !!p));
         const pathsToRemove = new Set<string>();
-
-        // 识别出所有作为其他路径父目录的路径
         for (const path1 of candidatePaths) {
             for (const path2 of candidatePaths) {
                 if (path1 !== path2 && path2.startsWith(path1 + '/')) {
-                    // path1 是 path2 的父级，所以它应该被移除
                     pathsToRemove.add(path1);
                 }
             }
         }
-        
-        // 从候选路径中移除所有被标记为“要移除”的父路径
         const pathsToKeep = new Set([...candidatePaths].filter(p => !pathsToRemove.has(p)));
-
-        // 最后，根据保留的路径集合，构建最终的模块列表
-        for (const module of modules) {
+        for (const module of modulesWithNormalizedPath) {
             if (module.normalizedPath && pathsToKeep.has(module.normalizedPath)) {
-                finalModules.push(module);
+                finalModulesPreFilter.push(module);
             } else if (module.normalizedPath) {
                  logger.warn(`- 跳过模块 '${module.name}' (路径: '${module.path}'), 因其是另一个更具体模块的父目录或路径无效。`);
             }
         }
+        
+        // 步骤 2: 对去重后的模块进行内容预计算和Token过滤
+        const contentTool = this.context.toolRegistry.getTool('get_all_files_content') as any;
+        const moduleDetailsPromises = finalModulesPreFilter.map(async (module) => {
+            const content = await contentTool.call({ path: module.path, language: plan.language }) as string;
+            const tokenCount = this.tokenizer.encode(content).length;
+            return { ...module, content, tokenCount };
+        });
+
+        const allModuleDetails = await Promise.all(moduleDetailsPromises);
+
+        const MIN_TOKEN_THRESHOLD = 1000;
+        const analyzableModules = allModuleDetails.filter(details => {
+            if (details.tokenCount < MIN_TOKEN_THRESHOLD) {
+                logger.info(`- 已过滤模块 '${details.name}' (路径: '${details.path}'), 因其 Token 数 (${details.tokenCount}) 小于 ${MIN_TOKEN_THRESHOLD}。`);
+                return false;
+            }
+            return true;
+        });
 
         const finalPlan: PlannerOutput = {
             ...plan,
-            modules: finalModules.map(({ normalizedPath, ...rest }) => rest)
+            // 只保留通过了所有过滤的模块
+            modules: analyzableModules.map(({ content, tokenCount, normalizedPath, ...rest }) => rest)
         };
 
+        // 步骤 3: 将最终确认的、过滤后的计划写入文件
         await vscode.workspace.fs.writeFile(
             vscode.Uri.joinPath(this.runDir, 'plan.json'),
             Buffer.from(JSON.stringify(finalPlan, null, 2), 'utf8')
         );
 
-
-        if (finalModules.length < plan.modules.length) {
-            const skippedCount = plan.modules.length - finalModules.length;
-            logger.info(`- 过滤完成，共跳过 ${skippedCount} 个根目录、文件路径或重叠的模块。`);
+        const originalCount = plan.modules.length;
+        const finalCount = analyzableModules.length;
+        if (finalCount < originalCount) {
+            const skippedCount = originalCount - finalCount;
+            logger.info(`- 过滤完成，共跳过 ${skippedCount} 个无效、重叠或Token过少的模块。`);
         } else {
-            logger.info(`- 所有模块路径均为有效目录且不重叠，将分析全部 ${finalModules.length} 个模块。`);
+            logger.info(`- 所有模块均有效，将分析全部 ${finalCount} 个模块。`);
+        }
+        logger.onStepUpdate({ runId, taskId: filterTaskId, type: 'output', data: { name: "最终模块列表", content: `已过滤，将分析 ${finalCount} 个模块。` } });
+        logger.onStepEnd({ runId, taskId: filterTaskId, stepName: filterStepName, status: 'completed' });
+        
+        // 如果所有模块都被过滤掉了，直接返回空数组
+        if (analyzableModules.length === 0) {
+            return [];
         }
 
-        logger.onStepUpdate({ runId, taskId: filterTaskId, type: 'output', data: { name: "唯一模块", content: `已过滤，将分析 ${finalModules.length} 个模块。` } });
-
-        logger.onStepEnd({ runId, taskId: filterTaskId, stepName: filterStepName, status: 'completed' });
-
-
+        // 步骤 4: 对过滤后的模块列表进行并行分析
         const analysisStepName = "分析: 并行处理模块";
         logger.info(`[DEBUG] Attempting to start parent step: ${analysisStepName}`);
         logger.onStepStart({ runId, stepName: analysisStepName, status: 'running' });
-        const analysisPromises = finalModules.map((module, index) =>
-            this.analyzeSingleModule(runId, module, plan.language, index + 1, finalModules.length)
+
+        const analysisPromises = analyzableModules.map((moduleWithDetails, index) =>
+            this.analyzeSingleModule(
+                runId,
+                moduleWithDetails, // 传递整个对象
+                plan.language,
+                index + 1,
+                analyzableModules.length,
+                moduleWithDetails.content,    // 传递预计算的内容
+                moduleWithDetails.tokenCount  // 传递预计算的Token数
+            )
         );
         const results = await Promise.all(analysisPromises);
-        logger.onStepEnd({ runId, stepName: analysisStepName, status: 'completed' }); // This is the parent step for module analysis
+        logger.onStepEnd({ runId, stepName: analysisStepName, status: 'completed' });
         return results;
     }
 
-    private async analyzeSingleModule(runId: string, module: Module, language: string, index: number, total: number): Promise<ModuleDoc> {
+    private async analyzeSingleModule(
+        runId: string,
+        module: Module,
+        language: string,
+        index: number,
+        total: number,
+        allContent: string, // 新增参数
+        tokenCount: number  // 新增参数
+    ): Promise<ModuleDoc> {
+    // --- highlight-end ---
         const { logger } = this.context;
         const taskId = uuidv4();
         const stepName = `分析模块: '${module.name}' (${index}/${total})`;
@@ -270,10 +302,12 @@ export class ProjectDocumentationOrchestrator {
 
         const moduleContext: AgentContext = { ...this.context, runDir: moduleAnalysisDir };
 
-        const contentTool = this.context.toolRegistry.getTool('get_all_files_content') as any;
-        // 构造模块的完整路径（相对于工作区根目录）
-        const allContent = await contentTool.call({ path: module.path, language }) as string;
-        const tokenCount = this.tokenizer.encode(allContent).length;
+        // --- highlight-start ---
+        // 移除内部的文件读取和Token计算，因为它们已经作为参数传入
+        // const contentTool = this.context.toolRegistry.getTool('get_all_files_content') as any;
+        // const allContent = await contentTool.call({ path: module.path, language }) as string;
+        // const tokenCount = this.tokenizer.encode(allContent).length;
+        // --- highlight-end ---
 
         let executor: ToolChainExecutor | MapReduceExecutor;
         let promptYaml: string;
@@ -312,9 +346,6 @@ export class ProjectDocumentationOrchestrator {
             const docPath = vscode.Uri.joinPath(this.runDir, `module_${module.name.replace(/[\s\/]/g, '_')}.md`);
             await vscode.workspace.fs.writeFile(docPath, Buffer.from(docContent, 'utf8'));
 
-
-
-            // 如果有中间文件，也作为输出文件发送
             if (result.intermediateFiles && result.intermediateFiles.length > 0) {
                 for (const file of result.intermediateFiles) {
                     logger.onStepUpdate({
@@ -326,7 +357,6 @@ export class ProjectDocumentationOrchestrator {
                     });
                 }
             }
-            // 将最终文档输出文件发送
             logger.onStepUpdate({
                 runId,
                 taskId,
@@ -341,7 +371,7 @@ export class ProjectDocumentationOrchestrator {
             const errorMessage = e instanceof Error ? e.message : String(e);
             logger.onStepEnd({ runId, taskId, stepName, status: 'failed', error: errorMessage });
 
-            throw e; // Re-throw to be caught by the main run() method's try-catch
+            throw e;
         }
     }
 
