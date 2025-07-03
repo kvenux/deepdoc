@@ -63,13 +63,18 @@ export class ToolChainExecutor {
                 await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(runDir, 'llm_request.txt'), Buffer.from(`[SYSTEM]\n${systemMessageContent}\n\n[HUMAN]\n${humanMessageContent}`, 'utf8'));
             }
 
-            const finalLlm = await llmService.createModel({ modelConfig, streaming: false, temperature: 0.7 });
+            const finalLlm = await llmService.createModel({ modelConfig, streaming: true, temperature: 0.7 });
             const finalChain = finalLlm.pipe(new StringOutputParser());
 
-            // 修复：使用 llmService.scheduleLlmCall 来遵守速率限制
-            finalResult = await llmService.scheduleLlmCall(() =>
-                finalChain.invoke([new SystemMessage(systemMessageContent), new HumanMessage(humanMessageContent)])
-            );
+            finalResult = await llmService.scheduleLlmCall(async () => {
+                const stream = await finalChain.stream([new SystemMessage(systemMessageContent), new HumanMessage(humanMessageContent)]);
+                let fullReply = '';
+                for await (const chunk of stream) {
+                    fullReply += chunk;
+                }
+                return fullReply;
+            });
+            
             console.log("finalResult", finalResult);
             // 修复：为 statsTracker 提供完整的 prompt
             statsTracker.add(systemMessageContent + "\n" + humanMessageContent, finalResult);

@@ -67,13 +67,19 @@ class FileSelectorLLMTool extends StructuredTool {
                 .pipe(new StringOutputParser());
 
             // 3. 调用子链来执行 LLM 推理
+            // 3. 调用子链来执行 LLM 推理
             console.log("Scheduling file_selector_llm_tool with task:", task_description);
-            const llmResult = await this.llmService.scheduleLlmCall(() => 
-                selectionChain.invoke({
+            const llmResult = await this.llmService.scheduleLlmCall(async () => {
+                const stream = await selectionChain.stream({
                     file_summaries,
                     task_description
-                })
-            );
+                });
+                let fullReply = '';
+                for await (const chunk of stream) {
+                    fullReply += chunk;
+                }
+                return fullReply;
+            });
 
             // 4. 解析 LLM 返回的结果
             //    LLM 可能返回一些额外的空格或换行符，我们进行清理。
