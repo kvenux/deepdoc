@@ -66,6 +66,7 @@ export class ToolChainExecutor {
             const finalLlm = await llmService.createModel({ modelConfig, streaming: true, temperature: 0.7 });
             const finalChain = finalLlm.pipe(new StringOutputParser());
 
+            // 修改此处的调用，添加重试选项
             finalResult = await llmService.scheduleLlmCall(async () => {
                 const stream = await finalChain.stream([new SystemMessage(systemMessageContent), new HumanMessage(humanMessageContent)]);
                 let fullReply = '';
@@ -73,7 +74,7 @@ export class ToolChainExecutor {
                     fullReply += chunk;
                 }
                 return fullReply;
-            });
+            }, { maxRetries: 3 }); // 明确要求重试
             
             console.log("finalResult", finalResult);
             // 修复：为 statsTracker 提供完整的 prompt

@@ -27,6 +27,10 @@ type LlmTask<T> = {
     reject: (reason?: any) => void;
 };
 
+export interface ScheduleLlmOptions {
+    maxRetries?: number;
+}
+
 async function getGoogleApiKey(): Promise<string | undefined> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders) return undefined;
@@ -127,8 +131,50 @@ export class LLMService {
      * @param task 一个返回LLM调用Promise的函数，例如 `() => llm.invoke(messages)`
      * @returns 一个在任务完成时解析的Promise
      */
-    public scheduleLlmCall<T>(task: () => Promise<T>): Promise<T> {
+    public scheduleLlmCall<T>(task: () => Promise<T>, options?: ScheduleLlmOptions): Promise<T> {
         console.log(`[LLMService] ${new Date().toISOString()} A new call was scheduled. Queue size: ${this.requestQueue.length + 1}`);
+        
+        // 默认重试配置
+        const { maxRetries = 3} = options || {};
+        const retryDelay = this.minInterval;
+
+        // 创建一个包含重试逻辑的包装器任务
+        const retryWrapper = async (): Promise<T> => {
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    const result = await task();
+
+                    // 检查特定于业务的失败条件：返回空字符串
+                    if (typeof result === 'string' && result.trim() === '') {
+                        if (attempt < maxRetries) {
+                            console.warn(`[LLMService] Attempt ${attempt} returned an empty result. Retrying in ${retryDelay}ms...`);
+                            await new Promise(resolve => setTimeout(resolve, retryDelay));
+                            continue; // 继续下一次尝试
+                        } else {
+                            // 最后一次尝试仍然是空结果，抛出错误
+                            throw new Error(`LLM returned an empty result after ${maxRetries} attempts.`);
+                        }
+                    }
+
+                    // 如果结果有效，直接返回
+                    return result;
+
+                } catch (error) {
+                    // 捕获真正的异常（如网络错误、API错误）
+                    if (attempt < maxRetries) {
+                        console.warn(`[LLMService] Attempt ${attempt} failed with error: ${error}. Retrying in ${retryDelay}ms...`);
+                        await new Promise(resolve => setTimeout(resolve, retryDelay));
+                    } else {
+                        // 所有重试都失败了，重新抛出最后的错误
+                        console.error(`[LLMService] All ${maxRetries} attempts failed.`);
+                        throw error;
+                    }
+                }
+            }
+            // 此处理论上不可达，但为满足TypeScript编译器要求
+            throw new Error("LLM call failed after all retries.");
+        };
+
         return new Promise<T>((resolve, reject) => {
             const resolvingPostProcessor = (result: T) => {
                 if (typeof result === 'string') {
@@ -137,16 +183,11 @@ export class LLMService {
                 } else if (result instanceof BaseMessage) {
                     if (typeof result.content === 'string') {
                         const processedContent = this._postProcessResponse(result.content);
-                        // --- highlight-start ---
-                        // 修复：不再使用 .copy()，而是创建一个新的 AIMessage 实例。
-                        // 这更明确，并且能解决 TypeScript 的类型推断问题。
-                        // 我们将原始消息的其他属性（如 tool_calls）也传递过去。
                         const newResult = new AIMessage({
-                            ...result, // 展开原始 result 的所有属性
-                            content: processedContent, // 覆盖 content 属性
+                            ...result,
+                            content: processedContent,
                         });
                         resolve(newResult as T);
-                        // --- highlight-end ---
                     } else {
                         resolve(result);
                     }
@@ -154,7 +195,8 @@ export class LLMService {
                     resolve(result);
                 }
             };
-            this.requestQueue.push({ task, resolve: resolvingPostProcessor, reject });
+            // 将包装后的任务推入队列，而不是原始任务
+            this.requestQueue.push({ task: retryWrapper, resolve: resolvingPostProcessor, reject });
             this.processQueue();
         });
     }

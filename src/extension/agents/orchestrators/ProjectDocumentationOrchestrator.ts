@@ -134,8 +134,7 @@ export class ProjectDocumentationOrchestrator {
                 fullReply += chunk.content;
             }
             return fullReply;
-        });
-
+        }, { maxRetries: 3 });
 
         statsTracker.add(prompt, responseContent); // 记录 Token
 
@@ -446,7 +445,7 @@ export class ProjectDocumentationOrchestrator {
                 fullReply += chunk;
             }
             return fullReply;
-        });
+        }, { maxRetries: 3 });
 
         statsTracker.add(prompt, wrapperDoc);
 

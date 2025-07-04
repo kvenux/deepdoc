@@ -164,7 +164,8 @@ export class MapReduceExecutor {
                             fullReply += chunk.content;
                         }
                         return fullReply;
-                    });
+                    }, { maxRetries: 3 }); // 为 map 阶段添加重试
+
 
                     // 在 Map 阶段的 LLM 调用后记录 Token
                     const fullMapPrompt = actionPrompt.map_prompt_template.system + "\n" + humanPrompt; // 估算，或者从 Langchain 内部获取更准确的
@@ -228,7 +229,7 @@ export class MapReduceExecutor {
                     fullReply += chunk;
                 }
                 return fullReply;
-            });
+            }, { maxRetries: 3 }); // 为 reduce 阶段添加重试
 
             const fullReducePrompt = actionPrompt.reduce_prompt_template.system + "\n" + humanReducePrompt; // 估算
             statsTracker.add(fullReducePrompt, finalContent);

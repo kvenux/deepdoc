@@ -79,7 +79,7 @@ class FileSelectorLLMTool extends StructuredTool {
                     fullReply += chunk;
                 }
                 return fullReply;
-            });
+            }, { maxRetries: 3 }); // 为工具内的LLM调用也加上重试
 
             // 4. 解析 LLM 返回的结果
             //    LLM 可能返回一些额外的空格或换行符，我们进行清理。
