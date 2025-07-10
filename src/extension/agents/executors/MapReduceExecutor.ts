@@ -103,7 +103,17 @@ export class MapReduceExecutor {
                 if (!tokenizer) throw new Error("Tokenizer not initialized.");
                 const contentBytes = await vscode.workspace.fs.readFile(uri);
                 const content = Buffer.from(contentBytes).toString('utf-8');
-                return { path: path.relative(workspaceRoot.fsPath, uri.fsPath).replace(/\\/g, '/'), content, tokenCount: tokenizer.encode(content).length };
+                
+                // 修复：根据行数计算文件类型
+                const lineCount = content.split('\n').length;
+                const fileType = lineCount > COMPLEX_FILE_LINE_THRESHOLD ? 'complex' : 'simple';
+                
+                return { 
+                    path: path.relative(workspaceRoot.fsPath, uri.fsPath).replace(/\\/g, '/'), 
+                    content, 
+                    tokenCount: tokenizer.encode(content).length,
+                    type: fileType // 修复：添加类型
+                };
             });
             const allFiles = await Promise.all(fileDataPromises);
             const totalTokensInModule = allFiles.reduce((sum, file) => sum + file.tokenCount, 0);
