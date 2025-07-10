@@ -74,7 +74,7 @@ export class ToolChainExecutor {
             // 修复：为 statsTracker 提供完整的 prompt
             statsTracker.add(systemMessageContent + "\n" + humanMessageContent, finalResult);
 
-            logger.onStepUpdate({ runId, taskId: llmTaskId, type: 'output', data: { name: "LLM响应", content: finalResult }, metadata: { type: 'markdown' } });
+            logger.onStepUpdate({ runId, taskId: llmTaskId, type: 'output', data: { name: "模块文档", content: finalResult }, metadata: { type: 'markdown' } });
             if (runDir) {
                 await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(runDir, 'llm_response.md'), Buffer.from(finalResult, 'utf8'));
             }

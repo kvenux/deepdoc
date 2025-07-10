@@ -311,7 +311,7 @@ export class ChatView {
      * @param maxLength 最大字符串长度，默认为 500
      * @returns 处理后的新对象
      */
-    private truncateLongStrings(obj: any, maxLength: number = 500): any {
+    private truncateLongStrings(obj: any, maxLength: number = 30000): any {
         if (!obj) {
             return obj;
         }

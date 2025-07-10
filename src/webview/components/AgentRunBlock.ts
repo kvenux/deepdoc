@@ -179,19 +179,23 @@ export class AgentRunBlock {
 
             const stepElement = this.stepElementsCache.get(stepKey);
             if (stepElement) {
-                const contentWrapper = stepElement.querySelector(stepElement.classList.contains('sub-step') ? '.sub-step-content-wrapper' : '.step-content-wrapper') as HTMLElement;
-                if (contentWrapper) {
-                    const logsContainer = contentWrapper.querySelector('.logs-wrapper') as HTMLElement;
-                    if (logsContainer) {
-                        const newLogElement = this.renderLogItem({ type: update.type, data: update.data, metadata: update.metadata });
+                const logsContainer = stepElement.querySelector('.logs-wrapper') as HTMLElement;
+                if (logsContainer) {
+                    // 2.【核心修改】放弃增量 append，改为完全重绘
+                    
+                    // 先清空所有旧的日志卡片
+                    logsContainer.innerHTML = ''; 
+
+                    // 3. 遍历最新的日志数组，重新创建并添加每一个日志卡片
+                    stepState.logs.forEach(log => {
+                        // 调用 renderLogItem 生成一个全新的、干净的 DOM 元素
+                        const newLogElement = this.renderLogItem(log);
+                        // 添加到容器中，这次绝对不会嵌套
                         logsContainer.appendChild(newLogElement);
-                        // Potentially scroll the logs container if needed
-                        logsContainer.scrollTop = logsContainer.scrollHeight;
-                    } else {
-                        // Logs container doesn't exist, might need to re-render step internals for this step
-                        // This case should be rare if renderStepInternals always creates it.
-                        contentWrapper.innerHTML = this.renderStepInternals(stepState);
-                    }
+                    });
+
+                    // 4. (可选但推荐) 滚动到底部，以便看到最新的日志
+                    logsContainer.scrollTop = logsContainer.scrollHeight;
                 }
             }
         }
