@@ -117,7 +117,7 @@ export class ProjectDocumentationOrchestrator {
 
         logger.onStepUpdate({ runId, taskId, type: 'input', data: { name: "文件树", content: fileTree } });
 
-        const plannerLlm = await llmService.createModel({ modelConfig, temperature: 0.1 });
+        const plannerLlm = await llmService.createModel({ modelConfig, temperature: 0.1, streaming: true });
         const plannerPromptTemplate = (yaml.load(this.prompts.plannerPrompt) as any).llm_prompt_template.human;
         const prompt = plannerPromptTemplate.replace('{file_tree}', fileTree);
         logger.onStepUpdate({ runId, taskId, type: 'llm-request', data: { system: "...", human: prompt } });
@@ -127,8 +127,14 @@ export class ProjectDocumentationOrchestrator {
             Buffer.from(prompt, 'utf8')
         );
 
-        const response = await llmService.scheduleLlmCall(() => plannerLlm.invoke([new HumanMessage(prompt)]));
-        const responseContent = response.content as string;
+        const responseContent = await llmService.scheduleLlmCall(async () => {
+            const stream = await plannerLlm.stream([new HumanMessage(prompt)]);
+            let fullReply = '';
+            for await (const chunk of stream) {
+                fullReply += chunk.content;
+            }
+            return fullReply;
+        }, { maxRetries: 3 });
 
         statsTracker.add(prompt, responseContent); // 记录 Token
 
@@ -290,7 +296,6 @@ export class ProjectDocumentationOrchestrator {
         allContent: string, // 新增参数
         tokenCount: number  // 新增参数
     ): Promise<ModuleDoc> {
-    // --- highlight-end ---
         const { logger } = this.context;
         const taskId = uuidv4();
         const stepName = `分析模块: '${module.name}' (${index}/${total})`;
@@ -415,7 +420,7 @@ export class ProjectDocumentationOrchestrator {
         logger.onStepStart({ runId, taskId, stepName, status: 'running' });
 
         // --- 步骤 1: 生成文档框架 ---
-        const synthesisLlm = await llmService.createModel({ modelConfig, temperature: 0.4, streaming: false });
+        const synthesisLlm = await llmService.createModel({ modelConfig, temperature: 0.4, streaming: true });
         const synthesisPromptTemplate = (yaml.load(this.prompts.synthesisPrompt) as any).llm_prompt_template.human;
         const moduleOverviews = moduleDocs.map(m => `- **${m.name} (${m.path})**: ${m.description}`).join('\n');
         
@@ -433,7 +438,15 @@ export class ProjectDocumentationOrchestrator {
         );
 
         const chain = synthesisLlm.pipe(new StringOutputParser());
-        const wrapperDoc = await chain.invoke([new HumanMessage(prompt)]);
+        const wrapperDoc = await llmService.scheduleLlmCall(async () => {
+            const stream = await chain.stream([new HumanMessage(prompt)]);
+            let fullReply = '';
+            for await (const chunk of stream) {
+                fullReply += chunk;
+            }
+            return fullReply;
+        }, { maxRetries: 3 });
+
         statsTracker.add(prompt, wrapperDoc);
 
          // 步骤 2: 准备拼接模块文档
